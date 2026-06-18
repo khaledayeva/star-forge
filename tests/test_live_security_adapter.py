@@ -11,6 +11,8 @@ import importlib.util
 import io
 import json
 import os
+import subprocess
+import sys
 import tempfile
 import traceback
 from pathlib import Path
@@ -72,6 +74,24 @@ def init_project(project: Path) -> None:
         + f"| SF-1 | Build security adapter test app | ready | solo | src/app.py | - | {REAL_VERIFY} | - |\n",
         encoding="utf-8",
     )
+
+
+def commit_all(project: Path, message: str = "snapshot") -> str:
+    subprocess.run(["git", "add", "."], cwd=str(project), check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    subprocess.run(
+        ["git", "-c", "user.name=Star Forge Test", "-c", "user.email=star-forge@example.invalid", "commit", "-m", message],
+        cwd=str(project),
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    proc = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(project), check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    return proc.stdout.strip()
+
+
+def force_add(project: Path, rel_path: str) -> None:
+    subprocess.run(["git", "add", "-f", rel_path], cwd=str(project), check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
 
 def read_fixture(name: str) -> dict[str, Any]:
@@ -383,6 +403,165 @@ def test_clean_trusted_report_passes_security_handoff_and_proof() -> None:
             "--artifact", str(manifest), "--strict",
         ])
         assert_star_pass(code, proof_payload)
+
+
+def test_record_uses_trusted_star_forge_from_unrelated_cwd() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp).resolve()
+        project = root / "project"
+        init_project(project)
+        clean = copy.deepcopy(read_fixture("codex-security-report.json"))
+        clean["findings"] = []
+        report = write_report(project, clean, "clean.json")
+        caller = root / "caller"
+        caller.mkdir()
+        sentinel_dir = project / "scripts"
+        sentinel_dir.mkdir(parents=True)
+        marker = root / "sentinel-ran.txt"
+        (sentinel_dir / "star_forge.py").write_text(
+            "import pathlib\n"
+            "import sys\n"
+            f"pathlib.Path({str(marker)!r}).write_text('ran\\n', encoding='utf-8')\n"
+            "sys.exit(64)\n",
+            encoding="utf-8",
+        )
+
+        proc = subprocess.run(
+            [
+                sys.executable,
+                str(ADAPTER_SCRIPT),
+                *adapter_args(project, report, profile="security-deep"),
+                "--record",
+            ],
+            cwd=str(caller),
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert not marker.exists()
+        payload = json.loads(proc.stdout)
+        assert payload["record_results"]["security_handoff_packet"]["returncode"] == 0
+        assert payload["record_results"]["security_proof"]["returncode"] == 0
+        handoff_records = star_forge.load_run_records(project, kind="security-handoff-packet", task="SF-1")
+        proof_records = star_forge.load_run_records(project, kind="security-proof", task="SF-1")
+        assert handoff_records and handoff_records[-1]["verdict"] == "PASS"
+        assert proof_records and proof_records[-1]["verdict"] == "PASS"
+
+
+def test_record_failure_blocks_security_adapter() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        init_project(project)
+        clean = copy.deepcopy(read_fixture("codex-security-report.json"))
+        clean["findings"] = []
+        report = write_report(project, clean, "clean.json")
+        original = security_adapter.STAR_FORGE
+        security_adapter.STAR_FORGE = project / "missing-star-forge.py"
+        try:
+            code, payload = run_adapter(adapter_args(project, report, profile="security-deep", extra=["--record"]))
+        finally:
+            security_adapter.STAR_FORGE = original
+        assert_adapter_fail(code, payload, "security-record")
+        assert payload["record_results"]["security_handoff_packet"]["returncode"] != 0
+        assert payload["record_results"]["security_proof"]["returncode"] != 0
+
+
+def test_commit_binding_rejects_uncommitted_source_changes() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp).resolve()
+        project = root / "project"
+        init_project(project)
+        head = commit_all(project)
+        report_payload = copy.deepcopy(read_fixture("codex-security-report.json"))
+        report_payload["findings"] = []
+        report = root / "reports" / "clean.json"
+        report.parent.mkdir(parents=True, exist_ok=True)
+        report.write_text(json.dumps(report_payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        (project / "src" / "uncommitted.py").write_text("print('new source')\n", encoding="utf-8")
+
+        code, payload = run_adapter([
+            "--project", str(project),
+            "--task", "SF-1",
+            "--profile", "security-deep",
+            "--input", str(report),
+            "--input-hash", live_common.file_sha256(report),
+            "--commit-sha", head,
+        ])
+
+        assert_adapter_fail(code, payload, "security-source-binding")
+
+
+def test_source_hash_binding_rejects_dirty_paths_after_report_hash() -> None:
+    cases = {
+        "Makefile": "deploy:\n\t@echo unsafe\n",
+        ".env.local": "LOCAL_ONLY=1\n",
+        ".npmrc": "audit=false\n",
+        "settings.local": "enabled=true\n",
+    }
+    for rel_path, contents in cases.items():
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp).resolve()
+            init_project(project)
+            clean = copy.deepcopy(read_fixture("codex-security-report.json"))
+            clean["findings"] = []
+            report = write_report(project, clean, "clean.json")
+            clean_source = live_common.compute_source_hash(project)
+            (project / rel_path).write_text(contents, encoding="utf-8")
+
+            code, payload = run_adapter(adapter_args(project, report, profile="security-deep", source_hash=clean_source))
+
+            assert_adapter_fail(code, payload, "security-source-binding")
+
+
+def test_source_hash_binding_rejects_clean_committed_lockfile_after_report_hash() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        init_project(project)
+        clean = copy.deepcopy(read_fixture("codex-security-report.json"))
+        clean["findings"] = []
+        report = write_report(project, clean, "clean.json")
+        clean_source = live_common.compute_source_hash(project)
+        (project / "uv.lock").write_text("version = 1\n", encoding="utf-8")
+        commit_all(project, "uv lock v1")
+        assert live_common.compute_source_hash(project) != clean_source
+        assert not security_adapter.source_dirty_entries(project)
+
+        code, payload = run_adapter(adapter_args(project, report, profile="security-deep", source_hash=clean_source))
+
+        assert_adapter_fail(code, payload, "security-source-binding")
+
+
+def test_source_hash_binding_rejects_tracked_generated_dir_changes_after_report_hash() -> None:
+    cases = [
+        ("build/security.js", "console.log('security build v1')\n", "console.log('security build v2')\n"),
+        ("dist/security.js", "console.log('security dist v1')\n", "console.log('security dist v2')\n"),
+        ("target/security.txt", "target security v1\n", "target security v2\n"),
+    ]
+    for rel_path, before, after in cases:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp).resolve()
+            init_project(project)
+            (project / ".gitignore").write_text("build/\ndist/\ntarget/\n", encoding="utf-8")
+            clean = copy.deepcopy(read_fixture("codex-security-report.json"))
+            clean["findings"] = []
+            report = write_report(project, clean, "clean.json")
+            tracked = project / rel_path
+            tracked.parent.mkdir(parents=True, exist_ok=True)
+            tracked.write_text(before, encoding="utf-8")
+            force_add(project, rel_path)
+            commit_all(project, f"{rel_path} v1")
+            clean_source = live_common.compute_source_hash(project)
+
+            tracked.write_text(after, encoding="utf-8")
+            commit_all(project, f"{rel_path} v2")
+            assert live_common.compute_source_hash(project) != clean_source
+            assert not security_adapter.source_dirty_entries(project)
+
+            code, payload = run_adapter(adapter_args(project, report, profile="security-deep", source_hash=clean_source))
+
+            assert_adapter_fail(code, payload, "security-source-binding")
 
 
 def main() -> int:

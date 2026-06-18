@@ -12,6 +12,7 @@ import io
 import json
 import os
 import plistlib
+import subprocess
 import sys
 import tempfile
 import traceback
@@ -24,6 +25,7 @@ if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
 SCRIPT = SCRIPTS / "star_forge.py"
+COLLECTOR_SCRIPT = SCRIPTS / "live_collectors" / "native_macos.py"
 SPEC = importlib.util.spec_from_file_location("star_forge", SCRIPT)
 assert SPEC and SPEC.loader
 star_forge = importlib.util.module_from_spec(SPEC)
@@ -317,6 +319,36 @@ def test_structured_argv_capture_and_forbidden_shell() -> None:
         assert_collector_rule(project, output, "native-macos-shell")
 
 
+def test_env_shell_wrappers_are_rejected_for_all_command_slots() -> None:
+    cases = [
+        ("--build-command", ["/usr/bin/env", "sh", "-c", "echo unsafe"]),
+        ("--run-command", ["env", "CI=1", "bash", "-c", "echo unsafe"]),
+        ("--test-command", ["/usr/bin/env", "-i", "zsh", "-c", "echo unsafe"]),
+        ("--screenshot-command", ["/usr/bin/env", "-S", f"sh -c 'touch {native_macos.SCREENSHOT_PLACEHOLDER}'"]),
+        ("--build-command", ["/usr/bin/env", "-S", "CI=1 sh -c 'echo unsafe'"]),
+        ("--run-command", ["env", "--split-string", "CI=1 bash -c 'echo unsafe'"]),
+        ("--test-command", ["/usr/bin/env", "-P", "/bin:/usr/bin", "sh", "-c", "echo unsafe"]),
+        ("--build-command", ["/usr/bin/env", "--unknown-env-option", "python3", "-c", "print('unsafe')"]),
+        ("--build-command", ["/usr/bin/env", "env", "sh", "-c", "echo unsafe"]),
+        ("--run-command", ["/usr/bin/env", "-S", "env bash -c 'echo unsafe'"]),
+        ("--test-command", ["/usr/bin/env", "CI=1", "env", "TEAM=1", "zsh", "-c", "echo unsafe"]),
+        ("--screenshot-command", ["/usr/bin/env", "CI=1"]),
+    ]
+    for option, command in cases:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp).resolve()
+            init_project(project)
+            app = make_app(project)
+            args = base_args(project, app)
+            if option in args:
+                args[args.index(option) + 1] = argv(command)
+            else:
+                args.extend([option, argv(command)])
+            code, output, _ = run_collector(args)
+            assert code == 1, (option, output)
+            assert_collector_rule(project, output, "native-macos-shell")
+
+
 def test_happy_path_prints_native_macos_proof_command_and_passes() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         project = Path(tmp).resolve()
@@ -354,6 +386,84 @@ def test_happy_path_prints_native_macos_proof_command_and_passes() -> None:
         assert proof_err == ""
         assert proof_code == 0, proof_payload
         assert proof_payload["verdict"] == "PASS", proof_payload
+
+
+def test_proof_command_uses_absolute_project_from_outside_project_cwd() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        init_project(project)
+        app = make_app(project)
+        screenshot = py_cmd(PNG_CODE, native_macos.SCREENSHOT_PLACEHOLDER)
+        args = base_args(project, app) + [
+            "--test-command", argv(py_cmd("print('tests ok')")),
+            "--screenshot-command", argv(screenshot),
+        ]
+        with chdir(ROOT):
+            code, output, err = run_collector(args)
+            assert err == ""
+            assert code == 0, output
+            proof_argv = output["proof_command_argv"]
+            assert proof_argv[proof_argv.index("--project") + 1] == str(project)
+            proof_code, proof_payload, proof_err = run_star_cli(proof_argv[2:])
+        assert proof_err == ""
+        assert proof_code == 0, proof_payload
+        assert proof_payload["verdict"] == "PASS", proof_payload
+
+
+def test_record_uses_trusted_star_forge_from_unrelated_cwd() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp).resolve()
+        project = root / "project"
+        init_project(project)
+        app = make_app(project)
+        caller = root / "caller"
+        caller.mkdir()
+        sentinel_dir = project / "scripts"
+        sentinel_dir.mkdir(parents=True)
+        marker = root / "sentinel-ran.txt"
+        (sentinel_dir / "star_forge.py").write_text(
+            "import pathlib\n"
+            "import sys\n"
+            f"pathlib.Path({str(marker)!r}).write_text('ran\\n', encoding='utf-8')\n"
+            "sys.exit(64)\n",
+            encoding="utf-8",
+        )
+
+        proc = subprocess.run(
+            [
+                sys.executable,
+                str(COLLECTOR_SCRIPT),
+                *base_args(project, app),
+                "--record",
+            ],
+            cwd=str(caller),
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert not marker.exists()
+        output = json.loads(proc.stdout)
+        assert output["record"]["returncode"] == 0
+        records = star_forge.load_run_records(project, kind="native-macos-proof", task="SF-1")
+        assert records and records[-1]["verdict"] == "PASS"
+
+
+def test_record_failure_blocks_native_macos_collection() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        init_project(project)
+        app = make_app(project)
+        original = native_macos.STAR_FORGE
+        native_macos.STAR_FORGE = project / "missing-star-forge.py"
+        try:
+            code, output, _ = run_collector(base_args(project, app) + ["--record"])
+        finally:
+            native_macos.STAR_FORGE = original
+        assert code == 1
+        assert output["record"]["returncode"] != 0
+        assert_rule(output, "native-macos-record")
 
 
 def main() -> int:

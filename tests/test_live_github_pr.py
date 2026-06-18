@@ -12,6 +12,7 @@ import io
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import traceback
@@ -104,11 +105,18 @@ def connector_fixture(project: Path, mutate: Callable[[dict[str, Any]], None] | 
 
 def connector_input(project: Path, mutate: Callable[[dict[str, Any]], None] | None = None) -> Path:
     payload = load_connector_payload()
+    payload["pr"]["url"] = f"https://github.com/{REPO}/pull/{PR}"
+    for operation in payload.get("operations", []):
+        if isinstance(operation, dict):
+            operation.setdefault("repo", REPO)
+            operation.setdefault("pr", PR)
+            operation.setdefault("github_host", "github.com")
     payload["tool_versions"] = {"github_connector": "1.4.0", "github_api": "2022-11-28"}
     payload["live_provenance"] = {
         "source": "github-connector-live",
         "repo": REPO,
         "pr": PR,
+        "github_host": "github.com",
         "collected_at": "2026-06-18T12:06:00Z",
         "collector": "codex-github-connector",
     }
@@ -128,6 +136,10 @@ def gh_fixture_dir(project: Path, mutate: Callable[[Path], None] | None = None) 
 def gh_readonly_dir(project: Path, mutate: Callable[[Path], None] | None = None) -> Path:
     target = project / "gh-readonly-live"
     shutil.copytree(FIXTURES / "gh-readonly", target)
+    for filename in ("pr-view.json", "final-pr-view.json"):
+        payload = load_json(target / filename)
+        payload["url"] = f"https://github.com/{REPO}/pull/{PR}"
+        write_json(target / filename, payload)
     write_json(target / "tool-versions.json", {"gh": "2.75.0", "github_api": "2022-11-28"})
     write_json(
         target / "provenance.json",
@@ -135,6 +147,7 @@ def gh_readonly_dir(project: Path, mutate: Callable[[Path], None] | None = None)
             "source": "gh-readonly-live",
             "repo": REPO,
             "pr": PR,
+            "github_host": "github.com",
             "collected_at": "2026-06-18T12:07:00Z",
             "collector": "gh-cli-readonly",
         },
@@ -258,6 +271,21 @@ def assert_production_proof_fails(project: Path, manifest: Path, rule: str) -> N
     assert rule in rules_from_payload(payload), payload.get("problems")
 
 
+def refresh_manifest_artifact_hash(project: Path, manifest: Path, artifact: Path) -> None:
+    payload = load_json(manifest)
+    rel = str(artifact.relative_to(project))
+    digest = star_forge.file_sha256(artifact)
+    for item in payload.get("artifacts", []):
+        if isinstance(item, dict) and item.get("path") == rel:
+            item["sha256"] = digest
+            item["bytes"] = artifact.stat().st_size
+    raw_hashes = payload.get("raw_artifact_hashes")
+    if isinstance(raw_hashes, dict) and isinstance(raw_hashes.get(rel), dict):
+        raw_hashes[rel]["sha256"] = digest
+        raw_hashes[rel]["bytes"] = artifact.stat().st_size
+    write_json(manifest, payload)
+
+
 def test_connector_fixture_writes_packet_without_production_proof_commands() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         project = Path(tmp).resolve()
@@ -313,6 +341,95 @@ def test_connector_input_emits_production_proof_commands_and_core_passes() -> No
         assert_core_passes(project, manifest)
 
 
+def test_connector_input_requires_explicit_final_freshness_without_initial_ref_fallback() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        init_project(project)
+
+        def mutate(payload: dict[str, Any]) -> None:
+            payload.pop("final_pr", None)
+            payload.pop("freshness", None)
+
+        input_path = connector_input(project, mutate)
+        code, _, manifest = collect_connector_input(project, input_path)
+        assert code == 1
+        assert "github-live-provenance" in rules_from_manifest(manifest)
+
+        payload = load_json(manifest)
+        summary = payload["summary"]
+        assert summary["captured_base_sha"] == "1111111111111111111111111111111111111111"
+        assert summary["captured_head_sha"] == "2222222222222222222222222222222222222222"
+        assert summary["current_base_sha"] == ""
+        assert summary["current_head_sha"] == ""
+
+        pr_payload = load_json(manifest.parent / "pr.json")
+        assert pr_payload["base_sha"] == "1111111111111111111111111111111111111111"
+        assert pr_payload["head_sha"] == "2222222222222222222222222222222222222222"
+        assert pr_payload["current_base_sha"] == ""
+        assert pr_payload["current_head_sha"] == ""
+        assert_core_fails(project, manifest, "github-live-provenance")
+
+
+def test_connector_input_record_runs_both_strict_proof_commands() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        init_project(project)
+        input_path = connector_input(project)
+        code, out, _ = collect_connector_input(project, input_path, ["--record"])
+        assert code == 0, out
+        assert "source-packet-github-pr-review" in out
+        assert "source-packet-proof" in out
+        github_records = star_forge.load_run_records(project, kind="source-packet-github-pr-review", task=TASK)
+        production_records = star_forge.load_run_records(project, kind="source-packet-proof", task=TASK)
+        assert github_records and github_records[-1]["verdict"] == "PASS"
+        assert production_records and production_records[-1]["verdict"] == "PASS"
+
+
+def test_connector_input_record_uses_trusted_star_forge_from_unrelated_cwd() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp).resolve()
+        project = root / "project"
+        init_project(project)
+        input_path = connector_input(project)
+        caller = root / "caller"
+        sentinel_dir = caller / "scripts"
+        sentinel_dir.mkdir(parents=True)
+        marker = root / "sentinel-ran.txt"
+        (sentinel_dir / "star_forge.py").write_text(
+            "import pathlib\n"
+            "import sys\n"
+            f"pathlib.Path({str(marker)!r}).write_text('ran\\n', encoding='utf-8')\n"
+            "sys.exit(64)\n",
+            encoding="utf-8",
+        )
+
+        proc = subprocess.run(
+            [
+                sys.executable,
+                str(GITHUB_PR_SCRIPT),
+                "--project", str(project),
+                "--task", TASK,
+                "--repo", REPO,
+                "--pr", PR,
+                "--connector-input", str(input_path),
+                "--record",
+            ],
+            cwd=str(caller),
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert not marker.exists()
+        assert "source-packet-github-pr-review" in proc.stdout
+        assert "source-packet-proof" in proc.stdout
+        github_records = star_forge.load_run_records(project, kind="source-packet-github-pr-review", task=TASK)
+        production_records = star_forge.load_run_records(project, kind="source-packet-proof", task=TASK)
+        assert github_records and github_records[-1]["verdict"] == "PASS"
+        assert production_records and production_records[-1]["verdict"] == "PASS"
+
+
 def test_connector_input_rejects_unbound_ci_log_identity() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         project = Path(tmp).resolve()
@@ -354,6 +471,7 @@ def test_connector_input_accepts_pr_bound_ci_log_identity() -> None:
             identity = {
                 "repo": REPO,
                 "pr": PR,
+                "github_host": "github.com",
                 "captured_head_sha": "2222222222222222222222222222222222222222",
                 "check_run_id": "501",
             }
@@ -393,6 +511,128 @@ def test_connector_input_requires_provenance_repo_and_pr_without_synthesis() -> 
             assert_core_fails(project, manifest, "github-live-provenance")
 
 
+def test_connector_input_requires_explicit_live_provenance_host_without_url_synthesis() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        init_project(project)
+
+        def mutate(payload: dict[str, Any]) -> None:
+            payload["live_provenance"].pop("github_host", None)
+            payload["pr"]["url"] = f"https://github.com/{REPO}/pull/{PR}"
+
+        input_path = connector_input(project, mutate)
+        code, _, manifest = collect_connector_input(project, input_path)
+        assert code == 1
+        assert "github-live-provenance" in rules_from_manifest(manifest)
+        payload = load_json(manifest)
+        assert "github_host" not in payload["summary"]["live_provenance"]
+        assert payload["summary"]["github_host"] == ""
+        assert_core_fails(project, manifest, "github-live-provenance")
+
+
+def test_connector_input_rejects_off_host_live_provenance_with_connector_operations() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        init_project(project)
+
+        def mutate(payload: dict[str, Any]) -> None:
+            payload["live_provenance"]["github_host"] = "evil.example"
+
+        input_path = connector_input(project, mutate)
+        code, _, manifest = collect_connector_input(project, input_path)
+        assert code == 1
+        assert "github-live-provenance" in rules_from_manifest(manifest)
+        assert_core_fails(project, manifest, "github-live-provenance")
+
+
+def test_connector_input_rejects_wrong_repo_or_pr_connector_operation_identity() -> None:
+    bad_operations = [
+        {"action": "read", "operation": "pull_request", "repo": "other/repo", "pr": PR, "github_host": "github.com"},
+        {"action": "read", "operation": "pull_request", "repository": "other/repo", "pr": PR, "github_host": "github.com"},
+        {"action": "read", "operation": "pull_request", "repository": f"https://evil.example/{REPO}", "pr": PR, "github_host": "github.com"},
+        {"action": "read", "operation": "pull_request", "repository": f"https://github.com/{REPO}", "pull_request": f"https://evil.example/{REPO}/pull/{PR}", "github_host": "github.com"},
+        {"action": "read", "operation": "pull_request", "repo": REPO, "pullRequest": f"//evil.example/{REPO}/pull/{PR}", "github_host": "github.com"},
+        {"action": "read", "operation": "pull_request", "repo": REPO, "pr": PR, "baseRef": {"url": f"https://evil.example/{REPO}"}},
+        {"action": "read", "operation": "pull_request", "repo": REPO, "pr": "99", "github_host": "github.com"},
+        {"action": "read", "operation": "pull_request", "repo": REPO, "pull_request": "99", "github_host": "github.com"},
+    ]
+    for bad_operation in bad_operations:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp).resolve()
+            init_project(project)
+
+            def mutate(payload: dict[str, Any], bad_operation: dict[str, Any] = bad_operation) -> None:
+                payload["operations"][0] = bad_operation
+
+            input_path = connector_input(project, mutate)
+            code, _, manifest = collect_connector_input(project, input_path)
+            assert code == 1
+            assert "github-command" in rules_from_manifest(manifest)
+            assert_core_fails(project, manifest, "github-command")
+
+
+def test_connector_input_rejects_missing_live_connector_operation_identity() -> None:
+    bad_operations: list[Any] = [
+        "pull_request",
+        {"action": "read", "operation": "pull_request", "pr": PR, "github_host": "github.com"},
+        {"action": "read", "operation": "pull_request", "repo": REPO, "github_host": "github.com"},
+        {"action": "read", "operation": "pull_request", "repo": REPO, "pr": PR},
+    ]
+    for bad_operation in bad_operations:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp).resolve()
+            init_project(project)
+
+            def mutate(payload: dict[str, Any], bad_operation: Any = bad_operation) -> None:
+                payload["operations"][0] = bad_operation
+
+            input_path = connector_input(project, mutate)
+            code, _, manifest = collect_connector_input(project, input_path)
+            assert code == 1
+            assert "github-command" in rules_from_manifest(manifest)
+            assert_core_fails(project, manifest, "github-command")
+
+
+def test_connector_input_rejects_off_host_connector_operation_identity() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        init_project(project)
+
+        def mutate(payload: dict[str, Any]) -> None:
+            payload["operations"][0] = {
+                "action": "read",
+                "operation": "pull_request",
+                "url": f"https://evil.example/{REPO}/pull/{PR}",
+            }
+
+        input_path = connector_input(project, mutate)
+        code, _, manifest = collect_connector_input(project, input_path)
+        assert code == 1
+        assert "github-command" in rules_from_manifest(manifest)
+        assert_core_fails(project, manifest, "github-command")
+
+
+def test_connector_input_rejects_scheme_relative_connector_operation_url() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        init_project(project)
+
+        def mutate(payload: dict[str, Any]) -> None:
+            payload["operations"][0] = {
+                "action": "read",
+                "operation": "pull_request",
+                "repo": REPO,
+                "pr": PR,
+                "url": f"//evil.example/{REPO}/pull/{PR}",
+            }
+
+        input_path = connector_input(project, mutate)
+        code, _, manifest = collect_connector_input(project, input_path)
+        assert code == 1
+        assert "github-command" in rules_from_manifest(manifest)
+        assert_core_fails(project, manifest, "github-command")
+
+
 def test_connector_input_rejects_pr_url_identity_mismatch() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         project = Path(tmp).resolve()
@@ -405,6 +645,21 @@ def test_connector_input_rejects_pr_url_identity_mismatch() -> None:
         code, _, manifest = collect_connector_input(project, input_path)
         assert code == 1
         assert "github-live-provenance" in rules_from_manifest(manifest)
+        assert_core_fails(project, manifest, "github-live-provenance")
+
+
+def test_core_rejects_contradictory_secondary_pr_url_identity() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        init_project(project)
+        input_path = connector_input(project)
+        code, _, manifest = collect_connector_input(project, input_path)
+        assert code == 0
+        pr_path = project / ".starforge" / "live" / TASK / "github" / "pr.json"
+        pr_payload = load_json(pr_path)
+        pr_payload["html_url"] = f"https://github.com/{REPO}/pull/99"
+        write_json(pr_path, pr_payload)
+        refresh_manifest_artifact_hash(project, manifest, pr_path)
         assert_core_fails(project, manifest, "github-live-provenance")
 
 
@@ -451,6 +706,230 @@ def test_gh_readonly_accepts_pr_scoped_api_endpoints() -> None:
         assert code == 0, out
         assert "source-packet-github-pr-review" in out
         assert_core_passes(project, manifest)
+
+
+def test_gh_readonly_accepts_safe_path_style_api_query_params() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        init_project(project)
+
+        def mutate(path: Path) -> None:
+            write_json(path / "commands.json", [["gh", "api", f"repos/{REPO}/pulls/{PR}/files?per_page=100&page=2"]])
+
+        fixture_dir = gh_readonly_dir(project, mutate)
+        code, out, manifest = collect_gh_readonly(project, fixture_dir)
+        assert code == 0, out
+        assert_core_passes(project, manifest)
+
+
+def test_collector_rejects_shell_substitution_in_allowed_gh_option_values() -> None:
+    bad_commands = [
+        ["gh", "pr", "view", PR, "--repo", REPO, "--jq", "$(echo forged)"],
+        ["gh", "pr", "view", PR, "--repo", REPO, "--template", "{{.title}} `echo forged`"],
+        ["gh", "api", f"repos/{REPO}/pulls/{PR}", "--jq=$(echo forged)"],
+        ["gh", "api", f"repos/{REPO}/pulls/{PR}", "--template", "{{.title}} $(echo forged)"],
+    ]
+    for command in bad_commands:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp).resolve()
+            init_project(project)
+
+            def mutate(payload: dict[str, Any], command: list[str] = command) -> None:
+                payload["commands"] = [command]
+
+            input_path = connector_input(project, mutate)
+            code, _, manifest = collect_connector_input(project, input_path)
+            assert code == 1
+            assert "github-command" in rules_from_manifest(manifest)
+            assert_core_fails(project, manifest, "github-command")
+            assert_production_proof_fails(project, manifest, "github-command")
+
+
+def test_collector_rejects_embedded_ampersands_in_gh_commands() -> None:
+    bad_commands: list[Any] = [
+        ["gh", "pr", "view", PR, "--repo", REPO, "--jq", ".title&echo forged"],
+        ["gh", "pr", "view", PR, "--repo", REPO, "--template", "{{.title}}&echo forged"],
+        ["gh", "api", f"repos/{REPO}/pulls/{PR}", "--method", "GET&echo forged"],
+        ["gh", "api", "--hostname", "github.com&evil.example", f"repos/{REPO}/pulls/{PR}"],
+        f"gh pr view {PR} --repo {REPO} --jq '.title&echo forged'",
+    ]
+    for command in bad_commands:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp).resolve()
+            init_project(project)
+
+            def mutate(payload: dict[str, Any], command: Any = command) -> None:
+                payload["commands"] = [command]
+
+            input_path = connector_input(project, mutate)
+            code, _, manifest = collect_connector_input(project, input_path)
+            assert code == 1
+            assert "github-command" in rules_from_manifest(manifest)
+            assert_core_fails(project, manifest, "github-command")
+            assert_production_proof_fails(project, manifest, "github-command")
+
+
+def test_gh_readonly_rejects_unbounded_path_style_api_query_params() -> None:
+    commands = [
+        ["gh", "api", f"repos/{REPO}/pulls/{PR}/files?page=nonnumeric"],
+        ["gh", "api", f"repos/{REPO}/pulls/{PR}/files?page=0"],
+        ["gh", "api", f"repos/{REPO}/pulls/{PR}/files?per_page=101"],
+    ]
+    for command in commands:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp).resolve()
+            init_project(project)
+
+            def mutate(path: Path, command: list[str] = command) -> None:
+                write_json(path / "commands.json", [command])
+
+            fixture_dir = gh_readonly_dir(project, mutate)
+            code, _, manifest = collect_gh_readonly(project, fixture_dir)
+            assert code == 1
+            assert "github-command" in rules_from_manifest(manifest)
+            assert_core_fails(project, manifest, "github-command")
+
+
+def test_gh_readonly_rejects_sensitive_path_style_api_query_params_and_redacts_values() -> None:
+    query_cases = [
+        ("api-key", "collectorsecret0"),
+        ("X-Amz-Signature", "collectorsecret1"),
+        ("authorization", "collectorsecret2"),
+        ("access_token", "collectorsecret3"),
+    ]
+    for key, secret in query_cases:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp).resolve()
+            init_project(project)
+
+            def mutate(path: Path, key: str = key, secret: str = secret) -> None:
+                write_json(path / "commands.json", [["gh", "api", f"repos/{REPO}/pulls/{PR}?{key}={secret}"]])
+
+            fixture_dir = gh_readonly_dir(project, mutate)
+            code, _, manifest = collect_gh_readonly(project, fixture_dir)
+            assert code == 1
+            assert "github-command" in rules_from_manifest(manifest)
+            assert_core_fails(project, manifest, "github-command")
+            transcript = project / ".starforge" / "live" / TASK / "github" / "operation-transcript.json"
+            artifact_text = manifest.read_text(encoding="utf-8") + transcript.read_text(encoding="utf-8")
+            assert secret not in artifact_text
+            assert "REDACTED_SECRET" in artifact_text
+
+
+def test_gh_api_rejects_absolute_off_host_api_endpoint() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        init_project(project)
+
+        def mutate(path: Path) -> None:
+            write_json(path / "commands.json", [["gh", "api", f"https://evil.example/repos/{REPO}/pulls/{PR}"]])
+
+        fixture_dir = gh_readonly_dir(project, mutate)
+        code, _, manifest = collect_gh_readonly(project, fixture_dir)
+        assert code == 1
+        assert "github-command" in rules_from_manifest(manifest)
+        assert_core_fails(project, manifest, "github-command")
+
+
+def test_gh_api_rejects_scheme_relative_api_endpoints() -> None:
+    bad_commands = [
+        ["gh", "api", f"//repos/{REPO}/pulls/{PR}"],
+        ["gh", "api", f"//api.github.com/repos/{REPO}/pulls/{PR}"],
+    ]
+    for command in bad_commands:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp).resolve()
+            init_project(project)
+
+            def mutate(path: Path, command: list[str] = command) -> None:
+                write_json(path / "commands.json", [command])
+
+            fixture_dir = gh_readonly_dir(project, mutate)
+            code, _, manifest = collect_gh_readonly(project, fixture_dir)
+            assert code == 1
+            assert "github-command" in rules_from_manifest(manifest)
+            assert_core_fails(project, manifest, "github-command")
+
+
+def test_gh_api_rejects_off_host_hostname_flag() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        init_project(project)
+
+        def mutate(path: Path) -> None:
+            write_json(path / "commands.json", [["gh", "api", "--hostname", "evil.example", f"repos/{REPO}/pulls/{PR}"]])
+
+        fixture_dir = gh_readonly_dir(project, mutate)
+        code, _, manifest = collect_gh_readonly(project, fixture_dir)
+        assert code == 1
+        assert "github-command" in rules_from_manifest(manifest)
+        assert_core_fails(project, manifest, "github-command")
+
+
+def test_gh_api_rejects_path_style_command_with_off_host_live_provenance() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        init_project(project)
+
+        def mutate(path: Path) -> None:
+            provenance = load_json(path / "provenance.json")
+            provenance["github_host"] = "evil.example"
+            write_json(path / "provenance.json", provenance)
+            write_json(path / "commands.json", [["gh", "api", f"repos/{REPO}/pulls/{PR}"]])
+
+        fixture_dir = gh_readonly_dir(project, mutate)
+        code, _, manifest = collect_gh_readonly(project, fixture_dir)
+        assert code == 1
+        assert "github-live-provenance" in rules_from_manifest(manifest)
+        assert_core_fails(project, manifest, "github-live-provenance")
+
+
+def test_gh_api_rejects_attached_value_short_flags() -> None:
+    bad_commands = [
+        ["gh", "api", "-HAuthorization:Bearer token", f"repos/{REPO}/pulls/{PR}"],
+        ["gh", "api", "-ffield=value", f"repos/{REPO}/issues/{PR}/comments"],
+        ["gh", "api", "-Ffield=value", f"repos/{REPO}/issues/{PR}/comments"],
+    ]
+    for command in bad_commands:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp).resolve()
+            init_project(project)
+
+            def mutate(path: Path, command: list[str] = command) -> None:
+                write_json(path / "commands.json", [command])
+
+            fixture_dir = gh_readonly_dir(project, mutate)
+            code, _, manifest = collect_gh_readonly(project, fixture_dir)
+            assert code == 1
+            assert "github-command" in rules_from_manifest(manifest)
+            assert_core_fails(project, manifest, "github-command")
+
+
+def test_gh_api_rejects_field_arguments_and_redacts_values() -> None:
+    endpoint = f"repos/{REPO}/pulls/{PR}"
+    field_cases = [
+        (["gh", "api", "--method", "GET", "-f", "access_token=collectorsecretfield0", endpoint], "collectorsecretfield0"),
+        (["gh", "api", "--method", "GET", "-F", "foo=collectorsecretfield1", endpoint], "collectorsecretfield1"),
+        (["gh", "api", "--method", "GET", "--field", "page=nonnumeric", endpoint], "nonnumeric"),
+        (["gh", "api", "--method", "GET", "--raw-field", "per_page=collectorsecretfield3", endpoint], "collectorsecretfield3"),
+    ]
+    for command, rejected_value in field_cases:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp).resolve()
+            init_project(project)
+
+            def mutate(path: Path, command: list[str] = command) -> None:
+                write_json(path / "commands.json", [command])
+
+            fixture_dir = gh_readonly_dir(project, mutate)
+            code, _, manifest = collect_gh_readonly(project, fixture_dir)
+            assert code == 1
+            assert "github-command" in rules_from_manifest(manifest)
+            assert_core_fails(project, manifest, "github-command")
+            transcript = project / ".starforge" / "live" / TASK / "github" / "operation-transcript.json"
+            artifact_text = manifest.read_text(encoding="utf-8") + transcript.read_text(encoding="utf-8")
+            assert rejected_value not in artifact_text
+            assert "REDACTED_SECRET" in artifact_text
 
 
 def test_gh_api_rejects_unscoped_account_endpoints() -> None:
@@ -516,6 +995,30 @@ def test_forbidden_gh_command_guardrails_block_checkout() -> None:
         assert code == 1
         assert "github-command" in rules_from_manifest(manifest)
         assert_core_fails(project, manifest, "github-command")
+
+
+def test_gh_readonly_rejects_trailing_shell_commands_in_string_and_argv_forms() -> None:
+    bad_commands: list[Any] = [
+        f"gh pr view {PR} --repo {REPO} ; gh pr checkout {PR}",
+        ["gh", "pr", "view", PR, "--repo", REPO, ";", "gh", "pr", "checkout", PR],
+        "gh run view 701 --repo " + REPO + " --log && gh run rerun 701",
+        ["gh", "run", "view", "701", "--repo", REPO, "--log", "&&", "gh", "run", "rerun", "701"],
+        f"gh api repos/{REPO}/pulls/{PR}\ngh api repos/{REPO}/actions/runs/701/rerun",
+        ["gh", "api", f"repos/{REPO}/pulls/{PR}", "gh", "repo", "delete", REPO],
+    ]
+    for command in bad_commands:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp).resolve()
+            init_project(project)
+
+            def mutate(path: Path, command: Any = command) -> None:
+                write_json(path / "commands.json", [command])
+
+            fixture_dir = gh_readonly_dir(project, mutate)
+            code, _, manifest = collect_gh_readonly(project, fixture_dir)
+            assert code == 1
+            assert "github-command" in rules_from_manifest(manifest)
+            assert_core_fails(project, manifest, "github-command")
 
 
 def test_changed_base_sha_is_blocking() -> None:

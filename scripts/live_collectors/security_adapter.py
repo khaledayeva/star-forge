@@ -20,6 +20,7 @@ from typing import Any, Mapping, Sequence
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 SCRIPTS_DIR = SCRIPT_DIR.parent
+STAR_FORGE = SCRIPTS_DIR / "star_forge.py"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
@@ -301,20 +302,76 @@ def git_head(project: Path) -> str:
     return out.strip() if code == 0 else ""
 
 
+def git_status_path(line: str) -> str:
+    path = line[3:] if len(line) > 3 else line.strip()
+    path = path.strip().strip('"')
+    if " -> " in path:
+        path = path.split(" -> ", 1)[1].strip().strip('"')
+    return path
+
+
+def source_dirty_entries(project: Path) -> list[str]:
+    code, out, _ = live_common.run_git(["status", "--short", "--untracked-files=all", "--", "."], project)
+    if code != 0:
+        return ["?? <git status unavailable>"]
+    dirty: list[str] = []
+    for line in out.splitlines():
+        path = git_status_path(line)
+        parts = Path(path).parts
+        if any(part in live_common.IGNORED_PARTS or part == ".starforge" for part in parts):
+            continue
+        dirty.append(line)
+    return dirty
+
+
+def source_snapshot_rel_paths(project: Path) -> set[str]:
+    return {live_common.project_relative(project, path) for path in live_common.snapshot_file_candidates(project)}
+
+
+def dirty_paths_missing_from_source_snapshot(project: Path) -> list[str]:
+    snapshot_paths = source_snapshot_rel_paths(project)
+    missing: list[str] = []
+    for line in source_dirty_entries(project):
+        rel = git_status_path(line)
+        if not rel or rel in snapshot_paths:
+            continue
+        missing.append(line)
+    return missing
+
+
+def source_tree_clean_at_head(project: Path) -> bool:
+    return bool(git_head(project)) and not source_dirty_entries(project)
+
+
 def validate_source_binding(project: Path, binding: Mapping[str, Any], problems: list[dict[str, Any]]) -> bool:
     current_source = live_common.compute_source_hash(project)
     source_hash = str(binding.get("source_hash") or "")
     commit_sha = str(binding.get("commit_sha") or "")
-    source_ok = bool(source_hash and source_hash == current_source)
+    source_matches = bool(source_hash and source_hash == current_source)
+    source_ok = source_matches
+    if source_matches:
+        missing_dirty = dirty_paths_missing_from_source_snapshot(project)
+        if missing_dirty:
+            source_ok = False
+            add_problem(
+                problems,
+                "security report source_hash does not cover dirty source paths: "
+                + ", ".join(git_status_path(item) for item in missing_dirty[:5]),
+                rule="security-source-binding",
+            )
     commit_ok = False
+    head = ""
     if commit_sha:
         head = git_head(project)
-        commit_ok = bool(head and commit_sha == head)
+        clean = source_tree_clean_at_head(project)
+        commit_ok = bool(head and commit_sha == head and clean)
         if not head:
             add_problem(problems, "commit binding was provided but the project has no git HEAD", rule="security-source-binding")
-    if source_hash and not source_ok:
+        elif commit_sha == head and not clean:
+            add_problem(problems, "security report commit binding requires a clean source tree at HEAD", rule="security-source-binding")
+    if source_hash and not source_matches:
         add_problem(problems, "security report source_hash is stale", rule="security-source-binding")
-    if commit_sha and not commit_ok and git_head(project):
+    if commit_sha and head and commit_sha != head:
         add_problem(problems, "security report commit binding is stale", rule="security-source-binding")
     if not source_hash and not commit_sha:
         add_problem(problems, "security report requires source_hash or commit binding", rule="security-source-binding")
@@ -495,7 +552,7 @@ def validate_required_metadata(
         add_problem(problems, "security report requires a fresh source hash or commit binding", rule="security-source-binding")
 
 
-def build_commands(project_arg: str, task: str, profile: str, kind: str, scanner: str, version: str, root: Path, project: Path) -> dict[str, str]:
+def build_command_argvs(project_arg: str, task: str, profile: str, kind: str, scanner: str, version: str, root: Path, project: Path) -> dict[str, list[str]]:
     handoff = live_common.project_relative(project, root / "handoff-input.json")
     findings = live_common.project_relative(project, root / "normalized-findings.json")
     manifest = live_common.project_relative(project, root / "manifest.json")
@@ -520,19 +577,41 @@ def build_commands(project_arg: str, task: str, profile: str, kind: str, scanner
         "--strict",
     ]
     return {
-        "security_handoff_packet": " ".join(shlex.quote(item) for item in handoff_cmd),
-        "security_proof": " ".join(shlex.quote(item) for item in proof_cmd),
+        "security_handoff_packet": handoff_cmd,
+        "security_proof": proof_cmd,
     }
 
 
-def maybe_record(commands: Mapping[str, str], cwd: Path) -> dict[str, Any]:
+def display_command(command: Sequence[str]) -> str:
+    return shlex.join([str(item) for item in command])
+
+
+def build_commands(project_arg: str, task: str, profile: str, kind: str, scanner: str, version: str, root: Path, project: Path) -> dict[str, str]:
+    return {
+        name: display_command(command)
+        for name, command in build_command_argvs(project_arg, task, profile, kind, scanner, version, root, project).items()
+    }
+
+
+def trusted_record_command(command: Sequence[str]) -> list[str]:
+    actual = [str(item) for item in command]
+    if actual and actual[0] == "python3":
+        actual[0] = sys.executable
+    if len(actual) > 1 and actual[1] == "scripts/star_forge.py":
+        actual[1] = str(STAR_FORGE)
+    return actual
+
+
+def maybe_record(commands: Mapping[str, Sequence[str]], cwd: Path) -> dict[str, Any]:
     results: dict[str, Any] = {}
     for name, command in commands.items():
-        proc = subprocess.run(command, cwd=str(cwd), shell=True, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+        actual = trusted_record_command(command)
+        proc = subprocess.run(actual, cwd=str(cwd), shell=False, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
         results[name] = {
             "returncode": proc.returncode,
             "stdout": proc.stdout,
             "stderr": proc.stderr,
+            "command_argv": actual,
         }
     return results
 
@@ -709,9 +788,19 @@ def adapt(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
             project_arg = str(project)
     except OSError:
         project_arg = str(project)
-    commands = build_commands(project_arg, args.task, args.profile, kind, scanner, version, root, project)
+    command_argvs = build_command_argvs(project_arg, args.task, args.profile, kind, scanner, version, root, project)
+    commands = {name: display_command(command) for name, command in command_argvs.items()}
 
-    record_results = maybe_record(commands, project) if args.record else {}
+    record_results = maybe_record(command_argvs, project) if args.record else {}
+    record_failed = False
+    for name, record in record_results.items():
+        if int(record.get("returncode") or 0) != 0:
+            record_failed = True
+            add_problem(
+                problems,
+                f"security record command {name} failed with exit code {record.get('returncode')}",
+                rule="security-record",
+            )
     verdict = "FAIL" if problems else "PASS"
     result = {
         "schema": RESULT_SCHEMA,
@@ -731,7 +820,7 @@ def adapt(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
     }
     if record_results:
         result["record_results"] = record_results
-    return (1 if args.strict and problems else 0), result
+    return (1 if record_failed or (args.strict and problems) else 0), result
 
 
 def build_parser() -> argparse.ArgumentParser:

@@ -44,6 +44,26 @@ DEFAULT_VIEWPORTS = (
 BLOCKING_SEVERITIES = {"critical", "high", "medium"}
 METADATA_HOSTS = {"metadata", "metadata.google.internal", "169.254.169.254", "169.254.170.2"}
 LOCAL_HOSTNAMES = {"localhost"}
+SERVICE_WORKERS_MODE = "block"
+BROWSER_NETWORK_CONTROL_MODE = "leased-loopback-only"
+WEBSOCKET_ROUTING_MODE = "route-web-socket"
+WEBRTC_CONTROL_MODE = "init-script-disabled"
+WEBRTC_DISABLE_SCRIPT = """
+(() => {
+  const disabled = function StarForgeDisabledWebRTC() {
+    throw new Error("WebRTC disabled by Star Forge browser collector");
+  };
+  for (const key of ["RTCPeerConnection", "webkitRTCPeerConnection", "RTCDataChannel"]) {
+    try {
+      Object.defineProperty(window, key, {
+        value: disabled,
+        configurable: false,
+        writable: false
+      });
+    } catch (_error) {}
+  }
+})();
+"""
 FORBIDDEN_SCENARIO_KEYS = {
     "auth",
     "authorization",
@@ -117,6 +137,7 @@ class BrowserExecutionContext:
     project: Path
     root: Path
     url: str
+    allowed_local_origins: tuple[str, ...]
     scenario: dict[str, Any]
     scenario_label: str
     paths: ArtifactPaths
@@ -449,6 +470,19 @@ def normalize_origin(parsed: urllib.parse.ParseResult) -> str:
     return f"{parsed.scheme.lower()}://{host.lower()}:{port}"
 
 
+def safety_equivalent_url(raw_url: str) -> str:
+    parsed = urllib.parse.urlparse(raw_url)
+    if parsed.scheme.lower() not in {"ws", "wss"}:
+        return raw_url
+    scheme = "https" if parsed.scheme.lower() == "wss" else "http"
+    return urllib.parse.urlunparse((scheme, parsed.netloc, parsed.path, parsed.params, parsed.query, parsed.fragment))
+
+
+def host_is_literal_loopback(host: str) -> bool:
+    ip = parse_ip(host)
+    return bool(ip and ip.is_loopback)
+
+
 def is_metadata_host(host: str) -> bool:
     lowered = host.lower().strip("[]")
     return lowered in METADATA_HOSTS or lowered.endswith(".metadata.google.internal")
@@ -490,6 +524,8 @@ def unsafe_ip_reason(ip: ipaddress._BaseAddress) -> str | None:
         return "reserved"
     if ip.is_multicast:
         return "multicast"
+    if not ip.is_global:
+        return "non-global"
     return None
 
 
@@ -514,6 +550,200 @@ def unsafe_url_reasons(parsed: urllib.parse.ParseResult) -> tuple[bool, list[dic
         elif reason:
             problems.append(problem(f"browser URL resolved to unsafe address {ip}: {reason} targets are not allowed", rule="browser-url"))
     return requires_lease, problems
+
+
+def browser_url_safety_evidence(raw_url: str, *, allowed_local_origins: Sequence[str] = ()) -> dict[str, Any]:
+    safety_url = safety_equivalent_url(raw_url)
+    parsed, url_problems = validate_url(safety_url)
+    raw_parsed = urllib.parse.urlparse(raw_url)
+    host = parsed.hostname or ""
+    record: dict[str, Any] = {
+        "url": raw_url,
+        "scheme": raw_parsed.scheme or parsed.scheme,
+        "safety_url": safety_url,
+        "host": host,
+        "port": parsed.port or (443 if parsed.scheme == "https" else 80),
+        "resolved_ips": [],
+        "requires_server_lease": False,
+        "allowed_by_server_lease": False,
+        "literal_loopback_host": False,
+        "connection_control": BROWSER_NETWORK_CONTROL_MODE,
+        "evidence_source": "",
+        "allowed": False,
+        "problems": [],
+    }
+    if parsed.scheme and host:
+        try:
+            record["origin"] = normalize_origin(parsed)
+        except ValueError:
+            record["origin"] = ""
+    if url_problems:
+        record["problems"] = [dict(item) for item in url_problems]
+        return record
+    ips, resolve_problem = resolve_ips(host, parsed.port)
+    if ips:
+        record["resolved_ips"] = [str(ip) for ip in ips]
+    if resolve_problem:
+        record["problems"] = [problem(resolve_problem, rule="browser-url")]
+        return record
+    if not ips:
+        record["problems"] = [problem("browser URL host did not resolve to an address", rule="browser-url")]
+        return record
+
+    allowed_origin = str(record.get("origin") or "")
+    allowed_local = {str(origin) for origin in allowed_local_origins if str(origin)}
+    literal_loopback = host_is_literal_loopback(host)
+    record["literal_loopback_host"] = literal_loopback
+    problems: list[dict[str, Any]] = []
+    requires_lease = False
+    for ip in ips:
+        reason = unsafe_ip_reason(ip)
+        if reason == "loopback":
+            requires_lease = True
+        elif reason:
+            problems.append(problem(f"browser URL resolved to unsafe address {ip}: {reason} targets are not allowed", rule="browser-url"))
+    record["requires_server_lease"] = requires_lease
+    if problems:
+        record["problems"] = problems
+        return record
+    if requires_lease:
+        if not literal_loopback:
+            record["problems"] = [
+                problem(
+                    f"browser URL resolved non-literal host {host} to loopback; use a literal loopback URL or a local safety proxy",
+                    rule="browser-url",
+                )
+            ]
+            return record
+        if allowed_origin in allowed_local:
+            record["allowed"] = True
+            record["allowed_by_server_lease"] = True
+            record["evidence_source"] = "leased_loopback_literal"
+            return record
+        record["problems"] = [
+            problem(
+                f"browser URL resolved to loopback origin {allowed_origin or raw_url} without a matching server lease",
+                rule="server-lease",
+            )
+        ]
+        return record
+    record["problems"] = [
+        problem(
+            "browser URLs must use a leased loopback origin unless browser traffic is connection-controlled",
+            rule="browser-url",
+        )
+    ]
+    return record
+
+
+def request_safety_problem_records(evidence: Mapping[str, Any], *, allowed_local_origins: Sequence[str], path: str = "") -> list[dict[str, Any]]:
+    problems: list[dict[str, Any]] = []
+    if evidence.get("allowed") is not True:
+        message = "browser request safety evidence recorded a blocked request"
+        recorded_problems = evidence.get("problems")
+        if isinstance(recorded_problems, list) and recorded_problems:
+            first = recorded_problems[0]
+            if isinstance(first, Mapping) and first.get("message"):
+                message = str(first["message"])
+        problems.append(problem(message, rule="browser-request-safety", path=path))
+    url = str(evidence.get("url") or "")
+    if not url:
+        problems.append(problem("browser request safety evidence is missing a URL", rule="browser-request-safety", path=path))
+        return problems
+    current = browser_url_safety_evidence(url, allowed_local_origins=allowed_local_origins)
+    if current.get("allowed") is not True:
+        for item in current.get("problems", []) if isinstance(current.get("problems"), list) else []:
+            if isinstance(item, Mapping):
+                problems.append(problem(f"browser request URL is unsafe: {item.get('message')}", rule="browser-request-safety", path=path))
+        if not current.get("problems"):
+            problems.append(problem("browser request URL is unsafe", rule="browser-request-safety", path=path))
+    recorded_ips = evidence.get("resolved_ips")
+    connection_control = str(evidence.get("connection_control") or "")
+    evidence_source = str(evidence.get("evidence_source") or "")
+    allowed_origin_set = {str(item) for item in allowed_local_origins}
+    origin = str(evidence.get("origin") or current.get("origin") or "")
+    if connection_control != BROWSER_NETWORK_CONTROL_MODE:
+        problems.append(problem("browser request safety evidence must record leased loopback network control", rule="browser-request-safety", path=path))
+    if (
+        evidence.get("allowed_by_server_lease") is not True
+        or evidence_source not in {"leased_loopback", "leased_loopback_literal"}
+        or origin not in allowed_origin_set
+    ):
+        problems.append(problem("browser request safety evidence must come from a leased loopback origin", rule="browser-request-safety", path=path))
+    if not isinstance(recorded_ips, list) or not recorded_ips:
+        problems.append(problem("browser request safety evidence must include resolved IPs", rule="browser-request-safety", path=path))
+    else:
+        for raw_ip in recorded_ips:
+            ip = parse_ip(str(raw_ip))
+            if ip is None:
+                problems.append(problem(f"browser request safety evidence has invalid IP {raw_ip}", rule="browser-request-safety", path=path))
+                continue
+            reason = unsafe_ip_reason(ip)
+            if reason == "loopback" and origin in allowed_origin_set:
+                if evidence.get("literal_loopback_host") is not True or current.get("literal_loopback_host") is not True:
+                    problems.append(problem("browser request safety evidence must use a literal loopback URL for leased loopback traffic", rule="browser-request-safety", path=path))
+                continue
+            if reason:
+                problems.append(problem(f"browser request resolved to unsafe address {ip}: {reason}", rule="browser-request-safety", path=path))
+    return problems
+
+
+def validate_request_safety_payload(payload: Mapping[str, Any], *, allowed_local_origins: Sequence[str], path: str = "") -> list[dict[str, Any]]:
+    evidence = payload.get("request_safety")
+    if not isinstance(evidence, Mapping):
+        return [problem("interaction evidence must include browser request safety evidence", rule="browser-request-safety", path=path)]
+    if evidence.get("schema") != "star-forge.browser-request-safety.v1":
+        return [problem("browser request safety evidence has an unsupported schema", rule="browser-request-safety", path=path)]
+    problems: list[dict[str, Any]] = []
+    if evidence.get("service_workers") != SERVICE_WORKERS_MODE:
+        problems.append(problem("browser request safety evidence must record service_workers=block", rule="browser-request-safety", path=path))
+    if evidence.get("connection_control") != BROWSER_NETWORK_CONTROL_MODE:
+        problems.append(problem("browser request safety evidence must record leased loopback network control", rule="browser-request-safety", path=path))
+    if evidence.get("websocket_routing") != WEBSOCKET_ROUTING_MODE:
+        problems.append(problem("browser request safety evidence must record installed WebSocket routing", rule="browser-request-safety", path=path))
+    webrtc = evidence.get("webrtc")
+    if not isinstance(webrtc, Mapping) or webrtc.get("mode") != WEBRTC_CONTROL_MODE or webrtc.get("init_script") is not True:
+        problems.append(problem("browser request safety evidence must record disabled WebRTC", rule="browser-request-safety", path=path))
+    requests = evidence.get("requests")
+    final_urls = evidence.get("final_urls")
+    websockets = evidence.get("websockets")
+    if not isinstance(requests, list) or not requests:
+        problems.append(problem("browser request safety evidence must record requests", rule="browser-request-safety", path=path))
+    else:
+        for item in requests:
+            if not isinstance(item, Mapping):
+                problems.append(problem("browser request safety entry must be an object", rule="browser-request-safety", path=path))
+                continue
+            problems.extend(request_safety_problem_records(item, allowed_local_origins=allowed_local_origins, path=path))
+    if not isinstance(final_urls, list) or not final_urls:
+        problems.append(problem("browser request safety evidence must record final URLs", rule="browser-request-safety", path=path))
+    else:
+        for item in final_urls:
+            if not isinstance(item, Mapping):
+                problems.append(problem("browser final URL safety entry must be an object", rule="browser-request-safety", path=path))
+                continue
+            problems.extend(request_safety_problem_records(item, allowed_local_origins=allowed_local_origins, path=path))
+    if not isinstance(websockets, list):
+        problems.append(problem("browser request safety evidence must record WebSocket route observations", rule="browser-request-safety", path=path))
+    else:
+        for item in websockets:
+            if not isinstance(item, Mapping):
+                problems.append(problem("browser WebSocket safety entry must be an object", rule="browser-request-safety", path=path))
+                continue
+            problems.extend(request_safety_problem_records(item, allowed_local_origins=allowed_local_origins, path=path))
+    try:
+        blocked_count = int(evidence.get("blocked_count") or 0)
+    except (TypeError, ValueError):
+        blocked_count = 1
+    if blocked_count:
+        problems.append(problem("browser request safety evidence recorded blocked requests", rule="browser-request-safety", path=path))
+    try:
+        websocket_blocked_count = int(evidence.get("websocket_blocked_count") or 0)
+    except (TypeError, ValueError):
+        websocket_blocked_count = 1
+    if websocket_blocked_count:
+        problems.append(problem("browser request safety evidence recorded blocked WebSocket requests", rule="browser-request-safety", path=path))
+    return problems
 
 
 def is_local_origin(parsed: urllib.parse.ParseResult) -> bool:
@@ -576,6 +806,8 @@ def validate_server_lease(
         problems.extend(lease_required_problems)
     if raw_lease and not is_loopback_origin(parsed_url):
         problems.append(problem("server leases are only valid for loopback browser URLs", rule="server-lease"))
+    if is_loopback_origin(parsed_url) and not host_is_literal_loopback(parsed_url.hostname or ""):
+        problems.append(problem("server leases require a literal loopback browser URL to avoid DNS rebinding", rule="server-lease"))
     lease_path: Path | None = None
     if raw_lease:
         try:
@@ -721,6 +953,15 @@ def evaluate_assertion(page: Any, assertion: Mapping[str, Any], timeout_ms: int)
     return observation
 
 
+def request_metadata(request: Any) -> dict[str, Any]:
+    return {
+        "url": str(maybe_call(getattr(request, "url", "")) or ""),
+        "method": str(maybe_call(getattr(request, "method", "")) or ""),
+        "resource_type": str(maybe_call(getattr(request, "resource_type", "")) or ""),
+        "navigation": bool(maybe_call(getattr(request, "is_navigation_request", False))),
+    }
+
+
 def _run_playwright_scenario(context: BrowserExecutionContext) -> BrowserExecutionResult:
     sync_api, playwright_version = load_playwright()
     result = BrowserExecutionResult(tool_versions={"playwright": playwright_version})
@@ -728,9 +969,14 @@ def _run_playwright_scenario(context: BrowserExecutionContext) -> BrowserExecuti
     actions: list[dict[str, Any]] = []
     assertions: list[dict[str, Any]] = []
     ready_observations: list[dict[str, Any]] = []
+    request_observations: list[dict[str, Any]] = []
+    websocket_observations: list[dict[str, Any]] = []
+    final_url_observations: list[dict[str, Any]] = []
     redaction_reports: list[dict[str, int]] = []
     timeout_ms = int(context.scenario.get("timeout_ms") or DEFAULT_TIMEOUT_MS)
     trace_written = False
+    websocket_route_installed = False
+    webrtc_control: dict[str, Any] = {"mode": WEBRTC_CONTROL_MODE, "init_script": False}
 
     with sync_api.sync_playwright() as playwright:
         browser_type = getattr(playwright, context.browser_name, None)
@@ -743,12 +989,112 @@ def _run_playwright_scenario(context: BrowserExecutionContext) -> BrowserExecuti
         result.tool_versions["browser"] = maybe_call(getattr(browser, "version", "unknown"))
         try:
             for viewport in context.viewports:
-                context_options = {"viewport": {"width": viewport.width, "height": viewport.height}}
+                context_options = {
+                    "viewport": {"width": viewport.width, "height": viewport.height},
+                    "service_workers": SERVICE_WORKERS_MODE,
+                }
                 page_ready = {"value": False}
                 browser_context = browser.new_context(**context_options)
+                add_init_script = getattr(browser_context, "add_init_script", None)
+                if callable(add_init_script):
+                    try:
+                        add_init_script(WEBRTC_DISABLE_SCRIPT)
+                        webrtc_control["init_script"] = True
+                    except Exception as exc:
+                        result.problems.append(problem(f"WebRTC disable init script failed for {viewport.name}: {exc}", rule="browser-webrtc-safety"))
+                else:
+                    result.problems.append(problem("browser context does not support WebRTC disable init scripts", rule="browser-webrtc-safety"))
                 if context.trace and not trace_written:
                     browser_context.tracing.start(screenshots=True, snapshots=True, sources=False)
+
+                def on_route(route: Any, viewport_name: str = viewport.name) -> None:
+                    request = getattr(route, "request", None)
+                    event = request_metadata(request)
+                    event["viewport"] = viewport_name
+                    try:
+                        safety = browser_url_safety_evidence(
+                            str(event.get("url") or ""),
+                            allowed_local_origins=context.allowed_local_origins,
+                        )
+                        event.update(safety)
+                        request_observations.append(event)
+                        if safety.get("allowed") is True:
+                            route.continue_()
+                            return
+                        result.problems.append(problem(
+                            f"blocked unsafe browser request for {viewport_name}: {event.get('url')}",
+                            rule="browser-request-safety",
+                        ))
+                    except Exception as exc:
+                        event["allowed"] = False
+                        event["problems"] = [problem(f"browser request safety check failed: {exc}", rule="browser-request-safety")]
+                        request_observations.append(event)
+                        result.problems.append(problem(
+                            f"browser request safety check failed for {viewport_name}: {exc}",
+                            rule="browser-request-safety",
+                        ))
+                    route.abort("blockedbyclient")
+
+                browser_context.route("**/*", on_route)
                 page = browser_context.new_page()
+
+                def close_websocket_route(route: Any) -> None:
+                    close = getattr(route, "close", None)
+                    if callable(close):
+                        close()
+                        return
+                    abort = getattr(route, "abort", None)
+                    if callable(abort):
+                        abort("blockedbyclient")
+
+                def on_websocket_route(route: Any, viewport_name: str = viewport.name) -> None:
+                    event = {
+                        "url": str(maybe_call(getattr(route, "url", "")) or ""),
+                        "method": "GET",
+                        "resource_type": "websocket",
+                        "navigation": False,
+                        "viewport": viewport_name,
+                    }
+                    try:
+                        safety = browser_url_safety_evidence(
+                            str(event.get("url") or ""),
+                            allowed_local_origins=context.allowed_local_origins,
+                        )
+                        event.update(safety)
+                        websocket_observations.append(event)
+                        if safety.get("allowed") is True:
+                            connect = getattr(route, "connect_to_server", None)
+                            if callable(connect):
+                                connect()
+                                return
+                            result.problems.append(problem(
+                                f"WebSocket route for {viewport_name} cannot connect through a controlled route",
+                                rule="browser-websocket-safety",
+                            ))
+                        else:
+                            result.problems.append(problem(
+                                f"blocked unsafe browser WebSocket for {viewport_name}: {event.get('url')}",
+                                rule="browser-websocket-safety",
+                            ))
+                    except Exception as exc:
+                        event["allowed"] = False
+                        event["problems"] = [problem(f"browser WebSocket safety check failed: {exc}", rule="browser-websocket-safety")]
+                        websocket_observations.append(event)
+                        result.problems.append(problem(
+                            f"browser WebSocket safety check failed for {viewport_name}: {exc}",
+                            rule="browser-websocket-safety",
+                        ))
+                    close_websocket_route(route)
+
+                route_web_socket = getattr(page, "route_web_socket", None) or getattr(browser_context, "route_web_socket", None)
+                if callable(route_web_socket):
+                    try:
+                        route_web_socket("**/*", on_websocket_route)
+                        websocket_route_installed = True
+                    except Exception as exc:
+                        result.problems.append(problem(f"browser WebSocket routing is unavailable: {exc}", rule="browser-websocket-safety"))
+                else:
+                    result.problems.append(problem("browser WebSocket routing is unavailable", rule="browser-websocket-safety"))
 
                 def on_console(message: Any, viewport_name: str = viewport.name) -> None:
                     event = {
@@ -766,11 +1112,16 @@ def _run_playwright_scenario(context: BrowserExecutionContext) -> BrowserExecuti
                     console_events.append(event)
 
                 page.on("console", on_console)
-                page.goto(context.url, wait_until="domcontentloaded", timeout=timeout_ms)
                 ready_record = {"viewport": viewport.name, "passed": True, "ready": context.scenario["ready"]}
                 try:
-                    wait_for_ready(page, context.scenario["ready"])
-                    page_ready["value"] = True
+                    page.goto(context.url, wait_until="domcontentloaded", timeout=timeout_ms)
+                except Exception as exc:
+                    ready_record.update({"passed": False, "error": str(exc)})
+                    result.problems.append(problem(f"navigation failed for {viewport.name}: {exc}", rule="browser-navigation"))
+                try:
+                    if ready_record["passed"]:
+                        wait_for_ready(page, context.scenario["ready"])
+                        page_ready["value"] = True
                 except Exception as exc:
                     ready_record.update({"passed": False, "error": str(exc)})
                     result.problems.append(problem(f"ready condition timed out for {viewport.name}: {exc}", rule="ready-timeout"))
@@ -788,6 +1139,12 @@ def _run_playwright_scenario(context: BrowserExecutionContext) -> BrowserExecuti
                         assertions.append(observed)
                         if not observed.get("passed"):
                             result.problems.append(problem(f"assertion failed for {viewport.name}: {observed}", rule="visual-assertion"))
+                final_url = str(maybe_call(getattr(page, "url", "")) or context.url)
+                final_safety = browser_url_safety_evidence(final_url, allowed_local_origins=context.allowed_local_origins)
+                final_safety["viewport"] = viewport.name
+                final_url_observations.append(final_safety)
+                if final_safety.get("allowed") is not True:
+                    result.problems.append(problem(f"unsafe final browser URL for {viewport.name}: {final_url}", rule="browser-request-safety"))
                 page.screenshot(path=str(viewport.screenshot), full_page=True)
                 if context.trace and not trace_written:
                     browser_context.tracing.stop(path=str(context.paths.trace))
@@ -805,8 +1162,26 @@ def _run_playwright_scenario(context: BrowserExecutionContext) -> BrowserExecuti
             "ready": ready_observations,
             "actions": actions,
             "assertions": assertions,
+            "request_safety": {
+                "schema": "star-forge.browser-request-safety.v1",
+                "service_workers": SERVICE_WORKERS_MODE,
+                "connection_control": BROWSER_NETWORK_CONTROL_MODE,
+                "websocket_routing": WEBSOCKET_ROUTING_MODE if websocket_route_installed else "unavailable",
+                "allowed_local_origins": list(context.allowed_local_origins),
+                "requests": request_observations,
+                "websockets": websocket_observations,
+                "final_urls": final_url_observations,
+                "blocked_count": sum(1 for item in request_observations if item.get("allowed") is not True),
+                "websocket_blocked_count": sum(1 for item in websocket_observations if item.get("allowed") is not True),
+                "webrtc": dict(webrtc_control),
+            },
         },
     ))
+    connected_ips = sorted({
+        str(ip)
+        for item in request_observations + websocket_observations + final_url_observations
+        for ip in item.get("resolved_ips", []) if isinstance(item.get("resolved_ips"), list)
+    })
     result.redaction_report = merge_reports(*redaction_reports)
     result.summary.update(
         {
@@ -815,6 +1190,16 @@ def _run_playwright_scenario(context: BrowserExecutionContext) -> BrowserExecuti
             "assertions": len(assertions),
             "ephemeral_context": True,
             "trace_recorded": context.trace and trace_written,
+            "service_workers": SERVICE_WORKERS_MODE,
+            "connection_control": BROWSER_NETWORK_CONTROL_MODE,
+            "websocket_routing": WEBSOCKET_ROUTING_MODE if websocket_route_installed else "unavailable",
+            "webrtc_control": dict(webrtc_control),
+            "request_count": len(request_observations),
+            "blocked_request_count": sum(1 for item in request_observations if item.get("allowed") is not True),
+            "websocket_count": len(websocket_observations),
+            "blocked_websocket_count": sum(1 for item in websocket_observations if item.get("allowed") is not True),
+            "final_urls": [str(item.get("url") or "") for item in final_url_observations if item.get("url")],
+            "connected_ips": connected_ips,
         }
     )
     return result
@@ -867,6 +1252,17 @@ def validate_interaction_artifact(path: Path, project: Path) -> list[dict[str, A
     return problems
 
 
+def validate_request_safety_artifact(path: Path, project: Path, *, allowed_local_origins: Sequence[str] = ()) -> list[dict[str, Any]]:
+    rel = live_common.project_relative(project, path)
+    try:
+        payload = read_json_file(path)
+    except Exception as exc:
+        return [problem(f"interaction evidence is malformed JSON: {exc}", rule="interaction-evidence", path=rel)]
+    if not isinstance(payload, Mapping):
+        return [problem("interaction evidence must be a JSON object", rule="interaction-evidence", path=rel)]
+    return validate_request_safety_payload(payload, allowed_local_origins=allowed_local_origins, path=rel)
+
+
 def validate_image_artifact(path: Path, project: Path) -> list[dict[str, Any]]:
     rel = live_common.project_relative(project, path)
     record = live_common.artifact_record(project, path, kind="screenshot")
@@ -885,6 +1281,11 @@ def validate_output_artifacts(context: BrowserExecutionContext) -> list[dict[str
         problems.extend(validate_image_artifact(viewport.screenshot, context.project))
     problems.extend(validate_console_artifact(context.paths.console, context.project))
     problems.extend(validate_interaction_artifact(context.paths.interaction, context.project))
+    problems.extend(validate_request_safety_artifact(
+        context.paths.interaction,
+        context.project,
+        allowed_local_origins=context.allowed_local_origins,
+    ))
     if context.trace and not context.paths.trace.exists():
         problems.append(problem("trace was requested but trace.zip was not written", rule="trace", path=live_common.project_relative(context.project, context.paths.trace)))
     return problems
@@ -918,7 +1319,7 @@ def build_handoff_argv(
         "scripts/star_forge.py",
         "browser-run",
         "--project",
-        ".",
+        live_common.project_cli_arg(project),
         "--task",
         task,
         "--scenario",
@@ -947,6 +1348,8 @@ def build_handoff_argv(
 
 def record_browser_run(project: Path, handoff_argv: Sequence[str]) -> dict[str, Any]:
     actual = list(handoff_argv)
+    if actual and Path(actual[0]).name in {"python", "python3"}:
+        actual[0] = sys.executable
     actual[1] = str(STAR_FORGE_SCRIPT)
     proc = subprocess.run(actual, cwd=str(project), text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
     payload: dict[str, Any] = {
@@ -1020,6 +1423,7 @@ def collect(args: argparse.Namespace, *, runner: BrowserRunner | None = None) ->
 
     lease_path: Path | None = None
     lease_payload: dict[str, Any] | None = None
+    allowed_local_origins: tuple[str, ...] = ()
     if not url_problems:
         lease_path, lease_payload, lease_problems = validate_server_lease(
             project,
@@ -1035,6 +1439,17 @@ def collect(args: argparse.Namespace, *, runner: BrowserRunner | None = None) ->
                 summary["server_lease_sha256"] = live_common.file_sha256(lease_path)
         if lease_payload is not None:
             summary["server_lease_origin"] = lease_payload.get("origin") or lease_payload.get("base_url")
+            allowed_local_origins = (normalize_origin(parsed_url),)
+        initial_safety = browser_url_safety_evidence(args.url, allowed_local_origins=allowed_local_origins)
+        summary["network_control"] = BROWSER_NETWORK_CONTROL_MODE
+        summary["service_workers"] = SERVICE_WORKERS_MODE
+        summary["initial_request_safety"] = initial_safety
+        if initial_safety.get("allowed") is not True:
+            for item in initial_safety.get("problems", []) if isinstance(initial_safety.get("problems"), list) else []:
+                if isinstance(item, Mapping):
+                    problems.append(dict(item))
+            if not initial_safety.get("problems"):
+                problems.append(problem("browser URL is not allowed by the browser network control policy", rule="browser-url"))
 
     try:
         viewports = parse_viewports(args.viewport, paths)
@@ -1059,6 +1474,7 @@ def collect(args: argparse.Namespace, *, runner: BrowserRunner | None = None) ->
             project=project,
             root=root,
             url=args.url,
+            allowed_local_origins=allowed_local_origins,
             scenario=scenario,
             scenario_label=scenario_label,
             paths=paths,

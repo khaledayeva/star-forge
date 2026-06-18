@@ -33,6 +33,7 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from live_collectors import common as live_common
+from live_collectors import native_macos as native_macos_collector
 
 
 SF_VERSION = "0.3.0"
@@ -71,6 +72,7 @@ VALID_STATUSES = {"queued", "ready", "in_progress", "blocked", "reviewing", "com
 VALID_MODES = {"solo", "delegate", "docs"}
 BLOCKING_SEVERITIES = {"critical", "high", "medium"}
 FINDING_SEVERITIES = {"critical", "high", "medium", "low", "info"}
+FINDING_SEVERITY_RANK = {"info": 1, "low": 2, "medium": 3, "high": 4, "critical": 5}
 STOPWORDS = {
     "a", "an", "and", "app", "add", "build", "change", "continue", "create",
     "finish", "fix", "for", "from", "game", "improve", "implement", "make", "mvp",
@@ -81,12 +83,29 @@ SOURCE_SNAPSHOT_SUFFIXES = {
     ".c", ".cc", ".cpp", ".cs", ".css", ".go", ".h", ".html", ".java", ".js",
     ".jsx", ".kt", ".mjs", ".py", ".rb", ".rs", ".sh", ".swift", ".ts", ".tsx",
     ".vue", ".sql", ".json", ".yaml", ".yml", ".toml", ".graphql", ".proto",
-    ".prisma", ".ini", ".cfg", ".conf",
+    ".prisma", ".ini", ".cfg", ".conf", ".mk",
 }
 SOURCE_SNAPSHOT_NAMES = {
-    ".env", "package.json", "package-lock.json", "pnpm-lock.yaml", "yarn.lock",
+    ".dockerignore", ".env", ".gitignore", "package.json", "package-lock.json", "pnpm-lock.yaml", "yarn.lock",
     "requirements.txt", "pyproject.toml", "Cargo.toml", "go.mod", "go.sum",
+    BLUEPRINT_FILE, PLAN_FILE,
+    ".npmrc", ".yarnrc", ".yarnrc.yml", ".pnpmfile.cjs", ".pnp.cjs",
+    ".pnp.loader.mjs", ".node-version", ".nvmrc", "npm-shrinkwrap.json",
+    "pnpm-workspace.yaml", "bun.lock", "bun.lockb", "deno.lock",
+    "Dockerfile", "Containerfile", "Makefile", "GNUmakefile", "BSDmakefile",
+    "docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml",
+    "Procfile", "Caddyfile",
 }
+SOURCE_SNAPSHOT_NAME_PREFIXES = (
+    ".env.",
+    "Dockerfile.",
+    "Containerfile.",
+    "Makefile.",
+    "Procfile.",
+    "Caddyfile.",
+    "docker-compose.",
+    "compose.",
+)
 VISUAL_TASK_RE = re.compile(
     r"\b(ui|ux|visual|browser|screenshot|responsive|frontend|front-end|"
     r"layout|styling|css|web ?page|viewport)\b",
@@ -314,7 +333,7 @@ def ensure_git_repo(project: Path) -> bool:
 def git_status(project: Path) -> list[str]:
     if not is_git_repo(project):
         return []
-    code, out, _ = run_git(["status", "--short", "--", "."], project)
+    code, out, _ = run_git(["status", "--short", "--untracked-files=all", "--", "."], project)
     if code != 0:
         return []
     return [line for line in out.splitlines() if line.strip()]
@@ -337,15 +356,7 @@ def git_status_path(line: str) -> str:
 
 def source_dirty_entries(entries: Sequence[str]) -> list[str]:
     """Filter Star Forge's own state writes out of dirty-tree checks."""
-    state_prefixes = (f"{STATE_DIR}/", f"{LOOP_DIR}/")
-    state_names = {str(STATE_DIR), str(LOOP_DIR)}
-    dirty: list[str] = []
-    for line in entries:
-        path = git_status_path(line)
-        if path.startswith(state_prefixes) or path.rstrip("/") in state_names:
-            continue
-        dirty.append(line)
-    return dirty
+    return live_common.source_hash_dirty_entries(Path.cwd(), entries)
 
 
 def git_changed_files(project: Path) -> list[Path]:
@@ -625,48 +636,38 @@ def architecture_debt_findings(paths: Iterable[Path], project: Path) -> list[dic
 
 
 def snapshot_file_candidates(project: Path) -> list[Path]:
-    files: list[Path] = []
-    if is_git_repo(project):
-        seen_rel: set[str] = set()
-        for ls_args in (["ls-files"], ["ls-files", "--others", "--exclude-standard"]):
-            code, out, _ = run_git(ls_args, project)
-            if code != 0:
-                continue
-            for rel in out.splitlines():
-                rel = rel.strip()
-                if not rel or rel in seen_rel:
-                    continue
-                seen_rel.add(rel)
-                path = project / rel
-                if path.exists():
-                    files.append(path)
-    else:
-        files.extend(iter_project_files(project, all_files=True))
-    filtered: list[Path] = []
-    for path in files:
-        rel = relative_to_project(path, project)
-        parts = Path(rel).parts
-        if any(part in IGNORED_PARTS or part == ".starforge" for part in parts):
-            continue
-        if path.name in SOURCE_SNAPSHOT_NAMES or path.suffix.lower() in SOURCE_SNAPSHOT_SUFFIXES:
-            filtered.append(path)
-    return sorted(filtered, key=lambda item: relative_to_project(item, project))
+    return live_common.snapshot_file_candidates(project)
+
+
+def source_snapshot_includes(path: Path) -> bool:
+    return path.is_file()
 
 
 def files_fingerprint(project: Path, paths: Sequence[Path]) -> str:
-    digest = hashlib.sha256()
-    for path in paths:
-        rel = relative_to_project(path, project)
-        digest.update(rel.encode("utf-8"))
-        digest.update(b"\0")
-        if path.exists() and path.is_file():
-            digest.update(file_sha256(path).encode("ascii"))
-        digest.update(b"\0")
-    return digest.hexdigest()
+    return live_common.files_fingerprint(project, paths)
 
 
 def source_hash(project: Path) -> str:
-    return files_fingerprint(project, snapshot_file_candidates(project))
+    return live_common.compute_source_hash(project)
+
+
+def source_snapshot_rel_paths(project: Path) -> set[str]:
+    return {relative_to_project(path, project) for path in snapshot_file_candidates(project)}
+
+
+def dirty_paths_missing_from_source_snapshot(project: Path) -> list[str]:
+    snapshot_paths = source_snapshot_rel_paths(project)
+    missing: list[str] = []
+    for line in source_dirty_entries(git_status(project)):
+        rel = git_status_path(line)
+        if not rel or rel in snapshot_paths:
+            continue
+        missing.append(line)
+    return missing
+
+
+def tree_clean_for_commit_binding(project: Path) -> bool:
+    return not source_dirty_entries(git_status(project))
 
 
 def release_snapshot(project: Path) -> dict[str, Any]:
@@ -1450,6 +1451,9 @@ def cmd_browser_run(args: argparse.Namespace) -> int:
     problems: list[dict[str, Any]] = []
     manifest: dict[str, Any] | None = None
     manifest_path: Path | None = None
+    browser_playwright = None
+    browser_interaction_paths: list[Path] = []
+    browser_allowed_local_origins: tuple[str, ...] = ()
     for raw in args.viewport or []:
         name, entry = parse_viewport_spec(raw, project)
         viewports[name] = entry
@@ -1510,6 +1514,7 @@ def cmd_browser_run(args: argparse.Namespace) -> int:
             path = validate_browser_artifact_path(project, entry, task=args.task, manifest=manifest, manifest_paths=manifest_paths, problems=problems)
             if path is not None and browser_playwright is not None:
                 problems.extend(browser_playwright.validate_interaction_artifact(path, project))
+                browser_interaction_paths.append(path)
         if manifest is not None:
             summary = live_manifest_summary(manifest)
             if not summary.get("url"):
@@ -1531,12 +1536,21 @@ def cmd_browser_run(args: argparse.Namespace) -> int:
                     live_common.compute_runtime_asset_hash(project, exclude_paths=[project / SERVER_LEASE]),
                 )
                 problems.extend(lease_problems)
+                if lease:
+                    browser_allowed_local_origins = (browser_playwright.normalize_origin(parsed_url),)
         except Exception as exc:
             problems.append(browser_run_problem(f"server lease validation failed: {exc}", rule="server-lease"))
     if args.require_server_lease and not lease:
         problems.append(browser_run_problem("browser run requires a Star Forge server lease", rule="server-lease"))
     if args.server_lease and not lease:
         problems.append(browser_run_problem("--server-lease was passed but no valid lease is claimed", rule="server-lease"))
+    if args.strict and browser_playwright is not None:
+        for path in browser_interaction_paths:
+            problems.extend(browser_playwright.validate_request_safety_artifact(
+                path,
+                project,
+                allowed_local_origins=browser_allowed_local_origins,
+            ))
     if viewports:
         write_screenshot_manifest(project, context={"scenario": args.scenario, "url": args.url})
     blocking = blocking_items(problems)
@@ -2078,8 +2092,9 @@ def unsafe_preview_url_reason(url: str, *, allow_local: bool = False) -> str | N
     is_local = host.lower() in {"localhost"} or bool(ip and ip.is_loopback)
     if is_local and not allow_local:
         return "preview URL must not target localhost without a local preview proof"
-    if ip and (ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast) and not (allow_local and ip.is_loopback):
-        return "preview URL must not target private, loopback, link-local, reserved, or multicast IPs"
+    if ip and not (allow_local and ip.is_loopback):
+        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast or not ip.is_global:
+            return "preview URL must not target non-global, private, loopback, link-local, reserved, or multicast IPs"
     query = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
     for key, value in query:
         lowered = f"{key}={value}".lower()
@@ -2214,8 +2229,7 @@ def strict_preview_http_artifact_problems(
             if strategy != "http-connect-vetted-ip":
                 problems.append(live_problem("preview HTTP connection_pinning.strategy must be http-connect-vetted-ip", rule="preview-http", path=path))
         elif scheme == "https":
-            if not preview_https_sni_safe_pinning(pinning_url, pinning):
-                problems.append(live_problem("HTTPS preview evidence requires SNI-safe connection pinning from the collector", rule="preview-http", path=path))
+            problems.append(live_problem("HTTPS preview evidence is rejected until verifiable SNI pinning is available from the collector", rule="preview-http", path=path))
     return problems
 
 
@@ -2333,9 +2347,9 @@ def deployment_bound_to_current(project: Path, deployment: Any) -> bool:
     current_source = source_hash(project)
     for key in ("source_hash", "sourceHash", "source_hash_after", "sourceHashAfter"):
         if str(deployment.get(key) or "") == current_source:
-            return True
+            return not dirty_paths_missing_from_source_snapshot(project)
     head = git_head(project)
-    if head:
+    if head and tree_clean_for_commit_binding(project):
         for key in ("commit_sha", "commitSha", "head_sha", "headSha", "git_head", "gitHead"):
             if str(deployment.get(key) or "") == head:
                 return True
@@ -2564,16 +2578,39 @@ def collector_for_profile(profile: str) -> str | None:
     return mapping.get(profile)
 
 
+def dedicated_strict_proof_command_for_profile(profile: str) -> str:
+    if profile in {"security", *SECURITY_PROFILES}:
+        return "security-proof"
+    if profile == "native-ios":
+        return "native-ios-proof"
+    if profile == "native-macos":
+        return "native-macos-proof"
+    return ""
+
+
 def cmd_proof_run(args: argparse.Namespace) -> int:
     project = resolve_project(args.project)
     ensure_state_dirs(project)
     problems: list[dict[str, Any]] = []
     artifacts: list[dict[str, Any]] = []
-    collector = collector_for_profile(args.profile)
+    profile = str(args.profile or "").strip()
+    github_source_profiles = {"production-review", "github-pr-review"}
+    collector = collector_for_profile(profile)
     manifest, manifest_path = load_and_validate_live_manifest(project, args.artifact, problems, task=args.task, collector=collector, require_scoped=collector is not None)
-    if not str(args.profile or "").strip():
+    if not profile:
         problems.append(live_problem("proof-run requires --profile", rule="proof-profile"))
-    if args.profile == "preview" and manifest_path is not None:
+    elif profile in github_source_profiles:
+        problems.append(live_problem(
+            "proof-run does not accept GitHub source packet profiles; use source-packet-proof or source-packet-github-pr-review",
+            rule="proof-profile",
+        ))
+    dedicated_command = dedicated_strict_proof_command_for_profile(profile)
+    if args.strict and dedicated_command:
+        problems.append(live_problem(
+            f"strict proof-run for profile {profile} must use {dedicated_command}",
+            rule="proof-profile",
+        ))
+    if profile == "preview" and manifest_path is not None:
         summary = live_manifest_summary(manifest)
         expected_status = summary.get("expected_status") if "expected_status" in summary else summary.get("status")
         try:
@@ -2605,6 +2642,50 @@ def cmd_proof_run(args: argparse.Namespace) -> int:
         artifacts=artifacts,
         summary=f"profile={args.profile}",
     )
+
+
+NATIVE_IOS_RESULT_SCHEMA = "star-forge.native-ios.result.v1"
+
+
+def validate_native_ios_result_artifact(
+    project: Path,
+    manifest: dict[str, Any] | None,
+    payload: Any,
+    entry: dict[str, Any] | None,
+    *,
+    expected_kind: str,
+    label: str,
+    scheme: str,
+    simulator: str,
+    problems: list[dict[str, Any]],
+) -> None:
+    path = entry.get("path", "") if entry else ""
+    if not isinstance(payload, dict):
+        return
+    summary = live_manifest_summary(manifest)
+    simulator_summary = summary.get("simulator") if isinstance(summary.get("simulator"), dict) else {}
+    expected_runtime = str(summary.get("simulator_runtime") or simulator_summary.get("runtime") or "").strip()
+    expected_udid = str(summary.get("simulator_udid") or simulator_summary.get("udid") or "").strip()
+    try:
+        from live_collectors import native_ios
+        native_ios.validate_result_artifact_contract(
+            label,
+            expected_kind,
+            payload,
+            problems,
+            path=path,
+            expected_runtime=expected_runtime,
+            expected_udid=expected_udid,
+        )
+    except Exception as exc:
+        problems.append(live_problem(f"{label} command validation failed: {exc}", rule="native-ios-result", path=path))
+
+    result_scheme = str(payload.get("scheme") or payload.get("scheme_name") or "").strip()
+    if result_scheme and result_scheme != scheme:
+        problems.append(live_problem(f"{label} scheme does not match proof input", rule="native-ios-result", path=path))
+    result_simulator = str(payload.get("simulator") or payload.get("device") or payload.get("destination") or "").strip()
+    if result_simulator and simulator and simulator not in result_simulator and result_simulator not in simulator:
+        problems.append(live_problem(f"{label} simulator does not match proof input", rule="native-ios-result", path=path))
 
 
 def cmd_native_ios_proof(args: argparse.Namespace) -> int:
@@ -2651,6 +2732,18 @@ def cmd_native_ios_proof(args: argparse.Namespace) -> int:
             require_object=True,
         )
         append_artifact_once(artifacts, entry)
+        if args.strict:
+            validate_native_ios_result_artifact(
+                project,
+                manifest,
+                payload,
+                entry,
+                expected_kind=label.split()[0],
+                label=label,
+                scheme=args.scheme,
+                simulator=args.simulator,
+                problems=problems,
+            )
         failure = result_indicates_failure(payload)
         if failure:
             problems.append(live_problem(f"{label} failed: {failure}", rule="native-ios-result", path=entry.get("path", "") if entry else ""))
@@ -2773,6 +2866,85 @@ def validate_native_macos_runtime(project: Path, manifest: dict[str, Any] | None
         require_raw_hash_for_artifact(project, manifest, artifact, problems, label=key, rule="native-macos-runtime")
 
 
+NATIVE_MACOS_RESULT_SCHEMA = "star-forge.native-macos.result.v1"
+
+
+def numeric_field(payload: dict[str, Any], key: str) -> float | None:
+    value = payload.get(key)
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    return None
+
+
+def validate_native_macos_result_artifact(
+    project: Path,
+    manifest: dict[str, Any] | None,
+    payload: Any,
+    entry: dict[str, Any] | None,
+    *,
+    expected_kind: str,
+    label: str,
+    problems: list[dict[str, Any]],
+) -> None:
+    path = entry.get("path", "") if entry else ""
+    if not isinstance(payload, dict):
+        return
+    if payload.get("schema") != NATIVE_MACOS_RESULT_SCHEMA:
+        problems.append(live_problem(f"{label} must use schema {NATIVE_MACOS_RESULT_SCHEMA}", rule="native-macos-result", path=path))
+    if str(payload.get("kind") or "") != expected_kind:
+        problems.append(live_problem(f"{label} kind must be {expected_kind}", rule="native-macos-result", path=path))
+    command_argv = payload.get("command_argv")
+    valid_command_argv: list[str] | None = None
+    if (
+        isinstance(command_argv, list)
+        and command_argv
+        and all(isinstance(item, str) and item and "\0" not in item for item in command_argv)
+    ):
+        valid_command_argv = list(command_argv)
+    else:
+        problems.append(live_problem(f"{label} must include a non-empty command_argv array", rule="native-macos-result", path=path))
+    if valid_command_argv is not None:
+        for issue in native_macos_collector.validate_argv(valid_command_argv, label):
+            issue = dict(issue)
+            if path and not issue.get("path"):
+                issue["path"] = path
+            problems.append(issue)
+    if payload.get("shell") is not False:
+        problems.append(live_problem(f"{label} must record shell exactly false", rule="native-macos-result", path=path))
+    if payload.get("cwd") != ".":
+        problems.append(live_problem(f"{label} must record cwd '.'", rule="native-macos-result", path=path))
+    if valid_command_argv is not None and not str(payload.get("executable_path") or ""):
+        problems.append(live_problem(f"{label} must include executable_path", rule="native-macos-result", path=path))
+
+    timeout = numeric_field(payload, "timeout_seconds")
+    if timeout is None or timeout <= 0 or timeout > 24 * 60 * 60:
+        problems.append(live_problem(f"{label} timeout_seconds must be a sane positive number", rule="native-macos-result", path=path))
+    duration = numeric_field(payload, "duration_seconds")
+    if duration is None or duration < 0:
+        problems.append(live_problem(f"{label} duration_seconds must be a non-negative number", rule="native-macos-result", path=path))
+    elif timeout is not None and duration > timeout + 60:
+        problems.append(live_problem(f"{label} duration_seconds is not consistent with timeout_seconds", rule="native-macos-result", path=path))
+
+    artifact_keys = ("stdout_artifact", "stderr_artifact")
+    if valid_command_argv is not None and not any(payload.get(key) for key in artifact_keys):
+        problems.append(live_problem(f"{label} must include stdout or stderr artifact evidence", rule="native-macos-result", path=path))
+    for key in artifact_keys:
+        raw = payload.get(key)
+        if not raw:
+            continue
+        try:
+            artifact = live_common.safe_project_path(project, raw, must_exist=True)
+        except ValueError as exc:
+            problems.append(live_problem(f"{label} {key} is invalid: {exc}", rule="native-macos-result", path=str(raw)))
+            continue
+        if not artifact.is_file():
+            problems.append(live_problem(f"{label} {key} must point to a file", rule="native-macos-result", path=relative_to_project(artifact, project)))
+            continue
+        require_raw_hash_for_artifact(project, manifest, artifact, problems, label=f"{label} {key}", rule="native-macos-result")
+
+
 def validate_native_macos_note(payload: Any, kind: str, entry: dict[str, Any] | None, problems: list[dict[str, Any]]) -> None:
     path = entry.get("path", "") if entry else ""
     if not isinstance(payload, dict):
@@ -2868,6 +3040,7 @@ def cmd_native_macos_proof(args: argparse.Namespace) -> int:
         ("run result", args.run_result, False),
         ("test result", args.test_result, True),
     ):
+        expected_kind = label.split()[0]
         entry, payload = validate_manifest_bound_artifact_arg(
             project,
             raw,
@@ -2882,6 +3055,16 @@ def cmd_native_macos_proof(args: argparse.Namespace) -> int:
         )
         append_artifact_once(artifacts, entry)
         if payload is not None:
+            if args.strict:
+                validate_native_macos_result_artifact(
+                    project,
+                    manifest,
+                    payload,
+                    entry,
+                    expected_kind=expected_kind,
+                    label=label,
+                    problems=problems,
+                )
             failure = result_indicates_failure(payload)
             if failure:
                 problems.append(live_problem(f"{label} failed: {failure}", rule="native-macos-result", path=entry.get("path", "") if entry else ""))
@@ -2899,6 +3082,30 @@ def cmd_native_macos_proof(args: argparse.Namespace) -> int:
             require_image=True,
         )
         append_artifact_once(artifacts, entry)
+    if args.strict:
+        screenshot_result = manifest_artifact_path_for_kind(project, manifest, "screenshot-result", "screenshot_result")
+        if screenshot_result is not None:
+            entry, payload = validate_manifest_bound_artifact_arg(
+                project,
+                screenshot_result,
+                "screenshot result",
+                problems,
+                manifest=manifest,
+                task=args.task,
+                collector="native-macos",
+                require_json=True,
+                require_object=True,
+            )
+            append_artifact_once(artifacts, entry)
+            validate_native_macos_result_artifact(
+                project,
+                manifest,
+                payload,
+                entry,
+                expected_kind="screenshot",
+                label="screenshot result",
+                problems=problems,
+            )
     app_bundle_entry = None
     if args.app_bundle:
         entry, _ = validate_artifact_arg(project, args.app_bundle, "app bundle", problems, task=args.task, collector="native-macos", require_scoped=False, require_dir=True)
@@ -3005,10 +3212,12 @@ def security_clean_problem(message: str, *, path: str = "") -> dict[str, Any]:
 def source_binding_is_fresh(project: Path, binding: Mapping[str, Any]) -> bool:
     current_source = source_hash(project)
     if str(binding.get("source_hash") or "") == current_source:
-        return True
+        return not dirty_paths_missing_from_source_snapshot(project)
     commit_sha = str(binding.get("commit_sha") or "")
     head = git_head(project)
-    return bool(commit_sha and head and commit_sha == head)
+    if not commit_sha or not head or commit_sha != head:
+        return False
+    return tree_clean_for_commit_binding(project)
 
 
 def validate_clean_security_artifacts(
@@ -3343,6 +3552,7 @@ def validate_github_operation_transcript(
     *,
     path: str,
     check_runs_payload: Any = None,
+    pr_payload: Any = None,
 ) -> str:
     actual_hash = require_raw_hash_for_artifact(
         project,
@@ -3370,7 +3580,7 @@ def validate_github_operation_transcript(
     if not isinstance(refs, dict):
         problems.append(live_problem("GitHub operation transcript requires freshness refs", rule="github-live-provenance", path=path))
         refs = {}
-    for field in ("captured_base_sha", "current_base_sha", "captured_head_sha", "current_head_sha"):
+    for field in ("captured_base_sha", "current_base_sha", "captured_head_sha", "current_head_sha", "merge_base_sha"):
         if str(refs.get(field) or "") != str(summary.get(field) or ""):
             problems.append(live_problem(f"GitHub operation transcript {field} does not match the manifest summary", rule="github-live-provenance", path=path))
     permission_state = transcript_payload.get("permission_state")
@@ -3394,6 +3604,14 @@ def validate_github_operation_transcript(
     except Exception as exc:
         problems.append(live_problem(f"GitHub operation validators are unavailable: {exc}", rule="github-live-provenance", path=path))
     else:
+        github_host, host_messages = github_pr.validate_transcript_github_host_evidence(
+            transcript_payload=transcript_payload,
+            summary=summary,
+            pr_payload=pr_payload,
+            operations=operations,
+        )
+        for message in host_messages:
+            problems.append(live_problem(message, rule="github-live-provenance", path=path))
         for command in commands:
             parsed = github_pr.shell_argv(command)
             if not parsed:
@@ -3406,6 +3624,7 @@ def validate_github_operation_transcript(
                     pr_number=str(summary.get("pr") or ""),
                     check_runs=check_runs_payload,
                     captured_head=str(summary.get("captured_head_sha") or ""),
+                    github_host=github_host,
                 )
             )
         for operation in operations:
@@ -3416,9 +3635,106 @@ def validate_github_operation_transcript(
                     pr_number=str(summary.get("pr") or ""),
                     check_runs=check_runs_payload,
                     captured_head=str(summary.get("captured_head_sha") or ""),
+                    github_host=github_host,
+                    require_identity=True,
                 )
             )
     return actual_hash
+
+
+def _github_payload_text(*values: Any) -> str:
+    for value in values:
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return ""
+
+
+def _github_payload_ref(payload: Mapping[str, Any], *keys: str) -> str:
+    for key in keys:
+        text = _github_payload_text(payload.get(key))
+        if text:
+            return text
+    return ""
+
+
+def validate_github_pr_payload(
+    pr_payload: Any,
+    summary: Mapping[str, Any],
+    transcript_payload: Any,
+    problems: list[dict[str, Any]],
+    *,
+    path: str,
+) -> None:
+    if not isinstance(pr_payload, Mapping):
+        problems.append(live_problem("GitHub PR artifact must be a JSON object", rule="github-live-provenance", path=path))
+        return
+    try:
+        from live_collectors import github_pr
+    except Exception as exc:
+        problems.append(live_problem(f"GitHub PR validators are unavailable: {exc}", rule="github-live-provenance", path=path))
+        return
+
+    expected_repo = _github_payload_text(summary.get("repo"))
+    expected_pr = _github_payload_text(summary.get("pr"))
+    payload_repo = github_pr.payload_repository_identity(pr_payload)
+    payload_pr = _github_payload_text(
+        pr_payload.get("number"),
+        pr_payload.get("pr"),
+        pr_payload.get("pull_request"),
+        pr_payload.get("pullRequestNumber"),
+    )
+    if expected_repo and not payload_repo:
+        problems.append(live_problem("GitHub PR artifact requires repository identity", rule="github-live-provenance", path=path))
+    elif expected_repo and payload_repo != expected_repo:
+        problems.append(live_problem("GitHub PR artifact repository does not match the manifest summary", rule="github-live-provenance", path=path))
+    if expected_pr and not payload_pr:
+        problems.append(live_problem("GitHub PR artifact requires PR identity", rule="github-live-provenance", path=path))
+    elif expected_pr and payload_pr != expected_pr:
+        problems.append(live_problem("GitHub PR artifact number does not match the manifest summary", rule="github-live-provenance", path=path))
+
+    pr_url_keys = ("url", "html_url", "web_url", "pull_request_url", "pullRequestUrl")
+    present_pr_urls: list[tuple[str, str]] = []
+    for key in pr_url_keys:
+        text = _github_payload_text(pr_payload.get(key))
+        if text:
+            present_pr_urls.append((key, text))
+    if not present_pr_urls:
+        problems.append(live_problem("GitHub PR artifact requires PR URL identity", rule="github-live-provenance", path=path))
+    for key, pr_url in present_pr_urls:
+        label = f"GitHub PR artifact {key}"
+        for message in github_pr.github_url_identity_messages(pr_url, label, require_url=True):
+            problems.append(live_problem(message, rule="github-live-provenance", path=path))
+        url_repo = github_pr.repo_from_url(pr_url)
+        url_pr = github_pr.pr_from_url(pr_url)
+        if expected_repo and not url_repo:
+            problems.append(live_problem(f"{label} must include repository identity", rule="github-live-provenance", path=path))
+        elif expected_repo and url_repo != expected_repo:
+            problems.append(live_problem(f"{label} repository does not match the manifest summary", rule="github-live-provenance", path=path))
+        if expected_pr and not url_pr:
+            problems.append(live_problem(f"{label} must include PR identity", rule="github-live-provenance", path=path))
+        elif expected_pr and url_pr != expected_pr:
+            problems.append(live_problem(f"{label} PR does not match the manifest summary", rule="github-live-provenance", path=path))
+
+    pr_refs = {
+        "captured_base_sha": github_pr.extract_base_sha(pr_payload),
+        "captured_head_sha": github_pr.extract_head_sha(pr_payload),
+        "current_base_sha": _github_payload_ref(pr_payload, "current_base_sha", "currentBaseSha"),
+        "current_head_sha": _github_payload_ref(pr_payload, "current_head_sha", "currentHeadSha"),
+        "merge_base_sha": _github_payload_ref(pr_payload, "merge_base_sha", "mergeBaseOid"),
+    }
+    transcript_refs = transcript_payload.get("refs") if isinstance(transcript_payload, Mapping) and isinstance(transcript_payload.get("refs"), Mapping) else {}
+    for field, actual in pr_refs.items():
+        expected = _github_payload_text(summary.get(field))
+        if not actual:
+            problems.append(live_problem(f"GitHub PR artifact requires {field}", rule="github-live-provenance", path=path))
+        elif expected and actual != expected:
+            problems.append(live_problem(f"GitHub PR artifact {field} does not match the manifest summary", rule="github-live-provenance", path=path))
+        transcript_value = _github_payload_text(transcript_refs.get(field)) if isinstance(transcript_refs, Mapping) else ""
+        if actual and transcript_value and actual != transcript_value:
+            problems.append(live_problem(f"GitHub PR artifact {field} does not match the operation transcript", rule="github-live-provenance", path=path))
 
 
 def validate_source_packet_manifest(project: Path, manifest: dict[str, Any] | None, manifest_path: Path | None, problems: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -3429,6 +3745,7 @@ def validate_source_packet_manifest(project: Path, manifest: dict[str, Any] | No
     required = ["pr.json", "diff.patch", "reviews.json", "comments.json", "check-runs.json", "annotations.json"]
     summary = live_manifest_summary(manifest)
     check_runs_payload: Any = None
+    pr_payload: Any = None
     for filename in required:
         require_json = filename.endswith(".json")
         entry, payload = validate_manifest_bound_artifact_arg(
@@ -3444,6 +3761,8 @@ def validate_source_packet_manifest(project: Path, manifest: dict[str, Any] | No
             require_json=require_json,
         )
         append_artifact_once(artifacts, entry)
+        if filename == "pr.json" and payload is not None:
+            pr_payload = payload
         if filename == "check-runs.json" and payload is not None:
             check_runs_payload = payload
             validate_check_runs(payload, problems, entry.get("path", "") if entry else "", captured_head=str(summary.get("captured_head_sha") or ""))
@@ -3503,6 +3822,14 @@ def validate_source_packet_manifest(project: Path, manifest: dict[str, Any] | No
             problems,
             path=transcript_entry.get("path", ""),
             check_runs_payload=check_runs_payload,
+            pr_payload=pr_payload,
+        )
+        validate_github_pr_payload(
+            pr_payload,
+            summary,
+            transcript_payload,
+            problems,
+            path=next((str(item.get("path") or "") for item in artifacts if str(item.get("path") or "").endswith("/pr.json")), live_rel(project, root / "pr.json")),
         )
     else:
         problems.append(live_problem("GitHub PR source packet requires a scoped operation transcript artifact", rule="github-live-provenance", path=live_rel(project, transcript_path)))
@@ -3552,7 +3879,7 @@ def validate_source_packet_manifest(project: Path, manifest: dict[str, Any] | No
         problems.append(live_problem("GitHub PR source packet provenance PR does not match the summary", rule="github-live-provenance"))
     if not str(provenance.get("collected_at") or provenance.get("captured_at") or summary.get("captured_at") or "").strip():
         problems.append(live_problem("GitHub PR source packet requires a collection timestamp", rule="github-live-provenance"))
-    freshness_fields = ("captured_base_sha", "current_base_sha", "captured_head_sha", "current_head_sha")
+    freshness_fields = ("captured_base_sha", "current_base_sha", "captured_head_sha", "current_head_sha", "merge_base_sha")
     missing_freshness = [field for field in freshness_fields if not str(summary.get(field) or provenance.get(field) or "").strip()]
     if missing_freshness:
         problems.append(live_problem("GitHub PR source packet is missing freshness refs: " + ", ".join(missing_freshness), rule="github-live-provenance"))
@@ -3573,6 +3900,9 @@ def validate_source_packet_manifest(project: Path, manifest: dict[str, Any] | No
 
 
 def validate_check_runs(payload: Any, problems: list[dict[str, Any]], path: str, *, captured_head: str = "") -> None:
+    completed_statuses = {"completed", "success"}
+    successful_conclusions = {"success"}
+    pending_statuses = {"expected", "in_progress", "pending", "queued", "requested", "waiting"}
     if isinstance(payload, dict):
         if payload.get("partial_permissions"):
             problems.append(live_problem("check runs are permission-partial", rule="github-checks", path=path))
@@ -3590,12 +3920,16 @@ def validate_check_runs(payload: Any, problems: list[dict[str, Any]], path: str,
             continue
         status = str(check.get("status") or "").lower()
         conclusion = str(check.get("conclusion") or "").lower()
-        if status and status not in {"completed", "success"}:
+        if not status:
+            problems.append(live_problem(f"check run {idx + 1} is missing status", rule="github-checks", path=path))
+        elif status in pending_statuses:
+            problems.append(live_problem(f"check run {idx + 1} is pending: {status}", rule="github-checks", path=path))
+        elif status not in completed_statuses:
             problems.append(live_problem(f"check run {idx + 1} is not complete: {status}", rule="github-checks", path=path))
-        if conclusion in {"failure", "failed", "cancelled", "timed_out", "action_required", "skipped", "neutral"}:
+        if not conclusion:
+            problems.append(live_problem(f"check run {idx + 1} is missing conclusion", rule="github-checks", path=path))
+        elif conclusion not in successful_conclusions:
             problems.append(live_problem(f"check run {idx + 1} conclusion is {conclusion}", rule="github-checks", path=path))
-        if not status and not conclusion:
-            problems.append(live_problem(f"check run {idx + 1} is missing status and conclusion", rule="github-checks", path=path))
         commit = check.get("commit")
         commit_sha = str(commit.get("sha") or "") if isinstance(commit, dict) else ""
         run_head = str(check.get("head_sha") or check.get("headSha") or commit_sha)
@@ -3609,10 +3943,15 @@ def cmd_source_packet_proof(args: argparse.Namespace) -> int:
     project = resolve_project(args.project)
     ensure_state_dirs(project)
     problems: list[dict[str, Any]] = []
-    manifest, manifest_path = load_and_validate_live_manifest(project, args.input, problems, task=args.task, collector=collector_for_profile(args.profile), require_scoped=collector_for_profile(args.profile) is not None)
-    if not str(args.profile or "").strip():
+    profile = str(args.profile or "").strip()
+    github_source_profiles = {"production-review", "github-pr-review"}
+    collector = collector_for_profile(profile) if profile in github_source_profiles else None
+    manifest, manifest_path = load_and_validate_live_manifest(project, args.input, problems, task=args.task, collector=collector, require_scoped=collector is not None)
+    if not profile:
         problems.append(live_problem("source packet proof requires --profile", rule="source-profile"))
-    artifacts = validate_source_packet_manifest(project, manifest, manifest_path, problems) if args.profile == "production-review" else []
+    elif profile not in github_source_profiles:
+        problems.append(live_problem(f"source packet proof profile is unsupported: {profile}", rule="source-profile"))
+    artifacts = validate_source_packet_manifest(project, manifest, manifest_path, problems) if profile in github_source_profiles else []
     return write_live_proof_record(
         project,
         kind="source-packet-proof",
@@ -3727,27 +4066,133 @@ def finding_fingerprint(finding: dict[str, Any]) -> str:
     file = re.sub(r"\s+", "", str(finding.get("file") or "")).lower()
     line = finding.get("line")
     bucket = int(line) // 4 if isinstance(line, int) else -1
-    title = re.sub(r"[^a-z0-9]+", "", str(finding.get("title") or "").lower())[:40]
-    return f"{file}:{bucket}:{title}"
+    signature = finding_issue_signature(finding)
+    return f"{file}:{bucket}:{signature}"
+
+
+FINDING_DUPLICATE_STOPWORDS = {
+    "about", "across", "again", "architecture", "because", "blocks", "code",
+    "correctness", "could", "failure", "finding", "findings", "from", "high",
+    "issue", "needs", "problem", "review", "risk", "security", "should", "this",
+    "with",
+}
+
+
+FINDING_MARKERS = {
+    "ts-ignore": ("@ts-ignore", "ts-ignore"),
+    "secret-material": ("secret", "api key", "api_key", "token", "credential"),
+    "large-file": ("large file", "too large", "split into smaller"),
+    "shell-wrapper": ("shell", "sh -c", "bash -c", "zsh -c"),
+}
+
+
+def finding_text(finding: dict[str, Any]) -> str:
+    return " ".join(
+        str(finding.get(key) or "")
+        for key in ("rule", "title", "detail", "suggested_fix")
+    ).lower()
+
+
+def finding_issue_signature(finding: dict[str, Any]) -> str:
+    text = finding_text(finding)
+    for marker, needles in FINDING_MARKERS.items():
+        if any(needle in text for needle in needles):
+            return marker
+    tokens = [
+        token
+        for token in re.findall(r"[a-z0-9_@-]{4,}", text)
+        if token not in FINDING_DUPLICATE_STOPWORDS
+    ]
+    if not tokens:
+        return re.sub(r"[^a-z0-9]+", "", str(finding.get("title") or "").lower())[:40]
+    seen: list[str] = []
+    for token in tokens:
+        if token not in seen:
+            seen.append(token)
+    return "-".join(seen[:8])
+
+
+def finding_line_bucket(finding: dict[str, Any]) -> int:
+    line = finding.get("line")
+    return int(line) // 4 if isinstance(line, int) else -1
+
+
+def finding_token_set(finding: dict[str, Any]) -> set[str]:
+    return {
+        token
+        for token in re.findall(r"[a-z0-9_@-]{4,}", finding_text(finding))
+        if token not in FINDING_DUPLICATE_STOPWORDS
+    }
+
+
+def findings_are_duplicate_variants(existing: dict[str, Any], candidate: dict[str, Any]) -> bool:
+    existing_file = re.sub(r"\s+", "", str(existing.get("file") or "")).lower()
+    candidate_file = re.sub(r"\s+", "", str(candidate.get("file") or "")).lower()
+    if existing_file != candidate_file:
+        return False
+    existing_bucket = finding_line_bucket(existing)
+    candidate_bucket = finding_line_bucket(candidate)
+    if existing_bucket != -1 and candidate_bucket != -1 and existing_bucket != candidate_bucket:
+        return False
+    if finding_issue_signature(existing) == finding_issue_signature(candidate):
+        return True
+    existing_tokens = finding_token_set(existing)
+    candidate_tokens = finding_token_set(candidate)
+    if not existing_tokens or not candidate_tokens:
+        return False
+    overlap = len(existing_tokens & candidate_tokens)
+    smaller = min(len(existing_tokens), len(candidate_tokens))
+    return overlap >= 2 and overlap / max(1, smaller) >= 0.5
+
+
+def finding_severity_rank(severity: Any) -> int:
+    return FINDING_SEVERITY_RANK.get(str(severity or "").lower(), 0)
+
+
+def finding_role_detail(finding: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "role": finding.get("role"),
+        "agent_id": finding.get("agent_id"),
+        "severity": finding.get("severity"),
+    }
+
+
+def merge_duplicate_finding(existing: dict[str, Any], candidate: dict[str, Any]) -> None:
+    existing.setdefault("agreed_by", [])
+    existing_role = existing.get("role")
+    if existing_role not in existing["agreed_by"]:
+        existing["agreed_by"].append(existing_role)
+    candidate_role = candidate.get("role")
+    if candidate_role not in existing["agreed_by"]:
+        existing["agreed_by"].append(candidate_role)
+
+    details = existing.setdefault("role_details", [])
+    existing_detail = finding_role_detail(existing)
+    if existing_detail not in details:
+        details.append(existing_detail)
+    candidate_detail = finding_role_detail(candidate)
+    if candidate_detail not in details:
+        details.append(candidate_detail)
+
+    if finding_severity_rank(candidate.get("severity")) > finding_severity_rank(existing.get("severity")):
+        existing["severity"] = candidate.get("severity")
+        for key in ("title", "detail", "suggested_fix"):
+            if candidate.get(key):
+                existing[key] = candidate.get(key)
 
 
 def assign_finding_ids(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
-    seen: dict[str, dict[str, Any]] = {}
     counter = 0
     for finding in findings:
-        fp = finding_fingerprint(finding)
-        if fp in seen:
-            existing = seen[fp]
-            existing.setdefault("agreed_by", [existing.get("role")])
-            if finding.get("role") not in existing["agreed_by"]:
-                existing["agreed_by"].append(finding.get("role"))
+        existing = next((item for item in out if findings_are_duplicate_variants(item, finding)), None)
+        if existing is not None:
+            merge_duplicate_finding(existing, finding)
             continue
         counter += 1
         finding = dict(finding)
         finding["id"] = finding.get("id") or f"F-{counter}"
-        finding["fingerprint"] = fp
-        seen[fp] = finding
+        finding["fingerprint"] = finding_fingerprint(finding)
         out.append(finding)
     return out
 

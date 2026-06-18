@@ -154,11 +154,19 @@ def base_inputs(
     transcript.setdefault("source_hash", star_forge.source_hash(project))
     if mutate_transcript is not None:
         mutate_transcript(transcript)
+    def result_payload(kind: str, success: bool) -> dict[str, Any]:
+        return {
+            "schema": native_ios.RESULT_SCHEMA,
+            "kind": kind,
+            "success": success,
+            "simulator_runtime": "iOS 18.4",
+            "simulator_udid": "00000000-0000-0000-0000-000000000001",
+        }
     paths = {
         "transcript": write_json(root / "mcp-transcript.json", transcript),
-        "build": write_json(root / "build.json", {"schema": native_ios.RESULT_SCHEMA, "kind": "build", "success": build_success}),
-        "launch": write_json(root / "launch.json", {"schema": native_ios.RESULT_SCHEMA, "kind": "launch", "success": launch_success}),
-        "test": write_json(root / "test.json", {"schema": native_ios.RESULT_SCHEMA, "kind": "test", "success": test_success}),
+        "build": write_json(root / "build.json", result_payload("build", build_success)),
+        "launch": write_json(root / "launch.json", result_payload("launch", launch_success)),
+        "test": write_json(root / "test.json", result_payload("test", test_success)),
     }
     if include_screenshot:
         paths["screenshot"] = make_png(root / "screenshot.png")
@@ -211,6 +219,74 @@ def test_missing_session_show_defaults_blocks_ordered_proof() -> None:
         assert_collector_rule(project, output, "native-ios-tool-order")
 
 
+def test_shell_fallback_tools_and_simulator_shell_commands_are_rejected() -> None:
+    cases = [
+        {"tool": "functions.exec_command", "arguments": {"cmd": "echo shell fallback"}},
+        {"tool": "mcp__utility__exec_command", "arguments": {"cmd": "echo mcp shell fallback"}},
+        {"tool": "run_command", "arguments": {"command": "echo forged evidence"}},
+        {"tool": "run_command", "arguments": {"cmd": "sh -c echo forged"}},
+        {"tool": "run_command", "arguments": {"command_args": ["sh", "-c", "echo forged"]}},
+        {"tool": "run_command", "arguments": {"command": "open -a Simulator"}},
+        {"tool": "run_command", "arguments": {"command": "open -a Simulator.app"}},
+        {"tool": "run_command", "arguments": {"command": ["open", "-b", "com.apple.iphonesimulator"]}},
+        {"tool": "run_command", "arguments": {"command": "/Applications/Xcode.app/Contents/Developer/Applications/Simulator.app"}},
+        {"tool": "run_command", "arguments": {"nested": {"command": "open -a Simulator.app"}}},
+        {"tool": "run_command", "arguments": {"command": "osascript -e 'tell application \"Simulator\" to activate'"}},
+        {"tool": "run_command", "arguments": {"command_argv": ["xcrun", "simctl", "list"]}},
+        {"tool": "run_command", "arguments": {"command-argv": ["xcodebuild", "-scheme", "TestApp"]}},
+        {"tool": "run_command", "arguments": {"command_args": ["env", "xcrun", "simctl", "boot", "DEVICE"]}},
+        {"tool": "build_run_sim", "arguments": {"scheme": "TestApp", "simulator": "iPhone 16", "commandLine": "xcrun simctl list"}},
+        {"tool": "test_sim", "arguments": {"scheme": "TestApp", "simulator": "iPhone 16", "command_line": ["xcrun", "simctl", "list"]}},
+        {"tool": "screenshot", "arguments": {"simulator": "iPhone 16", "cmdLine": "sh -c echo forged"}},
+        {"tool": "ui_snapshot", "arguments": {"simulator": "iPhone 16", "cmd_line": "xcrun simctl list"}},
+        {"tool": "run_command", "arguments": {"shell_command": "open -a Simulator.app"}},
+        {"tool": "run_command", "arguments": {"shell_command": "echo forged evidence"}},
+        {"tool": "run_command", "arguments": {"shellCommand": "osascript -e 'tell application \"Simulator\" to activate'"}},
+        {"tool": "run_command", "arguments": {"shellCmd": "echo forged evidence"}},
+        {"tool": "run_command", "arguments": {"command_argv": ["sh", "-c", "echo forged"]}},
+        {"tool": "build_run_sim", "arguments": {"scheme": "TestApp", "simulator": "iPhone 16", "argv": ["env", "sh", "-c", "echo forged"]}},
+        {"tool": "build_run_sim", "arguments": {"scheme": "TestApp", "simulator": "iPhone 16", "command_argv": ["/usr/bin/env", "env", "bash", "-c", "echo forged"]}},
+        {"tool": "launch_app", "arguments": {"simulator": "iPhone 16", "command_argv": ["env"]}},
+        {"tool": "test_sim", "arguments": {"scheme": "TestApp", "simulator": "iPhone 16", "argv": ["env", "-S", "zsh -c 'echo forged'"]}},
+        {"tool": "test_sim", "arguments": {"scheme": "TestApp", "simulator": "iPhone 16", "command_argv": ["env", "--split-string=pwsh -Command echo forged"]}},
+    ]
+    for shell_call in cases:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp).resolve()
+            init_project(project)
+
+            def mutate(transcript: dict[str, Any]) -> None:
+                transcript.setdefault("calls", []).append(shell_call)
+
+            paths = base_inputs(project, mutate_transcript=mutate)
+            code, output, _ = run_collector(base_args(project, paths))
+            assert code == 1
+            assert_collector_rule(project, output, "native-ios-shell-fallback")
+
+
+def test_allowed_tool_result_command_fields_are_rejected() -> None:
+    cases = [
+        {"tool": "build_run_sim", "args": {"scheme": "TestApp", "simulator": "iPhone 16"}, "result": {"command_argv": ["xcrun", "simctl", "list"]}},
+        {"tool": "build_run_sim", "args": {"scheme": "TestApp", "simulator": "iPhone 16"}, "result": {"details": {"commandLine": "xcrun simctl list"}}},
+        {"tool": "test_sim", "args": {"scheme": "TestApp", "simulator": "iPhone 16"}, "result": {"shell_command": "open -a Simulator.app"}},
+        {"tool": "test_sim", "args": {"scheme": "TestApp", "simulator": "iPhone 16"}, "result": {"cmdline": "osascript -e 'tell application \"Simulator\" to activate'"}},
+        {"tool": "screenshot", "args": {"simulator": "iPhone 16"}, "result": {"argv": ["env", "sh", "-c", "echo forged"]}},
+        {"tool": "ui_snapshot", "args": {"simulator": "iPhone 16"}, "result": {"nested": {"command_argv": ["env", "-S", "zsh -c 'echo forged'"]}}},
+    ]
+    for result_call in cases:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp).resolve()
+            init_project(project)
+
+            def mutate(transcript: dict[str, Any]) -> None:
+                transcript.setdefault("calls", []).append(result_call)
+
+            paths = base_inputs(project, mutate_transcript=mutate)
+            code, output, _ = run_collector(base_args(project, paths))
+            assert code == 1
+            assert_collector_rule(project, output, "native-ios-shell-fallback")
+
+
 def test_failed_build_blocks_handoff() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         project = Path(tmp).resolve()
@@ -242,6 +318,20 @@ def test_failed_test_blocks_handoff() -> None:
         assert code == 1
         assert output["handoff_ready"] is False
         assert_collector_rule(project, output, "native-ios-test")
+
+
+def test_schema_less_result_artifacts_block_handoff() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        init_project(project)
+        paths = base_inputs(project)
+        write_json(paths["build"], {"success": True})
+        write_json(paths["launch"], {"success": True})
+        write_json(paths["test"], {"success": True})
+        code, output, _ = run_collector(base_args(project, paths))
+        assert code == 1
+        assert output["handoff_ready"] is False
+        assert_collector_rule(project, output, "native-ios-result")
 
 
 def test_log_only_ui_proof_is_rejected() -> None:
@@ -322,6 +412,41 @@ def test_happy_path_prints_native_ios_proof_command_and_passes() -> None:
         assert proof_err == ""
         assert proof_code == 0, proof_payload
         assert proof_payload["verdict"] == "PASS", proof_payload
+
+
+def test_proof_command_uses_absolute_project_from_outside_project_cwd() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        init_project(project)
+        paths = base_inputs(project)
+        with chdir(ROOT):
+            code, output, err = run_collector(base_args(project, paths) + ["--mcp-version", "fixture"])
+            assert err == ""
+            assert code == 0, output
+            proof_argv = output["proof_command_argv"]
+            assert proof_argv[proof_argv.index("--project") + 1] == str(project)
+            proof_code, proof_payload, proof_err = run_star_cli(proof_argv[2:])
+        assert proof_err == ""
+        assert proof_code == 0, proof_payload
+        assert proof_payload["verdict"] == "PASS", proof_payload
+
+
+def test_record_invokes_strict_proof_even_when_collector_degraded() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        init_project(project)
+        paths = base_inputs(project, include_screenshot=False, include_log=True)
+        code, output, err = run_collector(base_args(project, paths) + ["--record"])
+        assert err == ""
+        assert code == 1, output
+        assert output["degraded"] is True
+        assert output["recorded"] is True
+        assert output["record"]["returncode"] == 1, output["record"]
+        assert "skipped" not in output["record"]
+        records = star_forge.load_run_records(project, kind="native-ios-proof", task=TASK)
+        assert records, output["record"]
+        assert records[-1]["verdict"] == "FAIL", records[-1]
+        assert_collector_rule(project, output, "native-ios-ui")
 
 
 def main() -> int:

@@ -57,6 +57,51 @@ def git_head(project: Path) -> str | None:
     return head or None
 
 
+def git_status(project: Path) -> list[str]:
+    proc = subprocess.run(
+        ["git", "status", "--short", "--untracked-files=all", "--", "."],
+        cwd=str(project),
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if proc.returncode != 0:
+        return ["?? <git status unavailable>"]
+    return [line for line in proc.stdout.splitlines() if line.strip()]
+
+
+def git_status_path(line: str) -> str:
+    path = line[3:] if len(line) > 3 else line.strip()
+    path = path.strip().strip('"')
+    if " -> " in path:
+        path = path.split(" -> ", 1)[1].strip().strip('"')
+    return path
+
+
+def source_dirty_entries(project: Path) -> list[str]:
+    return common.source_hash_dirty_entries(project, git_status(project))
+
+
+def source_tree_clean_at_head(project: Path) -> bool:
+    return bool(git_head(project)) and not source_dirty_entries(project)
+
+
+def source_snapshot_rel_paths(project: Path) -> set[str]:
+    return {common.project_relative(project, path) for path in common.snapshot_file_candidates(project)}
+
+
+def dirty_paths_missing_from_source_snapshot(project: Path) -> list[str]:
+    snapshot_paths = source_snapshot_rel_paths(project)
+    missing: list[str] = []
+    for line in source_dirty_entries(project):
+        rel = git_status_path(line)
+        if not rel or rel in snapshot_paths:
+            continue
+        missing.append(line)
+    return missing
+
+
 def json_write(path: Path, payload: Any) -> dict[str, Any]:
     redacted, report = common.redact_sensitive_values(payload)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -148,6 +193,8 @@ def is_blocked_ip(ip: ipaddress._BaseAddress, *, explicit_local_allowed: bool) -
         return "reserved IP targets are not allowed"
     if ip.is_multicast:
         return "multicast targets are not allowed"
+    if not ip.is_global:
+        return "non-global IP targets are not allowed"
     return None
 
 
@@ -612,6 +659,14 @@ def build_deployment_payload(
         payload["source_hash"] = args.deployment_source_hash
         if args.deployment_source_hash != current_source:
             problems.append(problem("deployment source hash is not bound to the current source", rule="preview-source-binding"))
+        else:
+            missing_dirty = dirty_paths_missing_from_source_snapshot(project)
+            if missing_dirty:
+                problems.append(problem(
+                    "deployment source hash does not cover dirty source paths: "
+                    + ", ".join(git_status_path(item) for item in missing_dirty[:5]),
+                    rule="preview-source-binding",
+                ))
     if args.deployment_commit_sha:
         payload["commit_sha"] = args.deployment_commit_sha
         head = git_head(project)
@@ -620,6 +675,8 @@ def build_deployment_payload(
             problems.append(problem("deployment commit SHA cannot be checked because the project has no git HEAD", rule="preview-source-binding"))
         elif args.deployment_commit_sha != head:
             problems.append(problem("deployment commit SHA is not bound to the current git HEAD", rule="preview-source-binding"))
+        elif not source_tree_clean_at_head(project):
+            problems.append(problem("deployment commit SHA requires a clean source tree at git HEAD", rule="preview-source-binding"))
     if args.local_build_artifact:
         try:
             artifact = common.safe_project_path(project, args.local_build_artifact, must_exist=True)

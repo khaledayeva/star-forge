@@ -47,17 +47,38 @@ SOURCE_SNAPSHOT_SUFFIXES = {
     ".c", ".cc", ".cpp", ".cs", ".css", ".go", ".h", ".html", ".java", ".js",
     ".jsx", ".kt", ".mjs", ".py", ".rb", ".rs", ".sh", ".swift", ".ts", ".tsx",
     ".vue", ".sql", ".json", ".yaml", ".yml", ".toml", ".graphql", ".proto",
-    ".prisma", ".ini", ".cfg", ".conf",
+    ".prisma", ".ini", ".cfg", ".conf", ".mk",
 }
 SOURCE_SNAPSHOT_NAMES = {
-    ".env", "package.json", "package-lock.json", "pnpm-lock.yaml", "yarn.lock",
+    ".dockerignore", ".env", ".gitignore", "package.json", "package-lock.json", "pnpm-lock.yaml", "yarn.lock",
     "requirements.txt", "pyproject.toml", "Cargo.toml", "go.mod", "go.sum",
+    "Blueprint.md", "Plan.md",
+    ".npmrc", ".yarnrc", ".yarnrc.yml", ".pnpmfile.cjs", ".pnp.cjs",
+    ".pnp.loader.mjs", ".node-version", ".nvmrc", "npm-shrinkwrap.json",
+    "pnpm-workspace.yaml", "bun.lock", "bun.lockb", "deno.lock",
+    "Dockerfile", "Containerfile", "Makefile", "GNUmakefile", "BSDmakefile",
+    "docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml",
+    "Procfile", "Caddyfile",
 }
-IGNORED_PARTS = {
+SOURCE_SNAPSHOT_NAME_PREFIXES = (
+    ".env.",
+    "Dockerfile.",
+    "Containerfile.",
+    "Makefile.",
+    "Procfile.",
+    "Caddyfile.",
+    "docker-compose.",
+    "compose.",
+)
+VCS_INTERNAL_PARTS = {".git", ".hg", ".svn"}
+STAR_FORGE_STATE_PARTS = {".starforge", "the-loop"}
+SOURCE_HASH_EXCLUDED_PARTS = VCS_INTERNAL_PARTS | STAR_FORGE_STATE_PARTS
+FALLBACK_IGNORED_PARTS = {
     ".codex-harness", ".git", ".hg", ".star-forge-pycache", ".starforge", ".svn",
     ".venv", "__pycache__", "build", "coverage", "dist", "node_modules", "target",
     "the-loop", "upstream",
 }
+IGNORED_PARTS = SOURCE_HASH_EXCLUDED_PARTS
 
 SECRET_RE = re.compile(
     r"("
@@ -222,6 +243,13 @@ def project_relative(project: Path, path: Path) -> str:
         return sanitize_external_path(path)
 
 
+def project_cli_arg(project: Path, *, cwd: Path | None = None) -> str:
+    """Return a stable value for proof command --project arguments."""
+    resolved_project = project.expanduser().resolve()
+    resolved_cwd = (cwd or Path.cwd()).expanduser().resolve()
+    return "." if resolved_project == resolved_cwd else str(resolved_project)
+
+
 def sanitize_external_path(path: Path) -> str:
     name = sanitize_segment(path.name or "external")
     digest = hashlib.sha256(str(path).encode("utf-8")).hexdigest()[:12]
@@ -246,9 +274,32 @@ def is_git_repo(project: Path) -> bool:
     return code == 0
 
 
+def path_has_source_hash_excluded_part(rel_path: str | Path) -> bool:
+    return any(part in SOURCE_HASH_EXCLUDED_PARTS for part in Path(rel_path).parts)
+
+
+def source_hash_dirty_entries(project: Path, entries: Sequence[str]) -> list[str]:
+    dirty: list[str] = []
+    for line in entries:
+        path = git_status_path(line)
+        if not path or path_has_source_hash_excluded_part(path):
+            continue
+        dirty.append(line)
+    return dirty
+
+
+def git_status_path(line: str) -> str:
+    path = line[3:] if len(line) > 3 else line.strip()
+    path = path.strip().strip('"')
+    if " -> " in path:
+        path = path.split(" -> ", 1)[1].strip().strip('"')
+    return path
+
+
 def snapshot_file_candidates(project: Path) -> list[Path]:
     files: list[Path] = []
-    if is_git_repo(project):
+    git_repo = is_git_repo(project)
+    if git_repo:
         seen_rel: set[str] = set()
         for ls_args in (["ls-files"], ["ls-files", "--others", "--exclude-standard"]):
             code, out, _ = run_git(ls_args, project)
@@ -258,27 +309,34 @@ def snapshot_file_candidates(project: Path) -> list[Path]:
                 rel = rel.strip()
                 if not rel or rel in seen_rel:
                     continue
+                if path_has_source_hash_excluded_part(rel):
+                    continue
                 seen_rel.add(rel)
                 path = project / rel
-                if path.exists():
+                if path.exists() and path.is_file():
                     files.append(path)
     else:
         for root, dirs, names in os.walk(project):
             root_path = Path(root)
-            dirs[:] = sorted(name for name in dirs if name not in IGNORED_PARTS and not (root_path / name).is_symlink())
+            dirs[:] = sorted(name for name in dirs if name not in FALLBACK_IGNORED_PARTS and not (root_path / name).is_symlink())
             for name in sorted(names):
                 path = root_path / name
                 if path.is_file():
                     files.append(path)
     filtered: list[Path] = []
+    excluded_parts = SOURCE_HASH_EXCLUDED_PARTS if git_repo else FALLBACK_IGNORED_PARTS
     for path in files:
         rel = project_relative(project, path)
         parts = Path(rel).parts
-        if any(part in IGNORED_PARTS or part == ".starforge" for part in parts):
+        if any(part in excluded_parts for part in parts):
             continue
-        if path.name in SOURCE_SNAPSHOT_NAMES or path.suffix.lower() in SOURCE_SNAPSHOT_SUFFIXES:
+        if source_snapshot_includes(path):
             filtered.append(path)
     return sorted(filtered, key=lambda item: project_relative(project, item))
+
+
+def source_snapshot_includes(path: Path) -> bool:
+    return path.is_file()
 
 
 def files_fingerprint(project: Path, paths: Sequence[Path]) -> str:

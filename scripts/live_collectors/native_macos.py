@@ -24,6 +24,7 @@ from typing import Any, Sequence
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 SCRIPTS_ROOT = SCRIPT_DIR.parent
+STAR_FORGE = SCRIPTS_ROOT / "star_forge.py"
 if str(SCRIPTS_ROOT) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_ROOT))
 
@@ -120,6 +121,189 @@ def executable_name(value: str) -> str:
     return Path(value).name.lower()
 
 
+def is_env_assignment(value: str) -> bool:
+    return bool(value) and "=" in value and not value.startswith("-") and value.split("=", 1)[0].isidentifier()
+
+
+ENV_NO_OPERAND_OPTIONS = {
+    "-i",
+    "--ignore-environment",
+    "-0",
+    "--null",
+    "-v",
+    "--debug",
+}
+ENV_OPERAND_OPTIONS = {
+    "-u",
+    "--unset",
+    "-C",
+    "--chdir",
+    "-P",
+    "--path",
+}
+ENV_OPERAND_PREFIXES = (
+    "--unset=",
+    "--chdir=",
+    "--path=",
+)
+ENV_SPLIT_OPTIONS = {"-S", "--split-string"}
+MAX_ENV_WRAPPER_DEPTH = 16
+
+
+def split_env_string(raw: str, label: str) -> tuple[list[str], list[MappingLike]]:
+    try:
+        return shlex.split(raw), []
+    except ValueError as exc:
+        return [], [problem(f"{label} env split string is malformed: {exc}", rule="native-macos-shell")]
+
+
+def validate_env_tail(tokens: Sequence[str], label: str, *, depth: int = 0) -> list[MappingLike]:
+    problems: list[MappingLike] = []
+    if depth > MAX_ENV_WRAPPER_DEPTH:
+        return [problem(f"{label} env wrapper chain is too deep", rule="native-macos-shell")]
+    idx = 1
+    if tokens and executable_name(str(tokens[0])) != "env":
+        idx = 0
+    while idx < len(tokens):
+        item = str(tokens[idx])
+        if item == "--":
+            idx += 1
+            break
+        if is_env_assignment(item):
+            idx += 1
+            continue
+        if item in ENV_SPLIT_OPTIONS:
+            if idx + 1 >= len(tokens):
+                problems.append(problem(f"{label} env split string is missing", rule="native-macos-shell"))
+                return problems
+            if idx + 2 < len(tokens):
+                problems.append(problem(f"{label} env split string has ambiguous trailing arguments", rule="native-macos-shell"))
+                return problems
+            split_tokens, split_problems = split_env_string(str(tokens[idx + 1]), label)
+            problems.extend(split_problems)
+            if not split_problems:
+                if not split_tokens:
+                    problems.append(problem(f"{label} env split string did not contain a command", rule="native-macos-shell"))
+                else:
+                    problems.extend(validate_env_tail(split_tokens, label, depth=depth + 1))
+            return problems
+        if item.startswith("--split-string="):
+            split_tokens, split_problems = split_env_string(item.split("=", 1)[1], label)
+            problems.extend(split_problems)
+            if idx + 1 < len(tokens):
+                problems.append(problem(f"{label} env split string has ambiguous trailing arguments", rule="native-macos-shell"))
+                return problems
+            if not split_problems:
+                if not split_tokens:
+                    problems.append(problem(f"{label} env split string did not contain a command", rule="native-macos-shell"))
+                else:
+                    problems.extend(validate_env_tail(split_tokens, label, depth=depth + 1))
+            return problems
+        if item.startswith("-S") and item != "-S":
+            split_tokens, split_problems = split_env_string(item[2:], label)
+            problems.extend(split_problems)
+            if idx + 1 < len(tokens):
+                problems.append(problem(f"{label} env split string has ambiguous trailing arguments", rule="native-macos-shell"))
+                return problems
+            if not split_problems:
+                if not split_tokens:
+                    problems.append(problem(f"{label} env split string did not contain a command", rule="native-macos-shell"))
+                else:
+                    problems.extend(validate_env_tail(split_tokens, label, depth=depth + 1))
+            return problems
+        if item in ENV_OPERAND_OPTIONS:
+            if idx + 1 >= len(tokens):
+                problems.append(problem(f"{label} env option `{item}` is missing its operand", rule="native-macos-shell"))
+                return problems
+            idx += 2
+            continue
+        if item.startswith(ENV_OPERAND_PREFIXES):
+            idx += 1
+            continue
+        if item.startswith("-P") and item != "-P":
+            idx += 1
+            continue
+        if item.startswith("-u") and item != "-u":
+            idx += 1
+            continue
+        if item.startswith("-C") and item != "-C":
+            idx += 1
+            continue
+        if item.startswith("-"):
+            if item in ENV_NO_OPERAND_OPTIONS:
+                idx += 1
+                continue
+            problems.append(problem(f"{label} env option `{item}` is not allowed", rule="native-macos-shell"))
+            return problems
+        break
+    if idx >= len(tokens):
+        problems.append(problem(f"{label} env wrapper must include a command", rule="native-macos-shell"))
+        return problems
+    target_tokens = [str(item) for item in tokens[idx:]]
+    target = target_tokens[0]
+    target_name = executable_name(target)
+    if target_name in SHELL_EXECUTABLES:
+        problems.append(problem(f"{label} argv must not invoke shell `{target_name}` through env", rule="native-macos-shell"))
+    elif target_name == "env":
+        problems.extend(validate_env_tail(target_tokens, label, depth=depth + 1))
+    return problems
+
+
+def validate_env_wrapper(argv: Sequence[str], label: str) -> list[MappingLike]:
+    if not argv or executable_name(argv[0]) != "env":
+        return []
+    return validate_env_tail(argv, label, depth=0)
+
+
+def env_shell_wrapper_target(argv: Sequence[str]) -> str:
+    if not argv or executable_name(argv[0]) != "env":
+        return ""
+    return next_env_shell_target([str(item) for item in argv])
+
+
+def next_env_shell_target(tokens: Sequence[str], *, depth: int = 0) -> str:
+    if depth > MAX_ENV_WRAPPER_DEPTH:
+        return ""
+    idx = 1 if tokens and executable_name(str(tokens[0])) == "env" else 0
+    while idx < len(tokens):
+        item = str(tokens[idx])
+        if item == "--":
+            idx += 1
+            break
+        if is_env_assignment(item):
+            idx += 1
+            continue
+        if item in ENV_SPLIT_OPTIONS and idx + 1 < len(tokens):
+            split_tokens, split_problems = split_env_string(str(tokens[idx + 1]), "env")
+            return "" if split_problems else next_env_shell_target(split_tokens, depth=depth + 1)
+        if item.startswith("--split-string="):
+            split_tokens, split_problems = split_env_string(item.split("=", 1)[1], "env")
+            return "" if split_problems else next_env_shell_target(split_tokens, depth=depth + 1)
+        if item.startswith("-S") and item != "-S":
+            split_tokens, split_problems = split_env_string(item[2:], "env")
+            return "" if split_problems else next_env_shell_target(split_tokens, depth=depth + 1)
+        if item in ENV_OPERAND_OPTIONS:
+            idx += 2
+            continue
+        if item.startswith(ENV_OPERAND_PREFIXES) or item.startswith("-P") or item.startswith("-u") or item.startswith("-C"):
+            idx += 1
+            continue
+        if item.startswith("-") and item in ENV_NO_OPERAND_OPTIONS:
+            idx += 1
+            continue
+        break
+    if idx >= len(tokens):
+        return ""
+    target_tokens = [str(item) for item in tokens[idx:]]
+    target = target_tokens[0]
+    target_name = executable_name(target)
+    if target_name in SHELL_EXECUTABLES:
+        return target
+    if target_name == "env":
+        return next_env_shell_target(target_tokens, depth=depth + 1)
+    return ""
+
+
 def validate_argv(argv: Sequence[str], label: str) -> list[MappingLike]:
     problems: list[MappingLike] = []
     if not argv:
@@ -127,6 +311,7 @@ def validate_argv(argv: Sequence[str], label: str) -> list[MappingLike]:
     first = executable_name(argv[0])
     if first in SHELL_EXECUTABLES:
         problems.append(problem(f"{label} argv must not invoke a shell", rule="native-macos-shell"))
+    problems.extend(validate_env_wrapper(argv, label))
     if first in FORBIDDEN_EXECUTABLES:
         problems.append(problem(f"{label} argv uses forbidden executable `{first}`", rule="native-macos-forbidden-command"))
     for item in argv:
@@ -689,6 +874,18 @@ def result_problems(project: Path, label: str, result_path: Path, payload: Mappi
     return out
 
 
+def add_result_stream_artifacts(project: Path, artifacts: dict[str, Path], prefix: str, payload: MappingLike) -> None:
+    for stream in ("stdout", "stderr"):
+        raw = payload.get(f"{stream}_artifact")
+        if not raw:
+            continue
+        try:
+            path = common.safe_project_path(project, str(raw), must_exist=True)
+        except ValueError:
+            continue
+        artifacts[f"{prefix}_{stream}"] = path
+
+
 def proof_command_argv(
     *,
     app_name: str,
@@ -703,7 +900,7 @@ def proof_command_argv(
         "scripts/star_forge.py",
         "native-macos-proof",
         "--project",
-        ".",
+        common.project_cli_arg(project),
         "--task",
         task,
     ]
@@ -723,6 +920,26 @@ def proof_command_argv(
     argv.extend(["--packaging-note", rel(project, artifacts["packaging_note"])])
     argv.append("--strict")
     return argv
+
+
+def trusted_proof_command(command: Sequence[str]) -> list[str]:
+    actual = [str(item) for item in command]
+    if actual and actual[0] == "python3":
+        actual[0] = sys.executable
+    if len(actual) > 1 and actual[1] == "scripts/star_forge.py":
+        actual[1] = str(STAR_FORGE)
+    return actual
+
+
+def record_proof(project: Path, command: Sequence[str]) -> MappingLike:
+    actual = trusted_proof_command(command)
+    proc = subprocess.run(actual, cwd=str(project), shell=False, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+    return {
+        "returncode": proc.returncode,
+        "stdout": proc.stdout,
+        "stderr": proc.stderr,
+        "command_argv": actual,
+    }
 
 
 def collect(args: argparse.Namespace, command_argv: Sequence[str]) -> tuple[int, MappingLike]:
@@ -768,6 +985,7 @@ def collect(args: argparse.Namespace, command_argv: Sequence[str]) -> tuple[int,
         build_payload = {"success": False, "schema": RESULT_SCHEMA, "kind": "build", "command_argv": []}
         build_path = write_json(out_dir / "build.json", build_payload)
     artifacts["build"] = build_path
+    add_result_stream_artifacts(project, artifacts, "build", build_payload)
     problems.extend(result_problems(project, "build", build_path, build_payload))
 
     if build_payload.get("success"):
@@ -819,9 +1037,10 @@ def collect(args: argparse.Namespace, command_argv: Sequence[str]) -> tuple[int,
             test_payload = {"success": False, "schema": RESULT_SCHEMA, "kind": "test", "command_argv": list(test_argv), "status": "skipped", "reason": "build_failed"}
             test_path = write_json(out_dir / "test.json", test_payload)
         artifacts["test"] = test_path
+        add_result_stream_artifacts(project, artifacts, "test", test_payload)
         problems.extend(result_problems(project, "test", test_path, test_payload))
 
-    screenshot_path, screenshot_result_path, _screenshot_payload, screenshot_problems = run_screenshot_command(
+    screenshot_path, screenshot_result_path, screenshot_payload, screenshot_problems = run_screenshot_command(
         project,
         out_dir,
         screenshot_argv,
@@ -829,6 +1048,8 @@ def collect(args: argparse.Namespace, command_argv: Sequence[str]) -> tuple[int,
     )
     if screenshot_result_path:
         artifacts["screenshot_result"] = screenshot_result_path
+        if screenshot_payload is not None:
+            add_result_stream_artifacts(project, artifacts, "screenshot_result", screenshot_payload)
     if screenshot_path:
         artifacts["screenshot"] = screenshot_path
     if screenshot_problems:
@@ -888,12 +1109,13 @@ def collect(args: argparse.Namespace, command_argv: Sequence[str]) -> tuple[int,
         "proof_command": shlex.join(proof_argv),
     }
     if args.record:
-        proc = subprocess.run(proof_argv, cwd=str(project), shell=False, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
-        output["record"] = {
-            "returncode": proc.returncode,
-            "stdout": proc.stdout,
-            "stderr": proc.stderr,
-        }
+        record = record_proof(project, proof_argv)
+        output["record"] = record
+        if int(record.get("returncode") or 0) != 0:
+            problems.append(problem(
+                f"native macOS proof recording failed with exit code {record.get('returncode')}",
+                rule="native-macos-record",
+            ))
     return (1 if problems else 0), output
 
 

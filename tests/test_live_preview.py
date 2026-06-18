@@ -10,6 +10,7 @@ import importlib.util
 import io
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import threading
@@ -80,6 +81,24 @@ def init_project(project: Path) -> None:
         + f"| {TASK} | Build preview test app | ready | solo | src/app.py | - | {REAL_VERIFY} | - |\n",
         encoding="utf-8",
     )
+
+
+def commit_all(project: Path, message: str = "snapshot") -> str:
+    subprocess.run(["git", "add", "."], cwd=str(project), check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    subprocess.run(
+        ["git", "-c", "user.name=Star Forge Test", "-c", "user.email=star-forge@example.invalid", "commit", "-m", message],
+        cwd=str(project),
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    proc = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(project), check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    return proc.stdout.strip()
+
+
+def force_add(project: Path, rel_path: str) -> None:
+    subprocess.run(["git", "add", "-f", rel_path], cwd=str(project), check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
 
 def source_hash(project: Path) -> str:
@@ -296,6 +315,54 @@ def test_preview_proof_rejects_tampered_bad_http_without_manifest_problem() -> N
         assert "preview-status" in rules(proof_payload), proof_payload.get("problems")
 
 
+def test_strict_preview_proof_rejects_forged_https_sni_safe_pinning() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        init_project(project)
+        root = live_dir(project)
+        root.mkdir(parents=True, exist_ok=True)
+        url = "https://93.184.216.34/"
+        http = root / "http.json"
+        http.write_text(json.dumps({
+            "schema": "star-forge.preview-http.v1",
+            "attempted": True,
+            "method": "GET",
+            "url": url,
+            "final_url": url,
+            "status": 200,
+            "expected_status": 200,
+            "ok": True,
+            "redirect_chain": [],
+            "connected_ips": ["93.184.216.34"],
+            "connection_pinning": {
+                "strategy": "https-connect-vetted-ip-sni-safe",
+                "sni_safe": True,
+                "server_hostname": "93.184.216.34",
+            },
+        }, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        deployment = root / "deployment.json"
+        deployment.write_text(json.dumps({"source_hash": source_hash(project), "deployment_id": "dep-forged-https"}, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        smoke = root / "smoke.json"
+        smoke.write_text(json.dumps({"checks": [{"name": "home", "passed": True}]}, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        live_common.write_live_manifest(
+            project,
+            task=TASK,
+            collector="preview",
+            command_argv=["test-preview-forged-https"],
+            tool_versions={"test": "1"},
+            artifacts={"http": http, "deployment": deployment, "smoke": smoke},
+            summary={"url": url},
+        )
+        code, payload, _ = run_star_cli([
+            "preview-proof", "--project", str(project), "--task", TASK,
+            "--url", url, "--expect-status", "200",
+            "--deployment-metadata", str(deployment), "--smoke-checks", str(smoke), "--strict",
+        ])
+        assert code == 1, payload
+        assert payload["verdict"] == "FAIL", payload
+        assert "preview-http" in rules(payload), payload.get("problems")
+
+
 def test_unsafe_url_rejection_writes_degraded_manifest() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         project = Path(tmp).resolve()
@@ -427,6 +494,117 @@ def test_stale_source_binding_is_blocking() -> None:
             )
         )
         assert_failed_with(code, payload, "preview-source-binding")
+
+
+def test_commit_only_source_binding_rejects_uncommitted_source_changes() -> None:
+    with tempfile.TemporaryDirectory() as tmp, TestServer({"/": route(200, "ok")}) as server:
+        project = Path(tmp).resolve()
+        init_project(project)
+        head = commit_all(project)
+        (project / "src" / "app.py").write_text("print('dirty preview source')\n", encoding="utf-8")
+        lease = write_server_lease(project, server.url("/"))
+        code, payload, _ = run_preview(
+            collector_args(
+                project,
+                server.url("/"),
+                "--server-lease",
+                str(lease),
+                "--deployment-commit-sha",
+                head,
+            )
+        )
+        assert_failed_with(code, payload, "preview-source-binding")
+
+
+def test_source_hash_binding_rejects_clean_committed_gradle_config_change() -> None:
+    with tempfile.TemporaryDirectory() as tmp, TestServer({"/": route(200, "ok")}) as server:
+        project = Path(tmp).resolve()
+        init_project(project)
+        (project / "settings.gradle").write_text("pluginManagement { repositories { google() } }\n", encoding="utf-8")
+        commit_all(project, "gradle settings v1")
+        old_source = source_hash(project)
+        (project / "settings.gradle").write_text("pluginManagement { repositories { mavenCentral() } }\n", encoding="utf-8")
+        commit_all(project, "gradle settings v2")
+        assert source_hash(project) != old_source
+        assert not star_forge.source_dirty_entries(star_forge.git_status(project))
+        lease = write_server_lease(project, server.url("/"))
+        code, payload, _ = run_preview(
+            collector_args(
+                project,
+                server.url("/"),
+                "--server-lease",
+                str(lease),
+                "--deployment-source-hash",
+                old_source,
+            )
+        )
+        assert_failed_with(code, payload, "preview-source-binding")
+
+
+def test_source_hash_binding_rejects_tracked_generated_dir_changes() -> None:
+    cases = [
+        ("build/preview.js", "console.log('preview build v1')\n", "console.log('preview build v2')\n"),
+        ("dist/preview.js", "console.log('preview dist v1')\n", "console.log('preview dist v2')\n"),
+        ("target/preview.txt", "target preview v1\n", "target preview v2\n"),
+    ]
+    for rel_path, before, after in cases:
+        with tempfile.TemporaryDirectory() as tmp, TestServer({"/": route(200, "ok")}) as server:
+            project = Path(tmp).resolve()
+            init_project(project)
+            (project / ".gitignore").write_text("build/\ndist/\ntarget/\n", encoding="utf-8")
+            tracked = project / rel_path
+            tracked.parent.mkdir(parents=True, exist_ok=True)
+            tracked.write_text(before, encoding="utf-8")
+            force_add(project, rel_path)
+            commit_all(project, f"{rel_path} v1")
+            old_source = source_hash(project)
+
+            tracked.write_text(after, encoding="utf-8")
+            commit_all(project, f"{rel_path} v2")
+            assert source_hash(project) != old_source
+            assert not star_forge.source_dirty_entries(star_forge.git_status(project))
+            lease = write_server_lease(project, server.url("/"))
+
+            code, payload, _ = run_preview(
+                collector_args(
+                    project,
+                    server.url("/"),
+                    "--server-lease",
+                    str(lease),
+                    "--deployment-source-hash",
+                    old_source,
+                )
+            )
+            assert_failed_with(code, payload, "preview-source-binding")
+
+
+def test_shared_address_space_preview_urls_are_rejected_direct_and_dns() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        init_project(project)
+        code, payload, _ = run_preview(
+            collector_args(project, "http://100.64.0.1/", "--deployment-source-hash", source_hash(project))
+        )
+        assert_failed_with(code, payload, "preview-url")
+
+    original = preview.socket.getaddrinfo
+
+    def fake_getaddrinfo(host: str, port: int | None = None, *args: Any, **kwargs: Any) -> list[Any]:
+        if host == "shared.example.test":
+            return [(preview.socket.AF_INET, preview.socket.SOCK_STREAM, 6, "", ("100.64.0.1", port or 80))]
+        return original(host, port, *args, **kwargs)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        init_project(project)
+        preview.socket.getaddrinfo = fake_getaddrinfo
+        try:
+            code, payload, _ = run_preview(
+                collector_args(project, "http://shared.example.test/", "--deployment-source-hash", source_hash(project))
+            )
+        finally:
+            preview.socket.getaddrinfo = original
+        assert_failed_with(code, payload, "preview-url")
 
 
 def test_failed_http_status_is_blocking() -> None:

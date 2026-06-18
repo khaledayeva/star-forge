@@ -27,6 +27,9 @@ assert SPEC and SPEC.loader
 star_forge = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(star_forge)
 
+from live_collectors import browser_playwright
+from live_collectors import common as live_common
+
 # Isolate learnings from the real home for the whole suite (item: setup detail).
 os.environ["STAR_FORGE_LEARNINGS_HOME"] = tempfile.mkdtemp(prefix="star-forge-test-learnings-")
 
@@ -122,14 +125,52 @@ def record_verify(project: Path, task: str, command: str = REAL_VERIFY) -> dict:
 
 def record_passing_browser_run(project: Path, task: str) -> dict:
     shots = star_forge.live_common.live_collector_dir(project, task, "browser")
+    url = "http://127.0.0.1:4173/"
+    parsed_url, url_problems = browser_playwright.validate_url(url)
+    assert not url_problems
+    allowed_origin = browser_playwright.normalize_origin(parsed_url)
     desktop = shots / "desktop.png"
     mobile = shots / "mobile.png"
     make_test_png(desktop, 1280, 800)
     make_test_png(mobile, 390, 844)
     interaction = shots / "interaction.json"
-    interaction.write_text(json.dumps({"ready": [{"passed": True}], "actions": [], "assertions": []}) + "\n", encoding="utf-8")
+    request = browser_playwright.browser_url_safety_evidence(url, allowed_local_origins=[allowed_origin])
+    request.update({
+        "method": "GET",
+        "resource_type": "document",
+        "navigation": True,
+    })
+    interaction.write_text(json.dumps({
+        "ready": [{"passed": True}],
+        "actions": [],
+        "assertions": [],
+        "request_safety": {
+            "schema": "star-forge.browser-request-safety.v1",
+            "service_workers": browser_playwright.SERVICE_WORKERS_MODE,
+            "connection_control": browser_playwright.BROWSER_NETWORK_CONTROL_MODE,
+            "websocket_routing": browser_playwright.WEBSOCKET_ROUTING_MODE,
+            "allowed_local_origins": [allowed_origin],
+            "requests": [request],
+            "websockets": [],
+            "final_urls": [request],
+            "blocked_count": 0,
+            "websocket_blocked_count": 0,
+            "webrtc": {"mode": browser_playwright.WEBRTC_CONTROL_MODE, "init_script": True},
+        },
+    }) + "\n", encoding="utf-8")
     console = shots / "console.json"
     console.write_text(json.dumps({"events": []}) + "\n", encoding="utf-8")
+    lease = shots / "server-lease.json"
+    lease.write_text(json.dumps({
+        "schema": "star-forge.server-lease.v1",
+        "project": str(project),
+        "origin": allowed_origin,
+        "port": 4173,
+        "pid": os.getpid(),
+        "command": "python3 -m http.server 4173",
+        "source_hash": star_forge.source_hash(project),
+        "runtime_asset_hash": star_forge.live_common.compute_runtime_asset_hash(project, exclude_paths=[project / ".starforge" / "runtime" / "server.json"]),
+    }) + "\n", encoding="utf-8")
     current_source = star_forge.source_hash(project)
     manifest = star_forge.live_common.write_live_manifest(
         project,
@@ -138,7 +179,7 @@ def record_passing_browser_run(project: Path, task: str) -> dict:
         command_argv=["test-browser-collector"],
         tool_versions={"test": "1"},
         artifacts={"desktop": desktop, "mobile": mobile, "interaction": interaction, "console": console},
-        summary={"url": "https://93.184.216.34"},
+        summary={"url": url},
         source_hash_before=current_source,
         source_hash_after=current_source,
         runtime_asset_hash=star_forge.live_common.compute_runtime_asset_hash(project),
@@ -146,7 +187,7 @@ def record_passing_browser_run(project: Path, task: str) -> dict:
     args = argparse.Namespace(
         project=str(project),
         task=task,
-        url="https://93.184.216.34",
+        url=url,
         scenario="smoke",
         viewport=[
             f"desktop=1280x800:{desktop}",
@@ -159,7 +200,7 @@ def record_passing_browser_run(project: Path, task: str) -> dict:
         require_viewports=True,
         require_interaction=True,
         require_console=True,
-        server_lease="",
+        server_lease=str(lease),
         require_server_lease=False,
         degraded=False,
         strict=True,
@@ -210,6 +251,7 @@ def build_completed_project(project: Path) -> None:
     record_verify(project, "SF-1")
     code, out, err = run_cli(["complete-task", "--project", str(project), "--task", "SF-1", "--changed-file", "src/hello.py"])
     assert code == 0, err or out
+    record_verify(project, "SF-1")
     write_reviewer_findings(project, "correctness", [])
     code, out, err = run_cli(["review", "--project", str(project), "--strict"])
     assert code == 0, err or out
@@ -450,6 +492,71 @@ def test_secret_scan_catches_real_secret_in_dotenv_file() -> None:
         # The whole-tree scan used by the review wave catches it too.
         tree = star_forge.secret_scan_findings(project)
         assert any(item.get("role") == "tree-scan" and item.get("file") == ".env" for item in tree)
+
+
+def test_source_hash_includes_clean_build_and_dependency_config_changes() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        init_project(project)
+        write_blueprint(project)
+        write_plan(project, [f"| T1 | code | ready | solo | app.py | - | {REAL_VERIFY} | - |"])
+        (project / "app.py").write_text("print('ok')\n", encoding="utf-8")
+        cases = [
+            ("Dockerfile", "FROM scratch\n", "FROM scratch\nLABEL version=2\n"),
+            ("Makefile", "build:\n\t@echo one\n", "build:\n\t@echo two\n"),
+            ("build.gradle.kts", "plugins { id(\"com.android.application\") version \"1.0\" }\n", "plugins { id(\"com.android.application\") version \"2.0\" }\n"),
+            ("settings.gradle", "pluginManagement { repositories { google() } }\n", "pluginManagement { repositories { mavenCentral() } }\n"),
+            ("gradle.properties", "org.gradle.jvmargs=-Xmx2g\n", "org.gradle.jvmargs=-Xmx4g\n"),
+            ("go.work", "go 1.22\nuse ./app\n", "go 1.22\nuse ./app\nuse ./tools\n"),
+            ("Pipfile", "[packages]\nrequests = \"==2.31.0\"\n", "[packages]\nrequests = \"==2.32.0\"\n"),
+            ("poetry.lock", "package = []\nmetadata = { lock-version = \"2.0\" }\n", "package = []\nmetadata = { lock-version = \"2.1\" }\n"),
+            ("uv.lock", "version = 1\n", "version = 2\n"),
+            ("Gemfile", "source \"https://rubygems.org\"\ngem \"rack\", \"3.0.0\"\n", "source \"https://rubygems.org\"\ngem \"rack\", \"3.1.0\"\n"),
+            ("Podfile", "platform :ios, \"17.0\"\npod \"AFNetworking\", \"4.0.0\"\n", "platform :ios, \"18.0\"\npod \"AFNetworking\", \"4.0.1\"\n"),
+        ]
+        for rel_path, before, after in cases:
+            path = project / rel_path
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(before, encoding="utf-8")
+            commit_all(project, f"{rel_path} v1")
+            hash_v1 = star_forge.source_hash(project)
+            assert star_forge.live_common.compute_source_hash(project) == hash_v1
+
+            path.write_text(after, encoding="utf-8")
+            commit_all(project, f"{rel_path} v2")
+            hash_v2 = star_forge.source_hash(project)
+            assert hash_v2 != hash_v1, rel_path
+            assert star_forge.live_common.compute_source_hash(project) == hash_v2
+
+
+def test_source_hash_includes_tracked_files_under_ignored_generated_dirs() -> None:
+    cases = [
+        ("build/tracked.js", "console.log('build v1')\n", "console.log('build v2')\n"),
+        ("dist/tracked.js", "console.log('dist v1')\n", "console.log('dist v2')\n"),
+        ("target/tracked.rs", "fn main() { println!(\"target v1\"); }\n", "fn main() { println!(\"target v2\"); }\n"),
+    ]
+    for rel_path, before, after in cases:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp).resolve()
+            init_project(project)
+            write_blueprint(project)
+            write_plan(project, [f"| T1 | code | ready | solo | app.py | - | {REAL_VERIFY} | - |"])
+            (project / "app.py").write_text("print('ok')\n", encoding="utf-8")
+            (project / ".gitignore").write_text("build/\ndist/\ntarget/\n", encoding="utf-8")
+            tracked = project / rel_path
+            tracked.parent.mkdir(parents=True, exist_ok=True)
+            tracked.write_text(before, encoding="utf-8")
+            code, _, err = star_forge.run_git(["add", "-f", rel_path], project)
+            assert code == 0, err
+            commit_all(project, f"{rel_path} v1")
+            hash_v1 = star_forge.source_hash(project)
+            assert live_common.compute_source_hash(project) == hash_v1
+
+            tracked.write_text(after, encoding="utf-8")
+            commit_all(project, f"{rel_path} v2")
+            hash_v2 = star_forge.source_hash(project)
+            assert hash_v2 != hash_v1, rel_path
+            assert live_common.compute_source_hash(project) == hash_v2
 
 
 # --------------------------------------------------------------- 4. verify
@@ -859,6 +966,74 @@ def test_reviewers_agreeing_findings_dedup_into_one() -> None:
         assert len(merged["fix_queue"]) == 1
 
 
+def test_role_specific_duplicate_variants_dedup_into_one_queue_item() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        reviewable_project(project)
+        variants = {
+            "correctness": {
+                "severity": "high",
+                "file": "src/hello.py",
+                "line": 12,
+                "title": "Greeting crashes when user is missing",
+                "detail": "Null user path raises AttributeError before rendering.",
+            },
+            "architecture": {
+                "severity": "high",
+                "file": "src/hello.py",
+                "line": 13,
+                "title": "Guard clause is missing around greeting input",
+                "detail": "Null user path raises AttributeError before rendering.",
+            },
+            "security": {
+                "severity": "high",
+                "file": "src/hello.py",
+                "line": 12,
+                "title": "Missing validation exposes the greeting flow",
+                "detail": "Null user path raises AttributeError before rendering.",
+            },
+        }
+        for role, finding in variants.items():
+            write_reviewer_findings(project, role, [finding])
+        scope = star_forge.scope_hash(project) or "noscope"
+        merged = star_forge.merge_review(project, scope)
+        assert len(merged["findings"]) == 1
+        assert merged["findings"][0]["agreed_by"] == ["architecture", "correctness", "security"]
+        assert len(merged["fix_queue"]) == 1
+
+
+def test_review_dedupe_preserves_max_severity_for_later_blocking_duplicate() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        reviewable_project(project)
+        low = {
+            "severity": "low",
+            "file": "src/hello.py",
+            "line": 12,
+            "title": "Greeting empty user guard is missing",
+            "detail": "Null user path raises AttributeError before rendering.",
+        }
+        high = {
+            "severity": "high",
+            "file": "src/hello.py",
+            "line": 13,
+            "title": "Greeting missing input guard blocks release",
+            "detail": "Null user path raises AttributeError before rendering.",
+        }
+        write_reviewer_findings(project, "correctness", [low], agent_id="review-low")
+        write_reviewer_findings(project, "security", [high], agent_id="review-high")
+        scope = star_forge.scope_hash(project) or "noscope"
+        merged = star_forge.merge_review(project, scope)
+        assert len(merged["findings"]) == 1
+        finding = merged["findings"][0]
+        assert finding["severity"] == "high"
+        assert finding["agreed_by"] == ["correctness", "security"]
+        assert {"role": "correctness", "agent_id": "review-low", "severity": "low"} in finding["role_details"]
+        assert {"role": "security", "agent_id": "review-high", "severity": "high"} in finding["role_details"]
+        assert len(merged["fix_queue"]) == 1
+        assert merged["fix_queue"][0]["severity"] == "high"
+
+
 # ----------------------------------------------- 7. done + proof + amend loop
 
 
@@ -924,6 +1099,8 @@ def test_amend_loop_closes_and_proof_supersedes() -> None:
         record_verify(project, "AMEND-1")
         code, payload = complete_task(project, "AMEND-1")
         assert code == 0, payload
+        record_verify(project, "SF-1")
+        record_verify(project, "AMEND-1")
         # The source changed, so the prior review is stale: a real re-review must
         # re-attest the new source hash before review passes.
         write_reviewer_findings(project, "correctness", [])
@@ -1301,6 +1478,7 @@ def test_done_advisory_flags_delegate_task_without_observed_subagent() -> None:
         record_verify(project, "SF-1")
         code, out, err = run_cli(["complete-task", "--project", str(project), "--task", "SF-1", "--changed-file", "src/hello.py"])
         assert code == 0, err or out
+        record_verify(project, "SF-1")
         write_reviewer_findings(project, "correctness", [])
         code, out, err = run_cli(["review", "--project", str(project), "--strict"])
         assert code == 0, err or out

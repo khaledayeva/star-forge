@@ -141,21 +141,21 @@ def test_release_check_wrapper_includes_core_and_all_live_suites() -> None:
         assert path in text, path
 
 
-def test_strict_proof_accepts_only_task_scoped_clean_live_manifest() -> None:
+def test_strict_proof_rejects_domain_profiles_without_dedicated_command() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         project = Path(tmp).resolve()
         init_project(project)
-        manifest = write_clean_manifest(project, collector="github")
+        manifest = write_clean_manifest(project, collector="security")
         code, payload, err = run_star([
             "proof-run",
             "--project", str(project),
             "--task", TASK,
-            "--profile", "github-pr-review",
+            "--profile", "security",
             "--artifact", str(manifest),
             "--strict",
         ])
         assert err == ""
-        assert_pass(code, payload)
+        assert_fail(code, payload, "proof-profile")
 
         outside = project / "fixtures" / "manifest.json"
         outside.parent.mkdir(parents=True, exist_ok=True)
@@ -164,19 +164,19 @@ def test_strict_proof_accepts_only_task_scoped_clean_live_manifest() -> None:
             "proof-run",
             "--project", str(project),
             "--task", TASK,
-            "--profile", "github-pr-review",
+            "--profile", "security",
             "--artifact", str(outside),
             "--strict",
         ])
         assert_fail(code, payload, "manifest-scope")
 
-        stale = write_clean_manifest(project, collector="github")
+        stale = write_clean_manifest(project, collector="security")
         write_text(project / "src" / "app.py", "print('changed after collection')\n")
         code, payload, _ = run_star([
             "proof-run",
             "--project", str(project),
             "--task", TASK,
-            "--profile", "github-pr-review",
+            "--profile", "security",
             "--artifact", str(stale),
             "--strict",
         ])

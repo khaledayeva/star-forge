@@ -97,14 +97,97 @@ DISCOVERY_TOOLS = {
 }
 PREBOOT_OPEN_TOOLS = {"boot_sim", "open_sim", "preboot_sim", "open_simulator"}
 SHELL_FALLBACK_TOOLS = {
+    "cmd",
+    "command",
     "exec_command",
+    "execute_command",
+    "executecommand",
+    "run_command",
+    "runcommand",
     "shell",
     "terminal",
     "subprocess",
     "xcodebuild",
     "xcrun",
     "simctl",
+    "osascript",
 }
+SHELL_FALLBACK_TOOL_SUFFIXES = tuple(f"_{name}" for name in sorted(SHELL_FALLBACK_TOOLS))
+DIRECT_SHELL_FALLBACK_TOOLS = SHELL_FALLBACK_TOOLS | {"open"}
+SHELL_FALLBACK_COMMAND_RE = re.compile(
+    r"\b(xcodebuild|xcrun|simctl|osascript)\b|com\.apple\.iphonesimulator|Simulator\.app",
+    re.IGNORECASE,
+)
+SIMULATOR_BUNDLE_ID = "com.apple.iphonesimulator"
+COMMAND_FIELD_NAMES = {
+    "argv",
+    "cmd",
+    "cmd_line",
+    "cmdline",
+    "command",
+    "command_args",
+    "commandargs",
+    "command_argv",
+    "commandargv",
+    "command_line",
+    "commandline",
+    "shell_cmd",
+    "shellcmd",
+    "shell_command",
+    "shellcommand",
+}
+COMMAND_EXECUTION_FIELD_NAMES = {
+    "cmd",
+    "cmd_line",
+    "cmdline",
+    "command",
+    "command_args",
+    "commandargs",
+    "command_line",
+    "commandline",
+}
+SHELL_COMMAND_FIELD_NAMES = {
+    "shell_cmd",
+    "shellcmd",
+    "shell_command",
+    "shellcommand",
+}
+ARGV_EXECUTABLE_FIELD_NAMES = {
+    "argv",
+    "command_argv",
+    "commandargv",
+}
+SHELL_EXECUTABLE_NAMES = {
+    "bash",
+    "fish",
+    "powershell",
+    "pwsh",
+    "sh",
+    "zsh",
+}
+ENV_NO_OPERAND_OPTIONS = {
+    "-i",
+    "--ignore-environment",
+    "-0",
+    "--null",
+    "-v",
+    "--debug",
+}
+ENV_OPERAND_OPTIONS = {
+    "-u",
+    "--unset",
+    "-C",
+    "--chdir",
+    "-P",
+    "--path",
+}
+ENV_OPERAND_PREFIXES = (
+    "--unset=",
+    "--chdir=",
+    "--path=",
+)
+ENV_SPLIT_OPTIONS = {"-S", "--split-string"}
+MAX_ENV_WRAPPER_DEPTH = 16
 
 
 MappingLike = dict[str, Any]
@@ -482,6 +565,69 @@ def result_failure(payload: Any) -> str | None:
     return None
 
 
+def result_runtime(payload: Any) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    return str(payload.get("simulator_runtime") or payload.get("runtime") or payload.get("os_version") or "").strip()
+
+
+def result_udid(payload: Any) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    return str(payload.get("simulator_udid") or payload.get("udid") or payload.get("device_udid") or "").strip()
+
+
+def result_provenance(payload: Any) -> MappingLike | None:
+    if not isinstance(payload, dict):
+        return None
+    provenance = payload.get("mcp_provenance") if isinstance(payload.get("mcp_provenance"), dict) else payload.get("provenance")
+    return dict(provenance) if isinstance(provenance, dict) else None
+
+
+def validate_result_artifact_contract(
+    label: str,
+    expected_kind: str,
+    payload: Any,
+    problems: list[MappingLike],
+    *,
+    path: str = "",
+    expected_runtime: str = "",
+    expected_udid: str = "",
+) -> None:
+    if not isinstance(payload, dict):
+        problems.append(problem(f"{label} must be a JSON object", rule="native-ios-result", path=path))
+        return
+    if payload.get("schema") != RESULT_SCHEMA:
+        problems.append(problem(f"{label} must use schema {RESULT_SCHEMA}", rule="native-ios-result", path=path))
+    if str(payload.get("kind") or "") != expected_kind:
+        problems.append(problem(f"{label} kind must be {expected_kind}", rule="native-ios-result", path=path))
+    if payload.get("success") is not True:
+        problems.append(problem(f"{label} must include success true", rule="native-ios-result", path=path))
+    if payload.get("shell") is True:
+        problems.append(problem(f"{label} must not record shell execution", rule="native-ios-result", path=path))
+
+    command_entries = command_field_entries(payload)
+    if any(command_field_uses_shell_fallback(field_name, value) for field_name, value in command_entries):
+        problems.append(problem(f"{label} must not include shell fallback command evidence", rule="native-ios-shell-fallback", path=path))
+
+    runtime = result_runtime(payload)
+    udid = result_udid(payload)
+    provenance = result_provenance(payload)
+    if not runtime and not udid and provenance is None:
+        problems.append(problem(f"{label} must include simulator runtime, simulator UDID, or MCP provenance", rule="native-ios-result", path=path))
+    if runtime and expected_runtime and runtime != expected_runtime:
+        problems.append(problem(f"{label} runtime does not match manifest summary", rule="native-ios-result", path=path))
+    if udid and expected_udid and udid != expected_udid:
+        problems.append(problem(f"{label} simulator UDID does not match manifest summary", rule="native-ios-result", path=path))
+    if provenance is not None:
+        tool_surface = str(provenance.get("tool_surface") or "").strip().lower()
+        server = str(provenance.get("server") or "").strip()
+        if tool_surface != "mcp":
+            problems.append(problem(f"{label} provenance must use MCP tool surface", rule="native-ios-result", path=path))
+        if server != "XcodeBuildMCP":
+            problems.append(problem(f"{label} provenance server must be XcodeBuildMCP", rule="native-ios-result", path=path))
+
+
 def validate_result(label: str, payload: Any, problems: list[MappingLike], path: Path, project: Path) -> None:
     failure = result_failure(payload)
     if failure:
@@ -523,19 +669,212 @@ def app_bundle_hash(project: Path, raw_path: str, problems: list[MappingLike]) -
     return {"available": True, "path": rel(project, bundle), "sha256": digest.hexdigest(), "kind": "directory", "files": len(files)}
 
 
+def normalize_command_field_name(raw: Any) -> str:
+    return re.sub(r"[^A-Za-z0-9]+", "_", str(raw or "")).strip("_").lower()
+
+
+def compact_command_field_name(field_name: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", field_name.lower())
+
+
+def command_field_name_contains(field_name: str, *needles: str) -> bool:
+    compact = compact_command_field_name(field_name)
+    return all(needle in compact for needle in needles)
+
+
+def command_field_is_candidate(field_name: str) -> bool:
+    return (
+        field_name in COMMAND_FIELD_NAMES
+        or command_field_name_contains(field_name, "command", "line")
+        or command_field_name_contains(field_name, "shell", "command")
+        or compact_command_field_name(field_name) == "cmdline"
+    )
+
+
+def command_field_entries(value: Any) -> list[tuple[str, Any]]:
+    entries: list[tuple[str, Any]] = []
+    if isinstance(value, dict):
+        for key, child in value.items():
+            normalized = normalize_command_field_name(key)
+            if command_field_is_candidate(normalized):
+                entries.append((normalized, child))
+            entries.extend(command_field_entries(child))
+    elif isinstance(value, list):
+        for child in value:
+            entries.extend(command_field_entries(child))
+    return entries
+
+
+def command_field_values(value: Any) -> list[Any]:
+    return [child for _field_name, child in command_field_entries(value)]
+
+
+def command_parts_and_text(command: Any) -> tuple[list[str], str]:
+    if isinstance(command, list):
+        parts = [str(item) for item in command]
+        return parts, " ".join(parts)
+    text = str(command)
+    try:
+        return shlex.split(text), text
+    except ValueError:
+        return text.split(), text
+
+
+def executable_name(raw: Any) -> str:
+    name = Path(str(raw or "").strip().strip("'\"")).name.lower()
+    if name.endswith(".exe"):
+        name = name[:-4]
+    return name
+
+
+def is_env_assignment(value: str) -> bool:
+    return bool(value) and "=" in value and not value.startswith("-") and value.split("=", 1)[0].isidentifier()
+
+
+def split_env_string(raw: str) -> list[str] | None:
+    try:
+        return shlex.split(raw)
+    except ValueError:
+        return None
+
+
+def env_tail_uses_shell_fallback(tokens: Sequence[str], *, depth: int = 0) -> bool:
+    if depth > MAX_ENV_WRAPPER_DEPTH:
+        return True
+    idx = 1 if tokens and executable_name(tokens[0]) == "env" else 0
+    while idx < len(tokens):
+        item = str(tokens[idx])
+        if item == "--":
+            idx += 1
+            break
+        if is_env_assignment(item):
+            idx += 1
+            continue
+        if item in ENV_SPLIT_OPTIONS:
+            if idx + 1 >= len(tokens) or idx + 2 < len(tokens):
+                return True
+            split_tokens = split_env_string(str(tokens[idx + 1]))
+            return not split_tokens or env_tail_uses_shell_fallback(split_tokens, depth=depth + 1)
+        if item.startswith("--split-string="):
+            if idx + 1 < len(tokens):
+                return True
+            split_tokens = split_env_string(item.split("=", 1)[1])
+            return not split_tokens or env_tail_uses_shell_fallback(split_tokens, depth=depth + 1)
+        if item.startswith("-S") and item != "-S":
+            if idx + 1 < len(tokens):
+                return True
+            split_tokens = split_env_string(item[2:])
+            return not split_tokens or env_tail_uses_shell_fallback(split_tokens, depth=depth + 1)
+        if item in ENV_OPERAND_OPTIONS:
+            if idx + 1 >= len(tokens):
+                return True
+            idx += 2
+            continue
+        if item.startswith(ENV_OPERAND_PREFIXES):
+            idx += 1
+            continue
+        if item.startswith("-P") and item != "-P":
+            idx += 1
+            continue
+        if item.startswith("-u") and item != "-u":
+            idx += 1
+            continue
+        if item.startswith("-C") and item != "-C":
+            idx += 1
+            continue
+        if item.startswith("-"):
+            if item in ENV_NO_OPERAND_OPTIONS:
+                idx += 1
+                continue
+            return True
+        break
+    if idx >= len(tokens):
+        return True
+    target_tokens = [str(item) for item in tokens[idx:]]
+    target_name = executable_name(target_tokens[0])
+    if target_name in SHELL_EXECUTABLE_NAMES:
+        return True
+    if target_name == "env":
+        return env_tail_uses_shell_fallback(target_tokens, depth=depth + 1)
+    return False
+
+
+def env_wrapper_uses_shell_fallback(command: Any) -> bool:
+    parts, _text = command_parts_and_text(command)
+    if not parts or executable_name(parts[0]) != "env":
+        return False
+    return env_tail_uses_shell_fallback(parts)
+
+
+def argv_executable_is_shell(command: Any) -> bool:
+    parts, _text = command_parts_and_text(command)
+    if not parts:
+        return False
+    return executable_name(parts[0]) in SHELL_EXECUTABLE_NAMES or env_wrapper_uses_shell_fallback(parts)
+
+
+def command_uses_open_simulator_fallback(command: Any) -> bool:
+    parts, text = command_parts_and_text(command)
+    if not parts:
+        return False
+    executable = executable_name(parts[0])
+    if executable == "open":
+        return True
+    lowered_parts = [part.strip().strip("'\"").lower() for part in parts]
+    if any(part == SIMULATOR_BUNDLE_ID for part in lowered_parts):
+        return True
+    if any(part.endswith("simulator.app") for part in lowered_parts):
+        return True
+    return bool(re.search(r"(?i)(^|\s|/|')Simulator\.app(\s|/|'|$)", text))
+
+
+def command_value_uses_shell_fallback(command: Any) -> bool:
+    if isinstance(command, dict):
+        return any(command_value_uses_shell_fallback(child) for child in command.values())
+    if isinstance(command, list):
+        if env_wrapper_uses_shell_fallback(command):
+            return True
+        if command_uses_open_simulator_fallback(command):
+            return True
+        combined = " ".join(str(item) for item in command)
+        if SHELL_FALLBACK_COMMAND_RE.search(combined):
+            return True
+        return any(command_value_uses_shell_fallback(child) for child in command)
+    if isinstance(command, str):
+        if env_wrapper_uses_shell_fallback(command):
+            return True
+        if SHELL_FALLBACK_COMMAND_RE.search(command):
+            return True
+        return command_uses_open_simulator_fallback(command)
+    return False
+
+
+def command_field_uses_shell_fallback(field_name: str, command: Any) -> bool:
+    if field_name in SHELL_COMMAND_FIELD_NAMES or command_field_name_contains(field_name, "shell", "command"):
+        return True
+    if (
+        field_name in COMMAND_EXECUTION_FIELD_NAMES
+        or command_field_name_contains(field_name, "command", "line")
+        or compact_command_field_name(field_name) == "cmdline"
+    ):
+        return True
+    if field_name in ARGV_EXECUTABLE_FIELD_NAMES and argv_executable_is_shell(command):
+        return True
+    return command_value_uses_shell_fallback(command)
+
+
 def call_uses_shell_fallback(call: Mapping[str, Any]) -> bool:
     tool = str(call.get("tool") or "")
-    if tool in SHELL_FALLBACK_TOOLS:
+    if tool in DIRECT_SHELL_FALLBACK_TOOLS or tool.endswith(SHELL_FALLBACK_TOOL_SUFFIXES):
         return True
-    args = call.get("args")
-    if not isinstance(args, dict):
+    commands: list[tuple[str, Any]] = []
+    for payload_name in ("args", "result"):
+        payload = call.get(payload_name)
+        if isinstance(payload, (dict, list)):
+            commands.extend(command_field_entries(payload))
+    if not commands:
         return False
-    command = args.get("cmd") or args.get("command") or args.get("argv") or ""
-    if isinstance(command, list):
-        command_text = " ".join(str(item) for item in command)
-    else:
-        command_text = str(command)
-    return bool(re.search(r"\b(xcodebuild|xcrun|simctl)\b", command_text))
+    return any(command_field_uses_shell_fallback(field_name, command) for field_name, command in commands)
 
 
 def validate_transcript(
@@ -685,7 +1024,7 @@ def proof_command_argv(*, task: str, scheme: str, simulator: str, project: Path,
         "scripts/star_forge.py",
         "native-ios-proof",
         "--project",
-        ".",
+        common.project_cli_arg(project),
         "--task",
         task,
         "--scheme",
@@ -858,6 +1197,21 @@ def collect(args: argparse.Namespace, command_argv: Sequence[str]) -> tuple[int,
     problems.extend(transcript_problems)
     unavailable.extend(transcript_unavailable)
 
+    for label, expected_kind, payload, path in (
+        ("build result", "build", build_payload, build_path),
+        ("launch result", "launch", launch_payload, launch_path),
+        ("test result", "test", test_payload, test_path),
+    ):
+        validate_result_artifact_contract(
+            label,
+            expected_kind,
+            payload,
+            problems,
+            path=rel(project, path),
+            expected_runtime=str(session_info.get("runtime") or ""),
+            expected_udid=str(session_info.get("udid") or ""),
+        )
+
     bundle_record = app_bundle_hash(project, str(args.app_bundle or ""), problems)
     bundle_path = write_json(out_dir / "app-bundle.json", {"schema": APP_BUNDLE_SCHEMA, **bundle_record})
     artifacts["app_bundle"] = bundle_path
@@ -925,11 +1279,8 @@ def collect(args: argparse.Namespace, command_argv: Sequence[str]) -> tuple[int,
         "recorded": False,
     }
     if args.record:
-        if degraded:
-            output["record"] = {"skipped": True, "reason": "blocking native iOS evidence problems"}
-        else:
-            output["recorded"] = True
-            output["record"] = record_proof(project, proof_argv)
+        output["recorded"] = True
+        output["record"] = record_proof(project, proof_argv)
     return (1 if degraded or (output.get("record", {}).get("returncode", 0) not in (0, None)) else 0), output
 
 

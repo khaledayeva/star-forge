@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 SCRIPT_DIR = Path(__file__).resolve().parents[1]
+STAR_FORGE_SCRIPT = SCRIPT_DIR / "star_forge.py"
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
@@ -105,6 +106,29 @@ GH_API_VALUE_PREFIXES = (
     "--raw-field=",
     "--template=",
 )
+APPROVED_GITHUB_HOSTS = {"github.com"}
+SAFE_GH_API_QUERY_PARAMS = {"page", "per_page"}
+SAFE_GH_API_QUERY_BOUNDS = {"page": (1, 1000), "per_page": (1, 100)}
+GH_API_FIELD_FLAGS = {"-f", "-F", "--field", "--raw-field"}
+GH_API_FIELD_PREFIXES = ("--field=", "--raw-field=", "-f", "-F")
+GITHUB_URL_KEYS = ("url", "html_url", "api_url", "web_url", "pull_request_url", "pullRequestUrl")
+GITHUB_IDENTITY_URL_KEYS = ("repository", "pull_request", "pullRequest", "base", "head", "baseRef", "headRef")
+GH_COMMAND_SHELL_CONTROL_RE = re.compile(
+    r"(?:"
+    r";|&&|\|\||\||[\r\n]|"
+    r"\$\(|`|<\(|>\(|"
+    r"\d?>{1,2}|&>|>\||\d?<{1,2}"
+    r")"
+)
+GH_PR_VIEW_VALUE_FLAGS = {"--repo", "-R", "--json", "--jq", "--template", "--hostname"}
+GH_PR_VIEW_VALUE_PREFIXES = ("--repo=", "--json=", "--jq=", "--template=", "--hostname=")
+GH_RUN_VIEW_VALUE_FLAGS = {"--repo", "-R", "--json", "--jq", "--template", "--hostname", "--attempt"}
+GH_RUN_VIEW_VALUE_PREFIXES = ("--repo=", "--json=", "--jq=", "--template=", "--hostname=", "--attempt=")
+GH_RUN_VIEW_FLAG_ONLY = {"--log"}
+GH_API_ALLOWED_VALUE_FLAGS = {"--cache", "--hostname", "--jq", "--method", "--preview", "--template", "-X", "-q"}
+GH_API_ALLOWED_VALUE_PREFIXES = ("--cache=", "--hostname=", "--jq=", "--method=", "--preview=", "--template=")
+GH_API_ALLOWED_FLAG_ONLY = {"--include", "--paginate", "--silent", "--slurp", "-i"}
+GH_API_FORBIDDEN_VALUE_FLAGS = {"--field", "--header", "--input", "--raw-field", "-F", "-H", "-f"}
 ABS_PATH_RE = re.compile(r"(?<![A-Za-z0-9:/])/(?:Users|home|private|tmp|var|Volumes|opt)/[^\s\"'<>]+")
 WINDOWS_PATH_RE = re.compile(r"\b[A-Za-z]:\\(?:Users|Temp|Windows|Program Files)\\[^\s\"'<>]+")
 
@@ -130,7 +154,7 @@ class RawEvidence:
 @dataclass
 class CollectionResult:
     manifest_path: Path
-    commands: list[str]
+    commands: list[list[str]]
     problems: list[dict[str, Any]]
 
 
@@ -199,9 +223,10 @@ def normalize_abs_paths(value: Any) -> tuple[Any, dict[str, int]]:
 
 
 def redact_artifact_payload(value: Any) -> tuple[Any, dict[str, int]]:
-    path_cleaned, path_report = normalize_abs_paths(value)
+    command_cleaned, command_report = redact_gh_api_command_query_values(value)
+    path_cleaned, path_report = normalize_abs_paths(command_cleaned)
     secret_cleaned, secret_report = live_common.redact_sensitive_values(path_cleaned)
-    return secret_cleaned, merge_reports(path_report, secret_report)
+    return secret_cleaned, merge_reports(command_report, path_report, secret_report)
 
 
 def update_manifest_redaction_report(manifest_path: Path, report: Mapping[str, int]) -> None:
@@ -214,7 +239,13 @@ def update_manifest_redaction_report(manifest_path: Path, report: Mapping[str, i
 
 def shell_argv(raw: Any) -> list[str]:
     if isinstance(raw, str):
-        return shlex.split(raw)
+        try:
+            tokens = shlex.split(raw)
+        except ValueError:
+            return ["<malformed-gh-command>"]
+        if "\n" in raw or "\r" in raw:
+            tokens.append("\n")
+        return tokens
     if isinstance(raw, Sequence) and not isinstance(raw, (bytes, bytearray)):
         return [str(item) for item in raw]
     return []
@@ -246,23 +277,446 @@ def option_value(tokens: Sequence[str], names: set[str]) -> str:
     return ""
 
 
-def gh_api_endpoint(tokens: Sequence[str]) -> str:
+def option_values(tokens: Sequence[str], names: set[str]) -> list[str]:
+    values: list[str] = []
+    for idx, token in enumerate(tokens):
+        if token in names and idx + 1 < len(tokens):
+            values.append(str(tokens[idx + 1]))
+        for name in names:
+            if token.startswith(f"{name}="):
+                values.append(token.split("=", 1)[1])
+    return values
+
+
+def is_url_like(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    text = value.strip()
+    return "://" in text or text.startswith("//")
+
+
+def canonical_github_host(raw: Any) -> str:
+    text = str(raw or "").strip().lower().rstrip(".")
+    if not text:
+        return ""
+    if not is_url_like(text) and ("/" in text or "\\" in text):
+        return ""
+    parsed = urllib.parse.urlsplit(text if is_url_like(text) else f"//{text}")
+    host = (parsed.hostname or "").lower().rstrip(".")
+    if not host:
+        return ""
+    if host == "api.github.com":
+        return "github.com"
+    return host
+
+
+def github_host_from_url(value: Any) -> str:
+    if not isinstance(value, str) or not value.strip():
+        return ""
+    parsed = urllib.parse.urlsplit(value.strip())
+    return canonical_github_host(parsed.hostname or "")
+
+
+def github_host_from_provenance(provenance: Any) -> str:
+    if not isinstance(provenance, Mapping):
+        return ""
+    for key in ("github_host", "host", "hostname", "gh_hostname", "server_url", "api_url", "html_url", "url"):
+        value = provenance.get(key)
+        host = github_host_from_url(value) if isinstance(value, str) and "://" in value else canonical_github_host(value)
+        if host:
+            return host
+    return ""
+
+
+def github_host_from_payload(payload: Any) -> str:
+    if not isinstance(payload, Mapping):
+        return ""
+    for key in GITHUB_URL_KEYS:
+        host = github_host_from_url(payload.get(key))
+        if host:
+            return host
+    for key in GITHUB_IDENTITY_URL_KEYS:
+        value = payload.get(key)
+        host = github_host_from_url(value) if is_url_like(value) else github_host_from_payload(value)
+        if host:
+            return host
+    return ""
+
+
+def github_host_evidence_from_value(value: Any, label: str, *, require_url_like: bool = False) -> list[tuple[str, str]]:
+    if require_url_like and not is_url_like(value):
+        return []
+    host = github_host_from_url(value) if is_url_like(value) else canonical_github_host(value)
+    return [(label, host)] if host else []
+
+
+def github_host_evidence_from_provenance(provenance: Any, label: str) -> list[tuple[str, str]]:
+    if not isinstance(provenance, Mapping):
+        return []
+    evidence: list[tuple[str, str]] = []
+    for key in ("github_host", "host", "hostname", "gh_hostname", "server_url", "api_url", "html_url", "url"):
+        evidence.extend(github_host_evidence_from_value(provenance.get(key), f"{label}.{key}"))
+    return evidence
+
+
+def github_host_evidence_from_payload(payload: Any, label: str, _seen: set[int] | None = None) -> list[tuple[str, str]]:
+    if not isinstance(payload, Mapping):
+        return []
+    if _seen is None:
+        _seen = set()
+    identity = id(payload)
+    if identity in _seen:
+        return []
+    _seen.add(identity)
+    evidence: list[tuple[str, str]] = []
+    for key in GITHUB_URL_KEYS:
+        evidence.extend(github_host_evidence_from_value(payload.get(key), f"{label}.{key}", require_url_like=True))
+    for key in GITHUB_IDENTITY_URL_KEYS:
+        value = payload.get(key)
+        evidence.extend(github_host_evidence_from_value(value, f"{label}.{key}", require_url_like=True))
+        evidence.extend(github_host_evidence_from_payload(value, f"{label}.{key}", _seen))
+    return evidence
+
+
+def github_host_evidence_for_raw(raw: RawEvidence) -> list[tuple[str, str]]:
+    evidence: list[tuple[str, str]] = []
+    evidence.extend(github_host_evidence_from_provenance(raw.live_provenance, "live_provenance"))
+    evidence.extend(github_host_evidence_from_payload(raw.pr, "pr"))
+    evidence.extend(github_host_evidence_from_payload(raw.final_pr, "final_pr"))
+    return evidence
+
+
+def github_host_provenance_evidence_for_raw(raw: RawEvidence) -> list[tuple[str, str]]:
+    return github_host_evidence_from_provenance(raw.live_provenance, "live_provenance")
+
+
+def github_host_payload_evidence_for_raw(raw: RawEvidence) -> list[tuple[str, str]]:
+    evidence: list[tuple[str, str]] = []
+    evidence.extend(github_host_evidence_from_payload(raw.pr, "pr"))
+    evidence.extend(github_host_evidence_from_payload(raw.final_pr, "final_pr"))
+    return evidence
+
+
+def github_host_evidence_from_operations(operations: Any, label: str) -> list[tuple[str, str]]:
+    if not isinstance(operations, list):
+        return []
+    evidence: list[tuple[str, str]] = []
+    for idx, operation in enumerate(operations):
+        if not isinstance(operation, Mapping):
+            continue
+        operation_label = f"{label}[{idx + 1}]"
+        for key in ("host", "github_host"):
+            evidence.extend(github_host_evidence_from_value(operation.get(key), f"{operation_label}.{key}"))
+        for key in (*GITHUB_URL_KEYS, *GITHUB_IDENTITY_URL_KEYS):
+            value = operation.get(key)
+            evidence.extend(github_host_evidence_from_value(value, f"{operation_label}.{key}", require_url_like=True))
+            evidence.extend(github_host_evidence_from_payload(value, f"{operation_label}.{key}"))
+    return evidence
+
+
+def resolve_github_host(evidence: Sequence[tuple[str, str]], *, default_host: str = "") -> str:
+    hosts = {canonical_github_host(host) for _, host in evidence if canonical_github_host(host)}
+    if len(hosts) == 1:
+        return next(iter(hosts))
+    if hosts:
+        return ""
+    return canonical_github_host(default_host)
+
+
+def github_host_policy_messages(
+    evidence: Sequence[tuple[str, str]],
+    *,
+    require_host: bool,
+    context: str,
+) -> list[str]:
+    entries: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for label, raw_host in evidence:
+        host = canonical_github_host(raw_host)
+        if not host:
+            continue
+        item = (str(label), host)
+        if item not in seen:
+            seen.add(item)
+            entries.append(item)
+    messages: list[str] = []
+    if require_host and not entries:
+        messages.append(f"{context} requires approved GitHub host provenance")
+    for label, host in entries:
+        if host not in APPROVED_GITHUB_HOSTS:
+            messages.append(f"{label} {host} is not an approved GitHub host")
+    hosts = sorted({host for _, host in entries})
+    if len(hosts) > 1:
+        messages.append(f"{context} has conflicting GitHub hosts: {', '.join(hosts)}")
+    return messages
+
+
+def github_host_for_raw(raw: RawEvidence) -> str:
+    default_host = "" if is_live_source(raw.source) else "github.com"
+    provenance_evidence = github_host_provenance_evidence_for_raw(raw)
+    if is_live_source(raw.source):
+        return resolve_github_host(provenance_evidence, default_host=default_host)
+    return resolve_github_host([*provenance_evidence, *github_host_payload_evidence_for_raw(raw)], default_host=default_host)
+
+
+def validate_live_github_host(raw: RawEvidence) -> list[dict[str, Any]]:
+    messages = github_host_policy_messages(
+        github_host_provenance_evidence_for_raw(raw),
+        require_host=True,
+        context="live GitHub import",
+    )
+    approved_host = resolve_github_host(github_host_provenance_evidence_for_raw(raw))
+    payload_evidence = [*github_host_payload_evidence_for_raw(raw), *github_host_evidence_from_operations(raw.operations, "operation")]
+    for message in github_host_policy_messages(
+        payload_evidence,
+        require_host=False,
+        context="live GitHub payload",
+    ):
+        messages.append(message)
+    for label, raw_host in payload_evidence:
+        payload_host = canonical_github_host(raw_host)
+        if approved_host and payload_host and payload_host != approved_host:
+            messages.append(f"{label} host does not match approved GitHub provenance")
+    return [
+        blocking_problem(message, rule="github-live-provenance")
+        for message in messages
+    ]
+
+
+def validate_transcript_github_host_evidence(
+    *,
+    transcript_payload: Mapping[str, Any],
+    summary: Mapping[str, Any],
+    pr_payload: Any = None,
+    operations: Any = None,
+) -> tuple[str, list[str]]:
+    transcript_provenance = transcript_payload.get("live_provenance") if isinstance(transcript_payload.get("live_provenance"), Mapping) else {}
+    summary_provenance = summary.get("live_provenance") if isinstance(summary.get("live_provenance"), Mapping) else {}
+    transcript_evidence: list[tuple[str, str]] = []
+    transcript_evidence.extend(github_host_evidence_from_value(transcript_payload.get("github_host"), "operation_transcript.github_host"))
+    transcript_evidence.extend(github_host_evidence_from_provenance(transcript_provenance, "operation_transcript.live_provenance"))
+    evidence: list[tuple[str, str]] = list(transcript_evidence)
+    evidence.extend(github_host_evidence_from_value(summary.get("github_host"), "summary.github_host"))
+    evidence.extend(github_host_evidence_from_provenance(summary_provenance, "summary.live_provenance"))
+    messages = github_host_policy_messages(evidence, require_host=True, context="GitHub operation transcript")
+    if not any(canonical_github_host(host) for _, host in transcript_evidence):
+        messages.append("GitHub operation transcript requires approved GitHub host provenance")
+    github_host = resolve_github_host(evidence)
+    payload_evidence = [
+        *github_host_evidence_from_payload(pr_payload, "pr"),
+        *github_host_evidence_from_operations(operations, "operation_transcript.operations"),
+    ]
+    for message in github_host_policy_messages(
+        payload_evidence,
+        require_host=False,
+        context="GitHub PR payload",
+    ):
+        messages.append(message)
+    for label, raw_host in payload_evidence:
+        payload_host = canonical_github_host(raw_host)
+        if github_host and payload_host and payload_host != github_host:
+            messages.append(f"{label} host does not match approved GitHub provenance")
+    return github_host, messages
+
+
+def validate_transcript_github_host(
+    *,
+    transcript_payload: Mapping[str, Any],
+    summary: Mapping[str, Any],
+    pr_payload: Any = None,
+    operations: Any = None,
+) -> tuple[str, list[dict[str, Any]]]:
+    github_host, messages = validate_transcript_github_host_evidence(
+        transcript_payload=transcript_payload,
+        summary=summary,
+        pr_payload=pr_payload,
+        operations=operations,
+    )
+    return github_host, [blocking_problem(message, rule="github-live-provenance") for message in messages]
+
+
+def gh_api_endpoint_is_absolute(endpoint: str) -> bool:
+    parsed = urllib.parse.urlsplit(str(endpoint or "").strip())
+    return bool(parsed.scheme or parsed.netloc)
+
+
+def validate_gh_hostname(tokens: Sequence[str], *, github_host: str = "") -> list[dict[str, Any]]:
+    hostnames = option_values(tokens, {"--hostname"})
+    if not hostnames:
+        return []
+    expected_host = canonical_github_host(github_host)
+    problems: list[dict[str, Any]] = []
+    if len(hostnames) > 1:
+        problems.append(command_problem("gh --hostname must be provided at most once"))
+    for hostname in hostnames:
+        host = canonical_github_host(hostname)
+        if not host:
+            problems.append(command_problem("gh --hostname must name a GitHub host"))
+        elif host not in APPROVED_GITHUB_HOSTS:
+            problems.append(command_problem(f"gh --hostname {hostname} is not an approved GitHub host"))
+        elif expected_host and host != expected_host:
+            problems.append(command_problem("gh --hostname does not match recorded GitHub provenance"))
+    return problems
+
+
+def gh_api_endpoint_index(tokens: Sequence[str]) -> int:
     skip_next = False
-    for token in [str(item) for item in tokens[2:]]:
+    for idx, token in enumerate([str(item) for item in tokens[2:]], start=2):
         if skip_next:
             skip_next = False
             continue
         if token in GH_API_VALUE_FLAGS:
             skip_next = True
             continue
-        if token.startswith("-X") and len(token) > 2:
+        if token.startswith(("-H", "-f", "-F", "-X")) and len(token) > 2:
             continue
         if token in GH_API_FLAG_ONLY or token.startswith(GH_API_VALUE_PREFIXES):
             continue
         if token.startswith("-"):
             continue
-        return token
-    return ""
+        return idx
+    return -1
+
+
+def gh_api_endpoint(tokens: Sequence[str]) -> str:
+    idx = gh_api_endpoint_index(tokens)
+    if idx < 0:
+        return ""
+    return str(tokens[idx])
+
+
+def gh_api_endpoint_query_problems(endpoint: str) -> list[dict[str, Any]]:
+    parsed = urllib.parse.urlsplit(str(endpoint or "").strip())
+    if not parsed.query:
+        return []
+    problems: list[dict[str, Any]] = []
+    if any(part == "" for part in parsed.query.split("&")):
+        problems.append(command_problem("gh api endpoint query parameter <empty> is not allowlisted"))
+    for key, value in urllib.parse.parse_qsl(parsed.query, keep_blank_values=True):
+        key_text = str(key or "").strip()
+        if live_common.sensitive_key_name(key_text):
+            problems.append(command_problem(f"gh api endpoint query parameter {key_text or '<empty>'} is sensitive"))
+        elif key_text not in SAFE_GH_API_QUERY_PARAMS:
+            problems.append(command_problem(f"gh api endpoint query parameter {key_text or '<empty>'} is not allowlisted"))
+        else:
+            value_text = str(value or "").strip()
+            lower, upper = SAFE_GH_API_QUERY_BOUNDS[key_text]
+            if not re.fullmatch(r"\d+", value_text):
+                problems.append(command_problem(f"gh api endpoint query parameter {key_text} must be a decimal integer"))
+            else:
+                numeric = int(value_text)
+                if numeric < lower or numeric > upper:
+                    problems.append(command_problem(f"gh api endpoint query parameter {key_text} must be between {lower} and {upper}"))
+    return problems
+
+
+def redact_gh_api_field_value(raw: str) -> str:
+    text = str(raw or "")
+    if "=" not in text:
+        return "[REDACTED_SECRET]"
+    key, _value = text.split("=", 1)
+    return f"{key}=[REDACTED_SECRET]"
+
+
+def redact_gh_api_field_arguments(tokens: Sequence[str]) -> tuple[list[str], dict[str, int]]:
+    report = {"gh_api_field_values": 0}
+    out = [str(token) for token in tokens]
+    idx = 0
+    while idx < len(out):
+        token = out[idx]
+        if token in GH_API_FIELD_FLAGS and idx + 1 < len(out):
+            out[idx + 1] = redact_gh_api_field_value(out[idx + 1])
+            report["gh_api_field_values"] += 1
+            idx += 2
+            continue
+        if token.startswith(("--field=", "--raw-field=")):
+            flag, value = token.split("=", 1)
+            out[idx] = f"{flag}={redact_gh_api_field_value(value)}"
+            report["gh_api_field_values"] += 1
+        elif token.startswith(("-f", "-F")) and len(token) > 2:
+            out[idx] = f"{token[:2]}{redact_gh_api_field_value(token[2:])}"
+            report["gh_api_field_values"] += 1
+        idx += 1
+    return out, report
+
+
+def redact_gh_api_endpoint_query_values(endpoint: str) -> tuple[str, dict[str, int]]:
+    report = {"gh_api_query_values": 0}
+    raw = str(endpoint or "")
+    parsed = urllib.parse.urlsplit(raw)
+    if not parsed.query:
+        return raw, report
+    pairs: list[tuple[str, str]] = []
+    for key, value in urllib.parse.parse_qsl(parsed.query, keep_blank_values=True):
+        key_text = str(key or "")
+        if key_text in SAFE_GH_API_QUERY_PARAMS and not live_common.sensitive_key_name(key_text):
+            pairs.append((key_text, value))
+        else:
+            pairs.append((key_text, "[REDACTED_SECRET]"))
+            report["gh_api_query_values"] += 1
+    query = urllib.parse.urlencode(pairs, doseq=True)
+    return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, parsed.path, query, parsed.fragment)), report
+
+
+def redact_gh_api_command_query_values(value: Any) -> tuple[Any, dict[str, int]]:
+    report = {"gh_api_query_values": 0}
+
+    def clean(item: Any) -> Any:
+        if isinstance(item, list):
+            tokens = [str(child) for child in item]
+            if len(tokens) >= 2 and tokens[0] == "gh" and tokens[1] == "api":
+                idx = gh_api_endpoint_index(tokens)
+                if idx >= 0:
+                    tokens[idx], local_report = redact_gh_api_endpoint_query_values(tokens[idx])
+                    report["gh_api_query_values"] += int(local_report.get("gh_api_query_values") or 0)
+                tokens, field_report = redact_gh_api_field_arguments(tokens)
+                report["gh_api_field_values"] = report.get("gh_api_field_values", 0) + int(field_report.get("gh_api_field_values") or 0)
+                return tokens
+            return [clean(child) for child in item]
+        if isinstance(item, dict):
+            return {str(key): clean(child) for key, child in item.items()}
+        return item
+
+    return clean(value), report
+
+
+def approved_github_url_parts(value: Any) -> list[str]:
+    if not isinstance(value, str) or not value.strip():
+        return []
+    parsed = urllib.parse.urlsplit(value.strip())
+    if parsed.scheme.lower() != "https" or not parsed.netloc:
+        return []
+    if canonical_github_host(parsed.hostname or "") not in APPROVED_GITHUB_HOSTS:
+        return []
+    return [urllib.parse.unquote(part) for part in parsed.path.strip("/").split("/") if part]
+
+
+def github_url_identity_messages(value: Any, label: str, *, require_url: bool = False) -> list[str]:
+    if not isinstance(value, str) or not value.strip():
+        return []
+    text = value.strip()
+    if not require_url and not is_url_like(text):
+        return []
+    parsed = urllib.parse.urlsplit(text)
+    if parsed.scheme.lower() != "https" or not parsed.netloc:
+        return [f"{label} must be an absolute https GitHub URL"]
+    host = canonical_github_host(parsed.hostname or "")
+    if host not in APPROVED_GITHUB_HOSTS:
+        return [f"{label} {host or '<missing>'} is not an approved GitHub host"]
+    return []
+
+
+def display_command(command: Sequence[str]) -> str:
+    return shlex.join([str(item) for item in command])
+
+
+def trusted_proof_command(command: Sequence[str]) -> list[str]:
+    actual = [str(item) for item in command]
+    if actual and actual[0] == "python3":
+        actual[0] = sys.executable
+    if len(actual) > 1 and actual[1] == "scripts/star_forge.py":
+        actual[1] = str(STAR_FORGE_SCRIPT)
+    return actual
 
 
 def normalize_gh_api_endpoint(endpoint: str) -> str:
@@ -609,6 +1063,105 @@ def gh_run_view_identity(tokens: Sequence[str]) -> tuple[str, str]:
     return run_id, option_value(tokens, {"--repo", "-R"})
 
 
+def gh_api_endpoint_allows_ampersand(tokens: Sequence[str], token_index: int) -> bool:
+    if len(tokens) < 2 or tokens[0] != "gh" or tokens[1] != "api":
+        return False
+    endpoint_index = gh_api_endpoint_index(tokens)
+    if endpoint_index != token_index:
+        return False
+    endpoint = str(tokens[token_index])
+    parsed = urllib.parse.urlsplit(endpoint.strip())
+    if not parsed.query or "&" not in parsed.query:
+        return False
+    if gh_api_endpoint_is_absolute(endpoint):
+        return False
+    return not gh_api_endpoint_query_problems(endpoint)
+
+
+def validate_no_shell_control(tokens: Sequence[str]) -> list[dict[str, Any]]:
+    problems: list[dict[str, Any]] = []
+    items = [str(token) for token in tokens]
+    for idx, token in enumerate(items):
+        has_control = bool(GH_COMMAND_SHELL_CONTROL_RE.search(token))
+        has_unsafe_ampersand = "&" in token and not gh_api_endpoint_allows_ampersand(items, idx)
+        if has_control or has_unsafe_ampersand:
+            problems.append(command_problem("gh command must not contain shell control tokens"))
+            break
+    return problems
+
+
+def parse_gh_option_grammar(
+    command_name: str,
+    tokens: Sequence[str],
+    *,
+    value_flags: set[str],
+    value_prefixes: Sequence[str],
+    flag_only: set[str],
+    attached_short_value_flags: Sequence[str] = (),
+    forbidden_value_flags: set[str] | None = None,
+    forbidden_value_prefixes: Sequence[str] = (),
+    forbidden_attached_short_value_flags: Sequence[str] = (),
+) -> tuple[list[str], dict[str, list[str]], list[dict[str, Any]]]:
+    positionals: list[str] = []
+    values: dict[str, list[str]] = {}
+    problems: list[dict[str, Any]] = []
+    items = [str(item) for item in tokens]
+    forbidden_flags = forbidden_value_flags or set()
+    idx = 0
+    while idx < len(items):
+        token = items[idx]
+        if token in forbidden_flags:
+            problems.append(command_problem(f"{command_name} flag {token} is not read-only allowlisted"))
+            idx += 2 if idx + 1 < len(items) else 1
+            continue
+        matched_forbidden_prefix = next((prefix for prefix in forbidden_value_prefixes if token.startswith(prefix)), "")
+        if matched_forbidden_prefix:
+            problems.append(command_problem(f"{command_name} flag {matched_forbidden_prefix[:-1]} is not read-only allowlisted"))
+            idx += 1
+            continue
+        matched_forbidden_short = next((flag for flag in forbidden_attached_short_value_flags if token.startswith(flag) and len(token) > len(flag)), "")
+        if matched_forbidden_short:
+            problems.append(command_problem(f"{command_name} flag {matched_forbidden_short} is not read-only allowlisted"))
+            idx += 1
+            continue
+        if token in value_flags:
+            if idx + 1 >= len(items):
+                problems.append(command_problem(f"{command_name} flag {token} requires a value"))
+                idx += 1
+                continue
+            values.setdefault(token, []).append(items[idx + 1])
+            idx += 2
+            continue
+        matched_prefix = next((prefix for prefix in value_prefixes if token.startswith(prefix)), "")
+        if matched_prefix:
+            values.setdefault(matched_prefix[:-1], []).append(token.split("=", 1)[1])
+            idx += 1
+            continue
+        matched_short = next((flag for flag in attached_short_value_flags if token.startswith(flag) and len(token) > len(flag)), "")
+        if matched_short:
+            values.setdefault(matched_short, []).append(token[len(matched_short):])
+            idx += 1
+            continue
+        if token in flag_only:
+            idx += 1
+            continue
+        if token.startswith("-"):
+            problems.append(command_problem(f"{command_name} flag {token} is not read-only allowlisted"))
+            idx += 1
+            continue
+        positionals.append(token)
+        idx += 1
+    return positionals, values, problems
+
+
+def require_exactly_one_positional(command_name: str, positionals: Sequence[str], subject: str) -> list[dict[str, Any]]:
+    if not positionals:
+        return [command_problem(f"{command_name} must name {subject}")]
+    if len(positionals) > 1:
+        return [command_problem(f"{command_name} has extra positional arguments after {subject}")]
+    return []
+
+
 def validate_gh_command(
     argv: Sequence[str],
     *,
@@ -616,6 +1169,7 @@ def validate_gh_command(
     pr_number: str = "",
     check_runs: Any = None,
     captured_head: str = "",
+    github_host: str = "",
 ) -> list[dict[str, Any]]:
     problems: list[dict[str, Any]] = []
     tokens = [str(item) for item in argv]
@@ -623,8 +1177,10 @@ def validate_gh_command(
         return [command_problem("fixture command must be a gh argv array")]
     if len(tokens) < 2:
         return [command_problem("gh command is missing a subcommand")]
+    problems.extend(validate_no_shell_control(tokens))
     top = tokens[1]
     sub = tokens[2] if len(tokens) > 2 else ""
+    problems.extend(validate_gh_hostname(tokens, github_host=github_host))
     if top == "pr":
         if sub != "view":
             reason = "gh pr checkout is forbidden" if sub == "checkout" else f"gh pr {sub or '<missing>'} is not read-only allowlisted"
@@ -632,7 +1188,17 @@ def validate_gh_command(
         if "--web" in tokens:
             problems.append(command_problem("gh pr view --web is not allowed for fixture evidence"))
         if sub == "view":
-            command_pr, command_repo = gh_pr_view_identity(tokens)
+            positionals, _values, grammar_problems = parse_gh_option_grammar(
+                "gh pr view",
+                tokens[3:],
+                value_flags=GH_PR_VIEW_VALUE_FLAGS,
+                value_prefixes=GH_PR_VIEW_VALUE_PREFIXES,
+                flag_only=set(),
+            )
+            problems.extend(grammar_problems)
+            problems.extend(require_exactly_one_positional("gh pr view", positionals, "the requested PR"))
+            command_pr = positionals[0] if positionals else ""
+            command_repo = option_value(tokens, {"--repo", "-R"})
             if pr_number and not command_pr:
                 problems.append(command_problem("gh pr view must name the requested PR"))
             elif pr_number and command_pr != str(pr_number):
@@ -657,31 +1223,48 @@ def validate_gh_command(
             elif token.startswith("-X") and len(token) > 2:
                 method = token[2:].upper()
                 method_explicit = True
-            if token in {"-H", "--header"} or token.startswith("--header="):
+            if token in {"-H", "--header"} or token.startswith(("--header=", "-H")):
                 problems.append(command_problem("gh api fixture commands must not include headers"))
-            if token in {"-f", "-F", "--field", "--raw-field"} or token.startswith(("--field=", "--raw-field=")):
+            if token in GH_API_FIELD_FLAGS or token.startswith(GH_API_FIELD_PREFIXES):
                 has_field_arg = True
             if token == "--input" or token.startswith("--input="):
                 has_input_arg = True
+        positionals, _values, grammar_problems = parse_gh_option_grammar(
+            "gh api",
+            tokens[2:],
+            value_flags=GH_API_ALLOWED_VALUE_FLAGS,
+            value_prefixes=GH_API_ALLOWED_VALUE_PREFIXES,
+            flag_only=GH_API_ALLOWED_FLAG_ONLY,
+            attached_short_value_flags=("-X",),
+            forbidden_value_flags=GH_API_FORBIDDEN_VALUE_FLAGS,
+            forbidden_value_prefixes=("--field=", "--header=", "--input=", "--raw-field="),
+            forbidden_attached_short_value_flags=("-F", "-H", "-f"),
+        )
+        problems.extend(grammar_problems)
+        problems.extend(require_exactly_one_positional("gh api", positionals, "one PR-scoped endpoint"))
         if method != "GET":
             problems.append(command_problem(f"gh api --method {method} is forbidden"))
         if has_input_arg:
             problems.append(command_problem("gh api fixture commands must not send input bodies"))
-        if has_field_arg and not method_explicit:
-            problems.append(command_problem("gh api field arguments require an explicit GET method"))
+        if has_field_arg:
+            problems.append(command_problem("gh api field arguments are not allowed for live evidence"))
         if any("mutation" in token.lower() for token in tokens):
             problems.append(command_problem("gh api GraphQL mutations are forbidden"))
-        endpoint = gh_api_endpoint(tokens)
+        endpoint = positionals[0] if positionals else ""
         if not endpoint:
             problems.append(command_problem("gh api command is missing an endpoint"))
-        elif not gh_api_endpoint_allowed(
-            endpoint,
-            repo=repo,
-            pr_number=str(pr_number),
-            check_runs=check_runs,
-            captured_head=captured_head,
-        ):
-            problems.append(command_problem(f"gh api endpoint {endpoint} is not PR-scoped for the requested repo and PR"))
+        elif gh_api_endpoint_is_absolute(endpoint):
+            problems.append(command_problem("gh api fixture commands must use path-style endpoints, not absolute URLs"))
+        else:
+            problems.extend(gh_api_endpoint_query_problems(endpoint))
+            if not gh_api_endpoint_allowed(
+                endpoint,
+                repo=repo,
+                pr_number=str(pr_number),
+                check_runs=check_runs,
+                captured_head=captured_head,
+            ):
+                problems.append(command_problem(f"gh api endpoint {endpoint} is not PR-scoped for the requested repo and PR"))
         return problems
     if top == "run":
         if sub != "view":
@@ -690,7 +1273,17 @@ def validate_gh_command(
                 reason = f"gh run {sub} is forbidden"
             problems.append(command_problem(reason))
         else:
-            run_id, command_repo = gh_run_view_identity(tokens)
+            positionals, _values, grammar_problems = parse_gh_option_grammar(
+                "gh run view",
+                tokens[3:],
+                value_flags=GH_RUN_VIEW_VALUE_FLAGS,
+                value_prefixes=GH_RUN_VIEW_VALUE_PREFIXES,
+                flag_only=GH_RUN_VIEW_FLAG_ONLY,
+            )
+            problems.extend(grammar_problems)
+            problems.extend(require_exactly_one_positional("gh run view", positionals, "a workflow run id"))
+            run_id = positionals[0] if positionals else ""
+            command_repo = option_value(tokens, {"--repo", "-R"})
             if "--web" in tokens:
                 problems.append(command_problem("gh run view --web is not allowed for fixture evidence"))
             if repo and not command_repo:
@@ -713,6 +1306,114 @@ def validate_gh_command(
     return problems
 
 
+def connector_operation_repo_identity(operation: Mapping[str, Any]) -> str:
+    repository = operation.get("repository")
+    return first_text(
+        operation.get("repo"),
+        repository_identity(repository),
+        repo_from_url(repository if isinstance(repository, str) else ""),
+    )
+
+
+def connector_operation_pr_identity(operation: Mapping[str, Any]) -> str:
+    pull_request = operation.get("pull_request")
+    pull_request_camel = operation.get("pullRequest")
+    pull_request_map = pull_request if isinstance(pull_request, Mapping) else {}
+    pull_request_camel_map = pull_request_camel if isinstance(pull_request_camel, Mapping) else {}
+    pull_request_url = pull_request if isinstance(pull_request, str) else ""
+    pull_request_camel_url = pull_request_camel if isinstance(pull_request_camel, str) else ""
+    pull_request_text = pull_request if isinstance(pull_request, (int, str)) and not pr_from_url(pull_request) else ""
+    pull_request_camel_text = pull_request_camel if isinstance(pull_request_camel, (int, str)) and not pr_from_url(pull_request_camel) else ""
+    return first_text(
+        operation.get("pr"),
+        operation.get("pull_request_number"),
+        operation.get("pullRequestNumber"),
+        nested(pull_request_map, "number"),
+        nested(pull_request_camel_map, "number"),
+        pr_from_url(pull_request_url),
+        pr_from_url(pull_request_camel_url),
+        pull_request_text,
+        pull_request_camel_text,
+    )
+
+
+def connector_operation_host_evidence(operation: Any, label: str) -> list[tuple[str, str]]:
+    if not isinstance(operation, Mapping):
+        return []
+    evidence: list[tuple[str, str]] = []
+    for key in ("host", "github_host"):
+        evidence.extend(github_host_evidence_from_value(operation.get(key), f"{label}.{key}"))
+    for key in (*GITHUB_URL_KEYS, *GITHUB_IDENTITY_URL_KEYS):
+        value = operation.get(key)
+        evidence.extend(github_host_evidence_from_value(value, f"{label}.{key}", require_url_like=True))
+        evidence.extend(github_host_evidence_from_payload(value, f"{label}.{key}"))
+    return evidence
+
+
+def connector_operation_url_identity_items(operation: Mapping[str, Any]) -> list[tuple[str, str, bool]]:
+    items: list[tuple[str, str, bool]] = []
+    for key in (*GITHUB_URL_KEYS, *GITHUB_IDENTITY_URL_KEYS):
+        value = operation.get(key)
+        if isinstance(value, str) and value.strip():
+            items.append((key, value, key in GITHUB_URL_KEYS))
+        elif isinstance(value, Mapping):
+            for nested_key in GITHUB_URL_KEYS:
+                nested_value = value.get(nested_key)
+                if isinstance(nested_value, str) and nested_value.strip():
+                    items.append((f"{key}.{nested_key}", nested_value, True))
+    return items
+
+
+def validate_connector_operation_identity(
+    operation: Any,
+    *,
+    repo: str,
+    pr_number: str,
+    github_host: str = "",
+    label: str = "connector operation",
+    require_identity: bool = False,
+) -> list[dict[str, Any]]:
+    if not isinstance(operation, Mapping):
+        return []
+    problems: list[dict[str, Any]] = []
+    expected_repo = str(repo or "").strip()
+    expected_pr = str(pr_number or "").strip()
+    expected_host = canonical_github_host(github_host)
+    declared_repo = connector_operation_repo_identity(operation)
+    declared_pr = connector_operation_pr_identity(operation)
+    if require_identity and expected_repo and not declared_repo:
+        problems.append(command_problem(f"{label} must declare the requested repository"))
+    if declared_repo and expected_repo and declared_repo != expected_repo:
+        problems.append(command_problem(f"{label} repository does not match the requested PR"))
+    if require_identity and expected_pr and not declared_pr:
+        problems.append(command_problem(f"{label} must declare the requested PR"))
+    if declared_pr and expected_pr and declared_pr != expected_pr:
+        problems.append(command_problem(f"{label} PR does not match the requested PR"))
+    for key, raw_url, require_url in connector_operation_url_identity_items(operation):
+        for message in github_url_identity_messages(raw_url, f"{label} {key}", require_url=require_url):
+            problems.append(command_problem(message))
+        url_repo = repo_from_url(raw_url)
+        url_pr = pr_from_url(raw_url)
+        if url_repo and expected_repo and url_repo != expected_repo:
+            problems.append(command_problem(f"{label} URL repository does not match the requested PR"))
+        if url_pr and expected_pr and url_pr != expected_pr:
+            problems.append(command_problem(f"{label} URL PR does not match the requested PR"))
+    approved_host_evidence = False
+    for evidence_label, raw_host in connector_operation_host_evidence(operation, label):
+        host = canonical_github_host(raw_host)
+        if not host:
+            continue
+        if host not in APPROVED_GITHUB_HOSTS:
+            problems.append(command_problem(f"{evidence_label} {host} is not an approved GitHub host"))
+        elif expected_host and host != expected_host:
+            problems.append(command_problem(f"{evidence_label} does not match recorded GitHub provenance"))
+        else:
+            approved_host_evidence = True
+    if require_identity and not approved_host_evidence:
+        problems.append(command_problem(f"{label} must include approved GitHub host or URL evidence"))
+    return problems
+
+
 def validate_connector_operation(
     operation: Any,
     *,
@@ -720,8 +1421,12 @@ def validate_connector_operation(
     pr_number: str = "",
     check_runs: Any = None,
     captured_head: str = "",
+    github_host: str = "",
+    require_identity: bool = False,
 ) -> list[dict[str, Any]]:
     if isinstance(operation, str):
+        if require_identity:
+            return [command_problem("connector operation must be a structured object with repo, PR, and host evidence")]
         name = operation
         action = "read"
     elif isinstance(operation, Mapping):
@@ -735,10 +1440,18 @@ def validate_connector_operation(
         return [command_problem(f"connector operation {name or '<missing>'} is not read-only")]
     if normalized not in CONNECTOR_READ_OPERATIONS:
         return [command_problem(f"connector operation {name or '<missing>'} is not read-only allowlisted")]
+    identity_problems = validate_connector_operation_identity(
+        operation,
+        repo=repo,
+        pr_number=pr_number,
+        github_host=github_host,
+        label=f"connector operation {name or '<missing>'}",
+        require_identity=require_identity,
+    )
     if normalized in {"logs", "ci_logs"}:
         if not isinstance(operation, Mapping):
             return [command_problem(f"connector operation {name or '<missing>'} must be structured with repo, PR, head SHA, and CI identity")]
-        return validate_ci_log_identity(
+        identity_problems.extend(validate_ci_log_identity(
             operation,
             repo=repo,
             pr_number=pr_number,
@@ -746,12 +1459,13 @@ def validate_connector_operation(
             check_runs=check_runs,
             label=f"connector operation {name or '<missing>'}",
             rule="github-command",
-        )
-    return []
+        ))
+    return identity_problems
 
 
-def validate_read_only(raw: RawEvidence, *, repo: str, pr_number: str, captured_head: str = "") -> list[dict[str, Any]]:
+def validate_read_only(raw: RawEvidence, *, repo: str, pr_number: str, captured_head: str = "", github_host: str = "") -> list[dict[str, Any]]:
     problems: list[dict[str, Any]] = []
+    require_operation_identity = is_live_source(raw.source)
     for command in raw.commands:
         problems.extend(
             validate_gh_command(
@@ -760,6 +1474,7 @@ def validate_read_only(raw: RawEvidence, *, repo: str, pr_number: str, captured_
                 pr_number=str(pr_number),
                 check_runs=raw.check_runs,
                 captured_head=captured_head,
+                github_host=github_host,
             )
         )
     for operation in raw.operations:
@@ -770,6 +1485,8 @@ def validate_read_only(raw: RawEvidence, *, repo: str, pr_number: str, captured_
                 pr_number=str(pr_number),
                 check_runs=raw.check_runs,
                 captured_head=captured_head,
+                github_host=github_host,
+                require_identity=require_operation_identity,
             )
         )
     return problems
@@ -803,7 +1520,7 @@ def load_connector_input(path: Path) -> RawEvidence:
     if not isinstance(payload, dict):
         payload = {}
     pr_payload = payload.get("pr") or payload.get("pull_request") or {}
-    final_pr = payload.get("final_pr") or payload.get("freshness") or pr_payload
+    final_pr = payload.get("final_pr") or payload.get("freshness") or {}
     provenance = payload.get("live_provenance") or payload.get("github_provenance") or payload.get("provenance") or {}
     return RawEvidence(
         source="github-connector-live",
@@ -853,6 +1570,8 @@ def load_gh_readonly_dir(path: Path) -> RawEvidence:
     raw = load_gh_fixture_dir(path)
     provenance = read_json(path / "provenance.json", {})
     raw.source = "gh-readonly-live"
+    if not (path / "final-pr-view.json").exists():
+        raw.final_pr = {}
     raw.live_provenance = provenance if isinstance(provenance, dict) else {}
     return raw
 
@@ -914,6 +1633,22 @@ def extract_head_sha(pr_payload: Mapping[str, Any]) -> str:
         nested(pr_payload, "headRef", "target", "sha"),
         extract_ref_sha(pr_payload.get("head")),
         extract_ref_sha(pr_payload.get("headRef")),
+    )
+
+
+def extract_current_base_sha(pr_payload: Mapping[str, Any]) -> str:
+    return first_text(
+        pr_payload.get("current_base_sha"),
+        pr_payload.get("currentBaseSha"),
+        extract_base_sha(pr_payload),
+    )
+
+
+def extract_current_head_sha(pr_payload: Mapping[str, Any]) -> str:
+    return first_text(
+        pr_payload.get("current_head_sha"),
+        pr_payload.get("currentHeadSha"),
+        extract_head_sha(pr_payload),
     )
 
 
@@ -1246,10 +1981,7 @@ def payload_repository_identity(payload: Mapping[str, Any]) -> str:
 
 
 def repo_from_url(value: Any) -> str:
-    if not isinstance(value, str) or not value.strip():
-        return ""
-    parsed = urllib.parse.urlsplit(value.strip())
-    parts = [urllib.parse.unquote(part) for part in parsed.path.strip("/").split("/") if part]
+    parts = approved_github_url_parts(value)
     if len(parts) >= 3 and parts[0] == "repos":
         return f"{parts[1]}/{parts[2]}"
     if len(parts) >= 2 and parts[0] not in {"pull", "pulls", "issues"}:
@@ -1258,10 +1990,7 @@ def repo_from_url(value: Any) -> str:
 
 
 def pr_from_url(value: Any) -> str:
-    if not isinstance(value, str) or not value.strip():
-        return ""
-    parsed = urllib.parse.urlsplit(value.strip())
-    parts = [urllib.parse.unquote(part) for part in parsed.path.strip("/").split("/") if part]
+    parts = approved_github_url_parts(value)
     if len(parts) >= 5 and parts[0] == "repos" and parts[3] in {"pull", "pulls"}:
         return parts[4]
     if len(parts) >= 4 and parts[2] in {"pull", "pulls"}:
@@ -1279,6 +2008,8 @@ def validate_payload_identity(payload: Mapping[str, Any], *, repo: str, pr_numbe
         problems.append(blocking_problem(f"{label} PR metadata does not match --pr", rule="github-live-provenance"))
     for key in ("url", "html_url", "web_url", "pull_request_url", "pullRequestUrl"):
         raw_url = payload.get(key)
+        for message in github_url_identity_messages(raw_url, f"{label} {key}", require_url=True):
+            problems.append(blocking_problem(message, rule="github-live-provenance"))
         url_repo = repo_from_url(raw_url)
         url_pr = pr_from_url(raw_url)
         if url_repo and url_repo != repo:
@@ -1306,6 +2037,7 @@ def validate_live_import(
     provenance = raw.live_provenance
     if not provenance:
         problems.append(blocking_problem("live GitHub import requires provenance metadata", rule="github-live-provenance"))
+    problems.extend(validate_live_github_host(raw))
     collected_at = first_text(provenance.get("collected_at"), provenance.get("captured_at"))
     if not collected_at:
         problems.append(blocking_problem("live GitHub import requires a collection timestamp", rule="github-live-provenance"))
@@ -1325,8 +2057,12 @@ def validate_live_import(
     elif provenance_pr != str(pr_number):
         problems.append(blocking_problem("live GitHub provenance PR does not match --pr", rule="github-live-provenance"))
     problems.extend(validate_payload_identity(raw.pr, repo=repo, pr_number=str(pr_number), label="live GitHub PR metadata"))
-    if raw.final_pr is not raw.pr:
+    if not raw.final_pr:
+        problems.append(blocking_problem("live GitHub import requires explicit final PR or freshness payload", rule="github-live-provenance"))
+    else:
         problems.extend(validate_payload_identity(raw.final_pr, repo=repo, pr_number=str(pr_number), label="live GitHub final PR metadata"))
+        if not extract_current_base_sha(raw.final_pr) or not extract_current_head_sha(raw.final_pr):
+            problems.append(blocking_problem("live GitHub import requires final freshness base and head refs", rule="github-live-provenance"))
     if not raw.commands and not raw.operations:
         problems.append(blocking_problem("live GitHub import requires read-only command or connector operations", rule="github-live-provenance"))
     if not all([captured_base, captured_head, current_base, current_head]):
@@ -1339,6 +2075,7 @@ def operation_transcript_payload(
     raw: RawEvidence,
     repo: str,
     pr_number: str,
+    github_host: str,
     captured_base: str,
     captured_head: str,
     current_base: str,
@@ -1353,6 +2090,7 @@ def operation_transcript_payload(
         "source": raw.source,
         "repo": repo,
         "pr": str(pr_number),
+        "github_host": github_host,
         "collected_at": first_text(provenance.get("collected_at"), provenance.get("captured_at")),
         "imported_at": live_common.now_utc(),
         "live_provenance": provenance,
@@ -1374,6 +2112,7 @@ def operation_transcript_payload(
         "allowlist": {
             "connector_operations": sorted(CONNECTOR_READ_OPERATIONS),
             "gh_top_level": ["api", "pr", "run"],
+            "github_hosts": sorted(APPROVED_GITHUB_HOSTS),
         },
     }
 
@@ -1404,9 +2143,14 @@ def collect(args: argparse.Namespace) -> CollectionResult:
     initial_head = extract_head_sha(raw.pr)
     captured_base = first_text(args.base, initial_base)
     captured_head = first_text(args.head, initial_head)
-    problems.extend(validate_read_only(raw, repo=args.repo, pr_number=str(args.pr), captured_head=captured_head))
-    current_base = extract_base_sha(raw.final_pr) or initial_base
-    current_head = extract_head_sha(raw.final_pr) or initial_head
+    github_host = github_host_for_raw(raw)
+    problems.extend(validate_read_only(raw, repo=args.repo, pr_number=str(args.pr), captured_head=captured_head, github_host=github_host))
+    if is_live_source(raw.source):
+        current_base = extract_current_base_sha(raw.final_pr)
+        current_head = extract_current_head_sha(raw.final_pr)
+    else:
+        current_base = extract_current_base_sha(raw.final_pr) or initial_base
+        current_head = extract_current_head_sha(raw.final_pr) or initial_head
     merge_base = extract_merge_base(raw, raw.pr)
 
     if args.base and initial_base and args.base != initial_base:
@@ -1467,6 +2211,8 @@ def collect(args: argparse.Namespace) -> CollectionResult:
     root = live_common.live_collector_dir(project, args.task, COLLECTOR)
     redaction_report: dict[str, int] = dict(log_report)
     artifacts: dict[str, Path] = {}
+    safe_read_only_commands, command_report = redact_gh_api_command_query_values(raw.commands)
+    redaction_report = merge_reports(redaction_report, command_report)
 
     pr_payload = normalize_pr_payload(
         raw=raw,
@@ -1505,6 +2251,7 @@ def collect(args: argparse.Namespace) -> CollectionResult:
         raw=raw,
         repo=args.repo,
         pr_number=str(args.pr),
+        github_host=github_host,
         captured_base=captured_base,
         captured_head=captured_head,
         current_base=current_base,
@@ -1520,12 +2267,15 @@ def collect(args: argparse.Namespace) -> CollectionResult:
 
     source_hash_after = live_common.compute_source_hash(project)
     summary_live_provenance = dict(raw.live_provenance)
+    if github_host and github_host_provenance_evidence_for_raw(raw):
+        summary_live_provenance.setdefault("github_host", github_host)
     summary_live_provenance["operation_transcript_sha256"] = transcript_sha256
     summary = {
         "adapter": "github-pr",
         "source": raw.source,
         "repo": args.repo,
         "pr": str(args.pr),
+        "github_host": github_host,
         "captured_base_sha": captured_base,
         "current_base_sha": current_base,
         "captured_head_sha": captured_head,
@@ -1543,7 +2293,7 @@ def collect(args: argparse.Namespace) -> CollectionResult:
         "pagination_incomplete": pagination_incomplete,
         "checks_bound_to_head": not any(item.get("rule") == "github-checks" and "head SHA" in str(item.get("message")) for item in problems),
         "read_only_operations": raw.operations,
-        "read_only_commands": raw.commands,
+        "read_only_commands": safe_read_only_commands,
         "read_only_transcript_sha256": transcript_sha256,
         "captured_at": first_text(raw.live_provenance.get("collected_at"), raw.live_provenance.get("captured_at")),
         "live_provenance": summary_live_provenance,
@@ -1567,35 +2317,55 @@ def collect(args: argparse.Namespace) -> CollectionResult:
     )
     update_manifest_redaction_report(manifest_path, redaction_report)
     manifest_rel = live_common.project_relative(project, manifest_path)
-    project_arg = "." if project == Path.cwd().resolve() else str(project)
+    project_arg = live_common.project_cli_arg(project)
     fixture_sources = {"connector-fixture", "gh-fixture", "missing-fixture"}
-    commands = []
+    commands: list[list[str]] = []
     if raw.source not in fixture_sources:
         commands = [
-            f"python3 scripts/star_forge.py source-packet-github-pr-review --project {shlex.quote(project_arg)} --input {shlex.quote(manifest_rel)} --strict",
-            f"python3 scripts/star_forge.py source-packet-proof --project {shlex.quote(project_arg)} --task {shlex.quote(args.task)} --profile production-review --input {shlex.quote(manifest_rel)} --strict",
+            [
+                "python3",
+                "scripts/star_forge.py",
+                "source-packet-github-pr-review",
+                "--project",
+                project_arg,
+                "--input",
+                manifest_rel,
+                "--strict",
+            ],
+            [
+                "python3",
+                "scripts/star_forge.py",
+                "source-packet-proof",
+                "--project",
+                project_arg,
+                "--task",
+                str(args.task),
+                "--profile",
+                "production-review",
+                "--input",
+                manifest_rel,
+                "--strict",
+            ],
         ]
     return CollectionResult(manifest_path=manifest_path, commands=commands, problems=problems)
 
 
 def record_proof_commands(result: CollectionResult, project: Path) -> int:
-    script = SCRIPT_DIR / "star_forge.py"
-    manifest_rel = live_common.project_relative(project, result.manifest_path)
-    proc = subprocess.run(
-        [
-            sys.executable,
-            str(script),
-            "source-packet-github-pr-review",
-            "--project",
-            str(project),
-            "--input",
-            manifest_rel,
-            "--strict",
-        ],
-        text=True,
-        check=False,
-    )
-    return proc.returncode
+    for command in result.commands:
+        proc = subprocess.run(
+            trusted_proof_command(command),
+            cwd=str(project),
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if proc.stdout:
+            print(proc.stdout, end="")
+        if proc.stderr:
+            print(proc.stderr, end="", file=sys.stderr)
+        if proc.returncode != 0:
+            return proc.returncode
+    return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1627,7 +2397,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if result.commands:
         print("Source packet proof commands:")
         for command in result.commands:
-            print(command)
+            print(display_command(command))
     else:
         print("Fixture-only evidence was written; production proof commands were not emitted.")
     if args.record:
