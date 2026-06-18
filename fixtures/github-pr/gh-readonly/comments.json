@@ -1,0 +1,9 @@
+{
+  "comments": [
+    {
+      "author": "reviewer",
+      "body": "gh fixture comment",
+      "path": "src/app.py"
+    }
+  ]
+}

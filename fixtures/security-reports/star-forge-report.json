@@ -1,0 +1,36 @@
+{
+  "schema": "star-forge.security-report.v1",
+  "provenance": {
+    "scanner": "star-forge-fixture-scanner",
+    "generated_at": "2026-06-18T00:00:00Z"
+  },
+  "scanner": {
+    "name": "star-forge-fixture-scanner",
+    "version": "0.9.0"
+  },
+  "ruleset": {
+    "name": "star-forge-default",
+    "version": "2026.06"
+  },
+  "scan_scope": "full-project",
+  "source": {},
+  "dependency_manifests": [
+    "package.json"
+  ],
+  "findings": [
+    {
+      "id": "SFSEC-100",
+      "rule_id": "dependency-vulnerability",
+      "severity": "moderate",
+      "confidence": "likely",
+      "title": "Vulnerable package version",
+      "message": "A dependency manifest contains a vulnerable package version.",
+      "evidence": {
+        "file": "package.json",
+        "package": "example-lib",
+        "vulnerability": "CVE-2026-0001"
+      },
+      "remediation": "Upgrade example-lib to a patched release."
+    }
+  ]
+}

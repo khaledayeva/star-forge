@@ -1,0 +1,56 @@
+{
+  "capabilities": [
+    "session_show_defaults",
+    "build_run_sim",
+    "test_sim",
+    "screenshot"
+  ],
+  "calls": [
+    {
+      "result": {
+        "runtime": "iOS 18.4",
+        "scheme": "TestApp",
+        "simulator": "iPhone 16",
+        "udid": "00000000-0000-0000-0000-000000000001"
+      },
+      "tool": "session_show_defaults"
+    },
+    {
+      "arguments": {
+        "scheme": "TestApp",
+        "simulator": "iPhone 16"
+      },
+      "result": {
+        "success": true
+      },
+      "tool": "build_run_sim"
+    },
+    {
+      "arguments": {
+        "scheme": "TestApp",
+        "simulator": "iPhone 16"
+      },
+      "result": {
+        "success": true
+      },
+      "tool": "test_sim"
+    },
+    {
+      "arguments": {
+        "simulator": "iPhone 16"
+      },
+      "result": {
+        "success": true
+      },
+      "tool": "screenshot"
+    }
+  ],
+  "exported_by": "star-forge-test-agent",
+  "mcp": {
+    "available": true,
+    "server": "XcodeBuildMCP",
+    "tool_surface": "mcp",
+    "version": "fixture"
+  },
+  "schema": "star-forge.native-ios.mcp-transcript.v1"
+}

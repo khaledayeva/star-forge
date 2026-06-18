@@ -1,0 +1,40 @@
+{
+  "schema": "codex.security.report.v1",
+  "provenance": {
+    "collector": "codex-security",
+    "scanner": "codex-security",
+    "generated_at": "2026-06-18T00:00:00Z"
+  },
+  "scanner": {
+    "name": "codex-security",
+    "version": "1.2.3"
+  },
+  "ruleset": {
+    "name": "codex-default",
+    "version": "2026.06"
+  },
+  "scan_scope": {
+    "kind": "changed-files",
+    "paths": [
+      "src/app.py"
+    ]
+  },
+  "source": {},
+  "findings": [
+    {
+      "id": "CSEC-001",
+      "rule_id": "secret-detected",
+      "severity": "HIGH",
+      "confidence": "high",
+      "title": "Hardcoded API key",
+      "message": "A scanner snippet included an environment value.",
+      "evidence": {
+        "file": "src/app.py",
+        "line": 2,
+        "snippet": "OPENAI_API_KEY=${EXAMPLE_OPENAI_API_KEY}",
+        "token": "scanner-placeholder-token"
+      },
+      "remediation": "Move the secret into a managed secret store."
+    }
+  ]
+}

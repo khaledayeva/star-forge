@@ -1,0 +1,46 @@
+{
+  "capabilities": [
+    "build_run_sim",
+    "test_sim",
+    "screenshot"
+  ],
+  "calls": [
+    {
+      "arguments": {
+        "scheme": "TestApp",
+        "simulator": "iPhone 16"
+      },
+      "result": {
+        "success": true
+      },
+      "tool": "build_run_sim"
+    },
+    {
+      "arguments": {
+        "scheme": "TestApp",
+        "simulator": "iPhone 16"
+      },
+      "result": {
+        "success": true
+      },
+      "tool": "test_sim"
+    },
+    {
+      "arguments": {
+        "simulator": "iPhone 16"
+      },
+      "result": {
+        "success": true
+      },
+      "tool": "screenshot"
+    }
+  ],
+  "exported_by": "star-forge-test-agent",
+  "mcp": {
+    "available": true,
+    "server": "XcodeBuildMCP",
+    "tool_surface": "mcp",
+    "version": "fixture"
+  },
+  "schema": "star-forge.native-ios.mcp-transcript.v1"
+}

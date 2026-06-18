@@ -1,0 +1,18 @@
+{
+  "baseRefOid": "3333333333333333333333333333333333333333",
+  "files": [
+    {
+      "additions": 1,
+      "changes": 2,
+      "deletions": 1,
+      "filename": "src/app.py",
+      "status": "modified"
+    }
+  ],
+  "headRefOid": "4444444444444444444444444444444444444444",
+  "merge_base_sha": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+  "number": 42,
+  "state": "OPEN",
+  "title": "Ship gh fixture adapter",
+  "url": "https://github.example/star-forge/tools/pull/42"
+}

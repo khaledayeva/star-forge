@@ -1,0 +1,27 @@
+[
+  [
+    "gh",
+    "pr",
+    "view",
+    "42",
+    "--repo",
+    "star-forge/tools",
+    "--json",
+    "number,title,state,baseRefOid,headRefOid,url"
+  ],
+  [
+    "gh",
+    "api",
+    "repos/star-forge/tools/pulls/42/files",
+    "--paginate"
+  ],
+  [
+    "gh",
+    "run",
+    "view",
+    "701",
+    "--repo",
+    "star-forge/tools",
+    "--log"
+  ]
+]

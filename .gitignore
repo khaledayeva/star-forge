@@ -1,0 +1,15 @@
+.starforge/
+
+.starforge/screenshots/*
+
+!.starforge/screenshots/manifest.json
+
+.starforge/state/changed-files.jsonl
+
+.starforge/state/hook-events.jsonl
+
+.starforge/state/subagent-events.jsonl
+
+.starforge/state/auto-continue.json
+
+.starforge/state/incidents.jsonl

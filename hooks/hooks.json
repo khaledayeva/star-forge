@@ -1,0 +1,103 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh -c 'if [ -n \"${STAR_FORGE_SCRIPT:-}\" ] && [ -f \"$STAR_FORGE_SCRIPT\" ]; then python3 \"$STAR_FORGE_SCRIPT\" session-start-hook; exit 0; fi; if [ -n \"${PLUGIN_ROOT:-}\" ] && [ -f \"$PLUGIN_ROOT/scripts/star_forge.py\" ]; then python3 \"$PLUGIN_ROOT/scripts/star_forge.py\" session-start-hook; exit 0; fi; best=\"\"; bestv=\"\"; for p in \"$HOME\"/.codex/plugins/cache/*/star-forge/*/scripts/star_forge.py; do [ -f \"$p\" ] || continue; v=$(basename \"$(dirname \"$(dirname \"$p\")\")\"); newest=$(printf \"%s\\n%s\\n\" \"$bestv\" \"$v\" | sort -V | tail -1); if [ -z \"$bestv\" ] || [ \"$newest\" = \"$v\" ]; then best=\"$p\"; bestv=\"$v\"; fi; done; if [ -n \"$best\" ]; then python3 \"$best\" session-start-hook; else echo \"star-forge: helper script not found; hooks inactive\" >&2; fi; exit 0'",
+            "timeout": 30,
+            "statusMessage": "Star Forge resuming state"
+          }
+        ],
+        "matcher": "startup|resume|clear|compact"
+      }
+    ],
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh -c 'if [ -n \"${STAR_FORGE_SCRIPT:-}\" ] && [ -f \"$STAR_FORGE_SCRIPT\" ]; then python3 \"$STAR_FORGE_SCRIPT\" subagent-start-hook; exit 0; fi; if [ -n \"${PLUGIN_ROOT:-}\" ] && [ -f \"$PLUGIN_ROOT/scripts/star_forge.py\" ]; then python3 \"$PLUGIN_ROOT/scripts/star_forge.py\" subagent-start-hook; exit 0; fi; best=\"\"; bestv=\"\"; for p in \"$HOME\"/.codex/plugins/cache/*/star-forge/*/scripts/star_forge.py; do [ -f \"$p\" ] || continue; v=$(basename \"$(dirname \"$(dirname \"$p\")\")\"); newest=$(printf \"%s\\n%s\\n\" \"$bestv\" \"$v\" | sort -V | tail -1); if [ -z \"$bestv\" ] || [ \"$newest\" = \"$v\" ]; then best=\"$p\"; bestv=\"$v\"; fi; done; if [ -n \"$best\" ]; then python3 \"$best\" subagent-start-hook; else echo \"star-forge: helper script not found; hooks inactive\" >&2; fi; exit 0'",
+            "timeout": 30,
+            "statusMessage": "Star Forge registering sub-agent"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh -c 'if [ -n \"${STAR_FORGE_SCRIPT:-}\" ] && [ -f \"$STAR_FORGE_SCRIPT\" ]; then python3 \"$STAR_FORGE_SCRIPT\" hook; exit 0; fi; if [ -n \"${PLUGIN_ROOT:-}\" ] && [ -f \"$PLUGIN_ROOT/scripts/star_forge.py\" ]; then python3 \"$PLUGIN_ROOT/scripts/star_forge.py\" hook; exit 0; fi; best=\"\"; bestv=\"\"; for p in \"$HOME\"/.codex/plugins/cache/*/star-forge/*/scripts/star_forge.py; do [ -f \"$p\" ] || continue; v=$(basename \"$(dirname \"$(dirname \"$p\")\")\"); newest=$(printf \"%s\\n%s\\n\" \"$bestv\" \"$v\" | sort -V | tail -1); if [ -z \"$bestv\" ] || [ \"$newest\" = \"$v\" ]; then best=\"$p\"; bestv=\"$v\"; fi; done; if [ -n \"$best\" ]; then python3 \"$best\" hook; else echo \"star-forge: helper script not found; hooks inactive\" >&2; fi; exit 0'",
+            "timeout": 30,
+            "statusMessage": "Star Forge observing tool call"
+          }
+        ],
+        "matcher": "Bash|apply_patch|Edit|Write"
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh -c 'if [ -n \"${STAR_FORGE_SCRIPT:-}\" ] && [ -f \"$STAR_FORGE_SCRIPT\" ]; then python3 \"$STAR_FORGE_SCRIPT\" post-hook; exit 0; fi; if [ -n \"${PLUGIN_ROOT:-}\" ] && [ -f \"$PLUGIN_ROOT/scripts/star_forge.py\" ]; then python3 \"$PLUGIN_ROOT/scripts/star_forge.py\" post-hook; exit 0; fi; best=\"\"; bestv=\"\"; for p in \"$HOME\"/.codex/plugins/cache/*/star-forge/*/scripts/star_forge.py; do [ -f \"$p\" ] || continue; v=$(basename \"$(dirname \"$(dirname \"$p\")\")\"); newest=$(printf \"%s\\n%s\\n\" \"$bestv\" \"$v\" | sort -V | tail -1); if [ -z \"$bestv\" ] || [ \"$newest\" = \"$v\" ]; then best=\"$p\"; bestv=\"$v\"; fi; done; if [ -n \"$best\" ]; then python3 \"$best\" post-hook; else echo \"star-forge: helper script not found; hooks inactive\" >&2; fi; exit 0'",
+            "timeout": 30,
+            "statusMessage": "Star Forge recording tool result"
+          }
+        ],
+        "matcher": "Bash|apply_patch|Edit|Write"
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh -c 'if [ -n \"${STAR_FORGE_SCRIPT:-}\" ] && [ -f \"$STAR_FORGE_SCRIPT\" ]; then python3 \"$STAR_FORGE_SCRIPT\" prompt-hook; exit 0; fi; if [ -n \"${PLUGIN_ROOT:-}\" ] && [ -f \"$PLUGIN_ROOT/scripts/star_forge.py\" ]; then python3 \"$PLUGIN_ROOT/scripts/star_forge.py\" prompt-hook; exit 0; fi; best=\"\"; bestv=\"\"; for p in \"$HOME\"/.codex/plugins/cache/*/star-forge/*/scripts/star_forge.py; do [ -f \"$p\" ] || continue; v=$(basename \"$(dirname \"$(dirname \"$p\")\")\"); newest=$(printf \"%s\\n%s\\n\" \"$bestv\" \"$v\" | sort -V | tail -1); if [ -z \"$bestv\" ] || [ \"$newest\" = \"$v\" ]; then best=\"$p\"; bestv=\"$v\"; fi; done; if [ -n \"$best\" ]; then python3 \"$best\" prompt-hook; else echo \"star-forge: helper script not found; hooks inactive\" >&2; fi; exit 0'",
+            "timeout": 30,
+            "statusMessage": "Star Forge state banner"
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh -c 'if [ -n \"${STAR_FORGE_SCRIPT:-}\" ] && [ -f \"$STAR_FORGE_SCRIPT\" ]; then python3 \"$STAR_FORGE_SCRIPT\" subagent-stop-hook; exit 0; fi; if [ -n \"${PLUGIN_ROOT:-}\" ] && [ -f \"$PLUGIN_ROOT/scripts/star_forge.py\" ]; then python3 \"$PLUGIN_ROOT/scripts/star_forge.py\" subagent-stop-hook; exit 0; fi; best=\"\"; bestv=\"\"; for p in \"$HOME\"/.codex/plugins/cache/*/star-forge/*/scripts/star_forge.py; do [ -f \"$p\" ] || continue; v=$(basename \"$(dirname \"$(dirname \"$p\")\")\"); newest=$(printf \"%s\\n%s\\n\" \"$bestv\" \"$v\" | sort -V | tail -1); if [ -z \"$bestv\" ] || [ \"$newest\" = \"$v\" ]; then best=\"$p\"; bestv=\"$v\"; fi; done; if [ -n \"$best\" ]; then python3 \"$best\" subagent-stop-hook; else echo \"star-forge: helper script not found; hooks inactive\" >&2; fi; exit 0'",
+            "timeout": 30,
+            "statusMessage": "Star Forge recording sub-agent result"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh -c 'if [ -n \"${STAR_FORGE_SCRIPT:-}\" ] && [ -f \"$STAR_FORGE_SCRIPT\" ]; then python3 \"$STAR_FORGE_SCRIPT\" stop-hook; exit 0; fi; if [ -n \"${PLUGIN_ROOT:-}\" ] && [ -f \"$PLUGIN_ROOT/scripts/star_forge.py\" ]; then python3 \"$PLUGIN_ROOT/scripts/star_forge.py\" stop-hook; exit 0; fi; best=\"\"; bestv=\"\"; for p in \"$HOME\"/.codex/plugins/cache/*/star-forge/*/scripts/star_forge.py; do [ -f \"$p\" ] || continue; v=$(basename \"$(dirname \"$(dirname \"$p\")\")\"); newest=$(printf \"%s\\n%s\\n\" \"$bestv\" \"$v\" | sort -V | tail -1); if [ -z \"$bestv\" ] || [ \"$newest\" = \"$v\" ]; then best=\"$p\"; bestv=\"$v\"; fi; done; if [ -n \"$best\" ]; then python3 \"$best\" stop-hook; else echo \"star-forge: helper script not found; hooks inactive\" >&2; fi; exit 0'",
+            "timeout": 30,
+            "statusMessage": "Star Forge writing continuity state"
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh -c 'if [ -n \"${STAR_FORGE_SCRIPT:-}\" ] && [ -f \"$STAR_FORGE_SCRIPT\" ]; then python3 \"$STAR_FORGE_SCRIPT\" pre-compact-hook; exit 0; fi; if [ -n \"${PLUGIN_ROOT:-}\" ] && [ -f \"$PLUGIN_ROOT/scripts/star_forge.py\" ]; then python3 \"$PLUGIN_ROOT/scripts/star_forge.py\" pre-compact-hook; exit 0; fi; best=\"\"; bestv=\"\"; for p in \"$HOME\"/.codex/plugins/cache/*/star-forge/*/scripts/star_forge.py; do [ -f \"$p\" ] || continue; v=$(basename \"$(dirname \"$(dirname \"$p\")\")\"); newest=$(printf \"%s\\n%s\\n\" \"$bestv\" \"$v\" | sort -V | tail -1); if [ -z \"$bestv\" ] || [ \"$newest\" = \"$v\" ]; then best=\"$p\"; bestv=\"$v\"; fi; done; if [ -n \"$best\" ]; then python3 \"$best\" pre-compact-hook; else echo \"star-forge: helper script not found; hooks inactive\" >&2; fi; exit 0'",
+            "timeout": 30,
+            "statusMessage": "Star Forge preparing compaction context"
+          }
+        ]
+      }
+    ]
+  }
+}

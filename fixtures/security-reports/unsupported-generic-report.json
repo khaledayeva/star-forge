@@ -1,0 +1,10 @@
+{
+  "scanner": "generic-json-scanner",
+  "findings": [
+    {
+      "id": "GEN-1",
+      "severity": "high",
+      "message": "Generic reports are not trusted by the adapter."
+    }
+  ]
+}

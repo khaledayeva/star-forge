@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Star Forge icon">
+  <rect width="64" height="64" rx="14" fill="#18181B"/>
+  <path d="M32 8l5.9 17.8H56L41.4 36.6 47 54 32 43.1 17 54l5.6-17.4L8 25.8h18.1L32 8z" fill="#F59E0B"/>
+  <path d="M21 45h22v5H21z" fill="#E5E7EB"/>
+</svg>

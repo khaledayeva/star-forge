@@ -1,0 +1,77 @@
+{
+  "schema": "star-forge.live-browser-scenarios.v1",
+  "scenarios": {
+    "happy": {
+      "name": "sloppy-home",
+      "description": "The sloppy fixture is visible and exposes the Add control.",
+      "timeout_ms": 3000,
+      "selectors": {
+        "add_button": "button",
+        "root": "main",
+        "title": "h1"
+      },
+      "ready": {
+        "selector": "@root",
+        "state": "visible"
+      },
+      "actions": [
+        {
+          "selector": "@add_button",
+          "type": "click"
+        }
+      ],
+      "assertions": [
+        {
+          "selector": "@title",
+          "type": "visible"
+        },
+        {
+          "selector": "@title",
+          "text": "Lorem ipsum",
+          "type": "text_contains"
+        }
+      ]
+    },
+    "failing-assertion": {
+      "name": "sloppy-failing-assertion",
+      "timeout_ms": 3000,
+      "selectors": {
+        "root": "main",
+        "title": "h1"
+      },
+      "ready": {
+        "selector": "@root",
+        "state": "visible"
+      },
+      "assertions": [
+        {
+          "selector": "@title",
+          "text": "Production ready",
+          "type": "text_contains"
+        }
+      ]
+    },
+    "ready-timeout": {
+      "name": "sloppy-ready-timeout",
+      "timeout_ms": 100,
+      "selectors": {
+        "never": "[data-never-appears='true']"
+      },
+      "ready": {
+        "selector": "@never",
+        "state": "visible",
+        "timeout_ms": 100
+      },
+      "assertions": []
+    },
+    "bad-forbidden-js": {
+      "name": "bad-forbidden-js",
+      "timeout_ms": 1000,
+      "ready": {
+        "selector": "body",
+        "state": "visible"
+      },
+      "script": "document.body.innerHTML = 'not allowed'"
+    }
+  }
+}

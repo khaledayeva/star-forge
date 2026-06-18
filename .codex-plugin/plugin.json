@@ -1,0 +1,41 @@
+{
+  "name": "star-forge",
+  "version": "0.3.0+codex.20260618020929",
+  "description": "A Codex-native software factory: plan, build with sub-agents, load-bearing review, and a completion predicate computed from git facts.",
+  "author": {
+    "name": "Khaled Ayeva"
+  },
+  "license": "MIT",
+  "keywords": [
+    "codex",
+    "forge",
+    "planning",
+    "sub-agents",
+    "review",
+    "software-factory"
+  ],
+  "skills": "./skills/",
+  "hooks": "./hooks/hooks.json",
+  "interface": {
+    "displayName": "Star Forge",
+    "shortDescription": "Plan, build with sub-agents, review, and prove completion from git facts \u2014 the Forge Loop.",
+    "longDescription": "Star Forge is a Codex-native software factory built on the Forge Loop: plan (Blueprint with acceptance criteria, one approval) -> build (sub-agent builders, coordinator-recorded verify and browser-run evidence) -> review (reviewer agents write findings that feed a fix queue the completion gate consumes) -> done (a predicate computed from git tree state, never a recorded claim). Post-completion edits automatically reopen the project as an amendment. Hooks observe and re-anchor across compaction; they never block. Lessons compound across projects via a global learnings store.",
+    "developerName": "Khaled Ayeva",
+    "category": "Productivity",
+    "capabilities": [
+      "Read",
+      "Write",
+      "Review",
+      "Workflow"
+    ],
+    "defaultPrompt": [
+      "$forge build this idea end to end",
+      "$forge resume where we left off",
+      "$forge-plan break this MVP into tasks",
+      "$forge-review run the review wave and prove completion"
+    ],
+    "brandColor": "#F59E0B",
+    "composerIcon": "./assets/star-forge-icon.svg",
+    "logo": "./assets/star-forge-logo.svg"
+  }
+}

@@ -1,0 +1,102 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh -c 'mkdir -p /tmp/sf-probe; { echo \"--- SessionStart $(date -u +%Y-%m-%dT%H:%M:%SZ)\"; cat; echo; env | grep -iE \"plugin|codex\" | sort; } >> /tmp/sf-probe/events.log; exit 0'",
+            "timeout": 30,
+            "statusMessage": "SF probe SessionStart"
+          }
+        ]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh -c 'mkdir -p /tmp/sf-probe; { echo \"--- SubagentStart $(date -u +%Y-%m-%dT%H:%M:%SZ)\"; cat; echo; } >> /tmp/sf-probe/events.log; exit 0'",
+            "timeout": 30,
+            "statusMessage": "SF probe SubagentStart"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash|apply_patch|Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh -c 'mkdir -p /tmp/sf-probe; { echo \"--- PreToolUse $(date -u +%Y-%m-%dT%H:%M:%SZ)\"; cat; echo; } >> /tmp/sf-probe/events.log; exit 0'",
+            "timeout": 30,
+            "statusMessage": "SF probe PreToolUse"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash|apply_patch|Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh -c 'mkdir -p /tmp/sf-probe; { echo \"--- PostToolUse $(date -u +%Y-%m-%dT%H:%M:%SZ)\"; cat; echo; } >> /tmp/sf-probe/events.log; exit 0'",
+            "timeout": 30,
+            "statusMessage": "SF probe PostToolUse"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh -c 'mkdir -p /tmp/sf-probe; { echo \"--- UserPromptSubmit $(date -u +%Y-%m-%dT%H:%M:%SZ)\"; cat; echo; } >> /tmp/sf-probe/events.log; exit 0'",
+            "timeout": 30,
+            "statusMessage": "SF probe UserPromptSubmit"
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh -c 'mkdir -p /tmp/sf-probe; { echo \"--- SubagentStop $(date -u +%Y-%m-%dT%H:%M:%SZ)\"; cat; echo; } >> /tmp/sf-probe/events.log; exit 0'",
+            "timeout": 30,
+            "statusMessage": "SF probe SubagentStop"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh -c 'mkdir -p /tmp/sf-probe; { echo \"--- Stop $(date -u +%Y-%m-%dT%H:%M:%SZ)\"; cat; echo; } >> /tmp/sf-probe/events.log; exit 0'",
+            "timeout": 30,
+            "statusMessage": "SF probe Stop"
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh -c 'mkdir -p /tmp/sf-probe; { echo \"--- PreCompact $(date -u +%Y-%m-%dT%H:%M:%SZ)\"; cat; echo; } >> /tmp/sf-probe/events.log; exit 0'",
+            "timeout": 30,
+            "statusMessage": "SF probe PreCompact"
+          }
+        ]
+      }
+    ]
+  }
+}

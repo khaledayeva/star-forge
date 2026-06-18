@@ -1,0 +1,17 @@
+{
+  "check_runs": [
+    {
+      "completed_at": "2026-06-18T12:06:00Z",
+      "conclusion": "success",
+      "head_sha": "4444444444444444444444444444444444444444",
+      "id": 701,
+      "job_id": 1701,
+      "name": "unit",
+      "run_id": 701,
+      "started_at": "2026-06-18T12:00:00Z",
+      "status": "completed",
+      "url": "https://github.example/star-forge/tools/actions/runs/701/job/1701"
+    }
+  ],
+  "head_sha": "4444444444444444444444444444444444444444"
+}

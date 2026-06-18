@@ -1,0 +1,9 @@
+{
+  "reviews": [
+    {
+      "author": "reviewer",
+      "body": "gh fixture review",
+      "state": "COMMENTED"
+    }
+  ]
+}

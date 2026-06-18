@@ -1,0 +1,8 @@
+{
+  "baseRefOid": "3333333333333333333333333333333333333333",
+  "headRefOid": "4444444444444444444444444444444444444444",
+  "number": 42,
+  "state": "OPEN",
+  "title": "Ship gh fixture adapter",
+  "url": "https://github.example/star-forge/tools/pull/42"
+}

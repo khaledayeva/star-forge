@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 480 160" role="img" aria-label="Star Forge logo">
+  <rect width="480" height="160" rx="20" fill="#18181B"/>
+  <path d="M78 26l12.2 37h38L97.5 85.5 109.2 122 78 99.3 46.8 122l11.7-36.5L28 63h37.8L78 26z" fill="#F59E0B"/>
+  <path d="M46 124h64v10H46z" fill="#E5E7EB"/>
+  <text x="150" y="75" fill="#F9FAFB" font-family="Inter, Arial, sans-serif" font-size="42" font-weight="700">Star Forge</text>
+  <text x="152" y="110" fill="#D1D5DB" font-family="Inter, Arial, sans-serif" font-size="18">Codex-native software factory</text>
+</svg>

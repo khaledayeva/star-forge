@@ -1,0 +1,108 @@
+{
+  "annotations": {
+    "annotations": [
+      {
+        "annotation_level": "notice",
+        "message": "Unit test summary captured",
+        "path": "src/app.py"
+      }
+    ]
+  },
+  "check_runs": {
+    "check_runs": [
+      {
+        "completed_at": "2026-06-18T12:05:00Z",
+        "conclusion": "success",
+        "head_sha": "2222222222222222222222222222222222222222",
+        "id": 501,
+        "name": "unit",
+        "started_at": "2026-06-18T12:00:00Z",
+        "status": "completed",
+        "url": "https://github.example/checks/501"
+      }
+    ],
+    "head_sha": "2222222222222222222222222222222222222222"
+  },
+  "comments": {
+    "comments": [
+      {
+        "author": "reviewer",
+        "body": "Looks readable.",
+        "path": "src/app.py"
+      }
+    ]
+  },
+  "diff": "diff --git a/src/app.py b/src/app.py\nindex 1111111..2222222 100644\n--- a/src/app.py\n+++ b/src/app.py\n@@ -1 +1 @@\n-print('old')\n+print('new')\n",
+  "files": [
+    {
+      "additions": 1,
+      "changes": 2,
+      "deletions": 1,
+      "filename": "src/app.py",
+      "status": "modified"
+    }
+  ],
+  "final_pr": {
+    "base": {
+      "sha": "1111111111111111111111111111111111111111"
+    },
+    "head": {
+      "sha": "2222222222222222222222222222222222222222"
+    }
+  },
+  "operations": [
+    {
+      "action": "read",
+      "operation": "pull_request_metadata"
+    },
+    {
+      "action": "read",
+      "operation": "files"
+    },
+    {
+      "action": "read",
+      "operation": "diff"
+    },
+    {
+      "action": "read",
+      "operation": "reviews"
+    },
+    {
+      "action": "read",
+      "operation": "comments"
+    },
+    {
+      "action": "read",
+      "operation": "check_runs"
+    },
+    {
+      "action": "read",
+      "operation": "annotations"
+    }
+  ],
+  "pr": {
+    "base": {
+      "sha": "1111111111111111111111111111111111111111"
+    },
+    "head": {
+      "sha": "2222222222222222222222222222222222222222"
+    },
+    "merge_base_sha": "abababababababababababababababababababab",
+    "number": 42,
+    "state": "OPEN",
+    "title": "Ship source packet adapter",
+    "url": "https://github.example/star-forge/tools/pull/42"
+  },
+  "reviews": {
+    "reviews": [
+      {
+        "author": "reviewer",
+        "body": "Read-only review evidence.",
+        "state": "COMMENTED"
+      }
+    ]
+  },
+  "tool_versions": {
+    "connector": "fixture-v1"
+  }
+}
