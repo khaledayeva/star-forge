@@ -79,8 +79,11 @@ def run_cli(args: list[str], stdin_payload: dict | None = None) -> tuple[int, st
     return code, stdout.getvalue(), stderr.getvalue()
 
 
-def init_project(project: Path) -> None:
-    code, out, err = run_cli(["init", "--project", str(project), "--no-agents"])
+def init_project(project: Path, profile: str = "standard") -> None:
+    args = ["init", "--project", str(project), "--no-agents"]
+    if profile != "standard":
+        args.extend(["--profile", profile])
+    code, out, err = run_cli(args)
     assert code == 0, err or out
 
 
@@ -229,9 +232,61 @@ def write_reviewer_findings(project: Path, role: str, findings: list[dict], sour
     return path
 
 
-def reviewable_project(project: Path) -> list[dict]:
+def write_clean_review_wave(project: Path, source_hash: str | None = None) -> None:
+    for role in star_forge.required_review_roles(project):
+        write_reviewer_findings(project, role, [], source_hash=source_hash)
+
+
+def write_merged_review_cache(project: Path, **overrides: object) -> Path:
+    scope = star_forge.scope_hash(project) or "noscope"
+    path = star_forge.reviews_scope_dir(project, scope) / "merged.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    roles = star_forge.required_review_roles(project)
+    payload: dict[str, object] = {
+        "schema": "star-forge.review.v2",
+        "project": str(project),
+        "scope": scope,
+        "source_hash": star_forge.source_hash(project),
+        "reviewer_roles": roles,
+        "reviewer_count": len(roles),
+        "required_review_roles": roles,
+        "required_reviewer_count": len(roles),
+        "missing_review_roles": [],
+        "stale_roles": [],
+        "reviewers_witnessed": False,
+        "findings": [],
+        "fix_queue": [],
+        "waived": [],
+        "file_problems": [],
+    }
+    payload.update(overrides)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return path
+
+
+def tamper_manifest_profile(project: Path, profile: str) -> None:
+    manifest_path = project / ".starforge" / "project.json"
+    manifest = star_forge.read_json(manifest_path)
+    manifest["profile"] = profile
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+
+def write_raw_source_profile(project: Path, profile: str = "fast-mvp") -> Path:
+    path = project / star_forge.SOURCE_PROFILE_FILE
+    payload = {
+        "schema": star_forge.SOURCE_PROFILE_SCHEMA,
+        "profile": profile,
+        "review_roles": star_forge.review_roles_for_profile(profile),
+    }
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return path
+
+
+def reviewable_project(project: Path, profile: str = "standard") -> list[dict]:
     """Approved blueprint + one complete solo task; returns the parsed tasks."""
-    init_project(project)
+    init_project(project, profile=profile)
+    if profile == "fast-mvp":
+        commit_all(project, "fast mvp init before gates")
     write_blueprint(project)
     write_plan(project, [f"| SF-1 | Build the greeter module | complete | solo | src/hello.py | - | {REAL_VERIFY} | src/hello.py |"])
     src = project / "src" / "hello.py"
@@ -252,7 +307,7 @@ def build_completed_project(project: Path) -> None:
     code, out, err = run_cli(["complete-task", "--project", str(project), "--task", "SF-1", "--changed-file", "src/hello.py"])
     assert code == 0, err or out
     record_verify(project, "SF-1")
-    write_reviewer_findings(project, "correctness", [])
+    write_clean_review_wave(project)
     code, out, err = run_cli(["review", "--project", str(project), "--strict"])
     assert code == 0, err or out
     commit_all(project)
@@ -587,6 +642,38 @@ def test_verify_fail_returns_nonzero_in_strict_mode() -> None:
         assert payload["returncode"] == 7
 
 
+def test_verify_source_hash_unavailable_profile_fails_closed() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        init_project(project)
+        (project / star_forge.SOURCE_PROFILE_FILE).write_text("{", encoding="utf-8")
+
+        code, out, err = run_cli(["verify", "--project", str(project), "--task", "SF-1", "--command", REAL_VERIFY, "--strict"])
+        assert code == 1, err or out
+        payload = json.loads(out)
+        assert payload["verdict"] == "FAIL"
+        assert payload["returncode"] == 0
+        assert payload["source_snapshot"]["source_hash_unavailable"] is True
+        assert payload["problems"][0]["rule"] == "source-hash-unavailable"
+        assert "not valid JSON" in payload["problems"][0]["message"]
+
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        init_project(project)
+        profile_path = project / star_forge.SOURCE_PROFILE_FILE
+        profile_path.write_text(json.dumps({"schema": star_forge.SOURCE_PROFILE_SCHEMA, "profile": "standard"}), encoding="utf-8")
+        profile_path.chmod(0)
+        try:
+            code, out, err = run_cli(["verify", "--project", str(project), "--task", "SF-1", "--command", REAL_VERIFY, "--strict"])
+            assert code == 1, err or out
+            payload = json.loads(out)
+            assert payload["verdict"] == "FAIL"
+            assert payload["source_snapshot"]["source_hash_unavailable"] is True
+            assert "not readable" in payload["problems"][0]["message"]
+        finally:
+            profile_path.chmod(0o644)
+
+
 def test_verify_noop_refused_for_non_docs_task() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         project = Path(tmp).resolve()
@@ -726,6 +813,77 @@ def test_browser_run_cli_accepts_summary_argument() -> None:
         assert payload["summary"] == "cli smoke"
 
 
+def test_strict_browser_run_rejects_invalid_screenshot_arguments_even_with_manifest_hashes() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        init_project(project)
+        shots = star_forge.live_common.live_collector_dir(project, "SF-1", "browser")
+        url = "http://127.0.0.1:4173/"
+        parsed_url, url_problems = browser_playwright.validate_url(url)
+        assert not url_problems
+        allowed_origin = browser_playwright.normalize_origin(parsed_url)
+        desktop = shots / "desktop.png"
+        mobile = shots / "mobile.png"
+        desktop.write_bytes(b"this is not a png")
+        mobile.write_bytes(b"nor is this")
+        lease = shots / "server-lease.json"
+        lease.write_text(json.dumps({
+            "schema": "star-forge.server-lease.v1",
+            "project": str(project),
+            "origin": allowed_origin,
+            "port": 4173,
+            "pid": os.getpid(),
+            "command": "python3 -m http.server 4173",
+            "source_hash": star_forge.source_hash(project),
+            "runtime_asset_hash": star_forge.live_common.compute_runtime_asset_hash(project, exclude_paths=[project / ".starforge" / "runtime" / "server.json"]),
+        }) + "\n", encoding="utf-8")
+        current_source = star_forge.source_hash(project)
+        manifest = star_forge.live_common.write_live_manifest(
+            project,
+            task="SF-1",
+            collector="browser",
+            command_argv=["test-browser-collector"],
+            tool_versions={"test": "1"},
+            artifacts={"desktop": desktop, "mobile": mobile},
+            summary={"url": url},
+            source_hash_before=current_source,
+            source_hash_after=current_source,
+            runtime_asset_hash=star_forge.live_common.compute_runtime_asset_hash(project),
+        )
+        manifest_payload = json.loads(manifest.read_text(encoding="utf-8"))
+        assert manifest_payload["raw_artifact_hashes"][star_forge.relative_to_project(desktop, project)]["sha256"] == star_forge.file_sha256(desktop)
+        assert manifest_payload["raw_artifact_hashes"][star_forge.relative_to_project(mobile, project)]["sha256"] == star_forge.file_sha256(mobile)
+
+        args = argparse.Namespace(
+            project=str(project),
+            task="SF-1",
+            url=url,
+            scenario="smoke",
+            viewport=None,
+            screenshot=[str(desktop), str(mobile)],
+            interaction_evidence=[],
+            console_evidence=[],
+            live_manifest=str(manifest),
+            require_viewports=True,
+            require_interaction=False,
+            require_console=False,
+            server_lease=str(lease),
+            require_server_lease=False,
+            degraded=False,
+            strict=True,
+            summary="",
+        )
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            code = star_forge.cmd_browser_run(args)
+        payload = json.loads(stdout.getvalue())
+        assert code == 1
+        assert payload["verdict"] == "FAIL"
+        screenshot_problems = [item for item in payload["problems"] if item["rule"] == "screenshot"]
+        assert len(screenshot_problems) == 2
+        assert all("not a decodable PNG/JPEG image" in item["message"] for item in screenshot_problems)
+
+
 def test_command_is_noop_canonicalizer() -> None:
     # Adversarial no-op detection: these unconditionally-succeed commands must be
     # rejected as verifications, and real commands must pass through untouched.
@@ -770,7 +928,7 @@ def test_empty_or_noop_verify_cell_blocks_completion() -> None:
 
 def test_corrupt_fix_queue_fails_closed() -> None:
     # A hand-corrupted merged.json with non-dict fix_queue entries must fail closed
-    # (review-findings-invalid), not crash the done gate.
+    # by recomputing reviewer evidence, not by trusting the cache.
     with tempfile.TemporaryDirectory() as tmp:
         project = Path(tmp).resolve()
         tasks = reviewable_project(project)
@@ -783,7 +941,7 @@ def test_corrupt_fix_queue_fails_closed() -> None:
             "fix_queue": ["corrupt-string-entry", None], "findings": [], "waived": [],
         }), encoding="utf-8")
         gate = star_forge.review_findings_for_done(project, tasks)
-        assert [item["rule"] for item in gate] == ["review-findings-invalid"]
+        assert [item["rule"] for item in gate] == ["review-empty"]
 
 
 # ------------------------------------------------------------ 6. review wave
@@ -797,16 +955,569 @@ def test_review_not_performed_blocks_done_gate() -> None:
         assert [item["rule"] for item in findings] == ["review-not-performed"]
 
 
-def test_review_with_empty_findings_counts_as_performed() -> None:
-    # Regression: a clean review (empty findings array) must NOT fire review-empty.
+def test_standard_review_strict_requires_all_profile_reviewers() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         project = Path(tmp).resolve()
         tasks = reviewable_project(project)
         write_reviewer_findings(project, "correctness", [])
         code, out, err = run_cli(["review", "--project", str(project), "--strict"])
+        assert code == 1, err or out
+        merged = json.loads(out)
+        assert merged["required_review_roles"] == ["correctness", "security", "architecture"]
+        assert merged["required_reviewer_count"] == 3
+        assert merged["missing_review_roles"] == ["security", "architecture"]
+        gate = star_forge.review_findings_for_done(project, tasks)
+        assert [item["rule"] for item in gate] == ["reviewer-count-insufficient"]
+
+
+def test_fast_mvp_review_strict_accepts_single_reviewer() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        tasks = reviewable_project(project, profile="fast-mvp")
+        assert (project / star_forge.SOURCE_PROFILE_FILE).exists()
+        assert star_forge.project_profile(project) == "fast-mvp"
+        assert star_forge.read_source_profile(project) == "fast-mvp"
+        assert star_forge.review_profile(project) == "fast-mvp"
+        write_reviewer_findings(project, "correctness", [])
+        code, out, err = run_cli(["review", "--project", str(project), "--strict"])
         assert code == 0, err or out
         merged = json.loads(out)
-        assert merged["reviewer_roles"] == ["correctness"]
+        assert merged["review_profile"] == "fast-mvp"
+        assert merged["required_review_roles"] == ["correctness"]
+        assert merged["required_reviewer_count"] == 1
+        assert merged["missing_review_roles"] == []
+        assert star_forge.review_findings_for_done(project, tasks) == []
+
+
+def test_committed_fast_mvp_source_profile_before_gates_keeps_fast_mvp_review_roles() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        init_project(project, profile="fast-mvp")
+        commit_all(project, "fast mvp init before gates")
+        write_blueprint(project)
+        write_plan(project, [f"| SF-1 | Build the greeter module | complete | solo | src/hello.py | - | {REAL_VERIFY} | src/hello.py |"])
+        src = project / "src" / "hello.py"
+        src.parent.mkdir(parents=True, exist_ok=True)
+        src.write_text("print('hello forge')\n", encoding="utf-8")
+        (project / ".starforge" / "ledger.jsonl").write_text("", encoding="utf-8")
+
+        assert star_forge.project_profile(project) == "fast-mvp"
+        assert star_forge.read_source_profile(project) == "fast-mvp"
+        assert star_forge.review_profile(project) == "fast-mvp"
+        assert star_forge.required_review_roles(project) == ["correctness"]
+
+
+def test_explicit_fast_mvp_rerun_writes_blocked_profile_lock_after_gates() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        code, out, err = run_cli(["run", "--project", str(project), "--fast-mvp", "--objective", "Build the greeter", "--no-hooks"])
+        assert code == 0, err or out
+        initial = star_forge.read_json(project / ".starforge" / "state.json")
+        assert initial["phase"] == "plan"
+        assert initial["profile_lock"]["status"] == "pending"
+        assert initial["profile_lock"]["effective_review_profile"] == "standard"
+        assert "Commit StarForge.profile.json" in initial["profile_lock"]["next_action"]
+
+        write_blueprint(project)
+        write_plan(project, [f"| SF-1 | Build the greeter module | ready | solo | src/hello.py | - | {REAL_VERIFY} | - |"])
+
+        code, out, err = run_cli(["run", "--project", str(project), "--fast-mvp", "--strict", "--no-hooks"])
+        assert code == 1, out
+        assert "Refusing to downgrade review profile from standard to fast-mvp" not in err
+        state = star_forge.read_json(project / ".starforge" / "state.json")
+        lock = state["profile_lock"]
+        assert state["phase"] == "blocked"
+        assert lock["status"] == "blocked"
+        assert initial["profile_lock"]["status"] == "pending"
+        assert initial["profile_lock"]["next_action"] != lock["next_action"]
+        assert lock["manifest_profile"] == "fast-mvp"
+        assert lock["source_profile"] == "fast-mvp"
+        assert lock["effective_review_profile"] == "standard"
+        assert "Blueprint.md is approved" in lock["gate_reasons"]
+        assert "Plan.md has real tasks" in lock["gate_reasons"]
+        assert "Standard review remains required" in lock["message"]
+        assert "Commit only StarForge.profile.json" in lock["next_action"]
+        assert "PROFILE: Fast-mvp was selected before gates" in out
+        assert "Standard review remains required" in out
+        assert star_forge.required_review_roles(project) == ["correctness", "security", "architecture"]
+
+        code, status_out, err = run_cli(["status", "--project", str(project)])
+        assert code == 0, err or status_out
+        status = json.loads(status_out)
+        assert status["profile_lock"]["status"] == "blocked"
+        assert status["profile_lock"]["effective_review_profile"] == "standard"
+
+
+def test_missing_fast_mvp_source_profile_rerun_writes_current_profile_lock_state() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        code, out, err = run_cli(["run", "--project", str(project), "--fast-mvp", "--objective", "Build the greeter", "--no-hooks"])
+        assert code == 0, err or out
+        initial = star_forge.read_json(project / ".starforge" / "state.json")
+        assert initial["profile_lock"]["status"] == "pending"
+        assert initial["profile_lock"]["effective_review_profile"] == "standard"
+
+        (project / star_forge.SOURCE_PROFILE_FILE).unlink()
+        write_blueprint(project)
+        write_plan(project, [f"| SF-1 | Build the greeter module | ready | solo | src/hello.py | - | {REAL_VERIFY} | - |"])
+
+        code, out, err = run_cli(["run", "--project", str(project), "--fast-mvp", "--strict", "--no-hooks"])
+        assert code == 1, out
+        assert "Refusing to downgrade review profile from standard to fast-mvp" not in err
+        state = star_forge.read_json(project / ".starforge" / "state.json")
+        lock = state["profile_lock"]
+        assert lock["status"] == "standard-required"
+        assert lock["status"] != initial["profile_lock"]["status"]
+        assert lock["manifest_profile"] == "fast-mvp"
+        assert lock["source_profile"] is None
+        assert lock["effective_review_profile"] == "standard"
+        assert lock["selected_before_gates"] is False
+        assert "Blueprint.md is approved" in lock["gate_reasons"]
+        assert "Plan.md has real tasks" in lock["gate_reasons"]
+        assert f"{star_forge.SOURCE_PROFILE_FILE} is missing" in lock["problems"]
+        assert "Standard review remains required" in lock["message"]
+        assert "PROFILE: Fast-mvp is recorded without durable pre-gate proof" in out
+        assert star_forge.required_review_roles(project) == ["correctness", "security", "architecture"]
+
+
+def test_unreadable_fast_mvp_source_profile_review_run_writes_profile_lock_state() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        reviewable_project(project, profile="fast-mvp")
+        profile_path = project / star_forge.SOURCE_PROFILE_FILE
+        profile_path.chmod(0)
+        try:
+            code, out, err = run_cli(["run", "--project", str(project), "--strict", "--no-hooks"])
+            assert code == 1, out
+            assert "PermissionError" not in err
+            state_path = project / ".starforge" / "state.json"
+            assert state_path.exists()
+            state = star_forge.read_json(state_path)
+            lock = state["profile_lock"]
+            assert state["phase"] == "blocked"
+            assert state["fast_mvp"] is False
+            assert state["spawn_plan"] == []
+            assert state["drift"]["source_hash_unavailable"] is True
+            assert state["review"]["source_hash_unavailable"] is True
+            assert lock["status"] == "blocked"
+            assert lock["manifest_profile"] == "fast-mvp"
+            assert lock["source_profile"] is None
+            assert lock["effective_review_profile"] == "standard"
+            assert f"{star_forge.SOURCE_PROFILE_FILE} is not readable" in lock["problems"]
+            assert "Standard review remains required" in lock["message"]
+            assert "Restore read permission" in lock["next_action"]
+            assert "PROFILE: Fast-mvp cannot be proven" in out
+            assert star_forge.required_review_roles(project) == ["correctness", "security", "architecture"]
+        finally:
+            profile_path.chmod(0o644)
+
+
+def test_standard_run_strict_damaged_profile_blocks_before_review_spawn() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        reviewable_project(project)
+        (project / star_forge.SOURCE_PROFILE_FILE).write_text("{", encoding="utf-8")
+
+        code, out, err = run_cli(["run", "--project", str(project), "--strict", "--no-hooks"])
+        assert code == 1, err or out
+        assert "spawn_agent starforge-reviewer" not in out
+        state = star_forge.read_json(project / ".starforge" / "state.json")
+        assert state["phase"] == "blocked"
+        assert state["spawn_plan"] == []
+        assert state["source_hash_unavailable"] is True
+        assert state["source_hash_problems"][0]["rule"] == "source-hash-unavailable"
+        assert "not valid JSON" in state["source_hash_problems"][0]["message"]
+        assert state["drift"]["source_hash_unavailable"] is True
+        assert state["review"]["source_hash_unavailable"] is True
+
+
+def test_fast_mvp_source_profile_write_rejects_symlink_escape() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp).resolve()
+        project = root / "project"
+        project.mkdir()
+        init_project(project)
+        outside = root / "outside-profile.json"
+        outside.write_text("outside\n", encoding="utf-8")
+        profile_path = project / star_forge.SOURCE_PROFILE_FILE
+        profile_path.symlink_to(outside)
+
+        code, out, err = run_cli(["run", "--project", str(project), "--fast-mvp", "--no-hooks"])
+        assert code == 1, out
+        payload = json.loads(err)
+        assert payload["schema"] == "star-forge.error.v1"
+        assert "Refusing to write" in payload["error"]
+        assert "symlink" in payload["error"]
+        assert outside.read_text(encoding="utf-8") == "outside\n"
+
+
+def test_review_strict_unreadable_fast_mvp_source_profile_fail_closed() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        reviewable_project(project, profile="fast-mvp")
+        write_reviewer_findings(project, "correctness", [])
+        profile_path = project / star_forge.SOURCE_PROFILE_FILE
+        profile_path.chmod(0)
+        try:
+            code, out, err = run_cli(["review", "--project", str(project), "--strict"])
+            assert code == 1, out
+            assert "PermissionError" not in err
+            payload = json.loads(out)
+            assert payload["source_hash_unavailable"] is True
+            assert payload["review_profile"] == "standard"
+            assert payload["profile_lock"]["status"] == "blocked"
+            assert payload["fix_queue"][0]["rule"] == "source-hash-unavailable"
+            assert star_forge.SOURCE_PROFILE_FILE in payload["fix_queue"][0]["message"]
+
+            code, status_out, err = run_cli(["status", "--project", str(project)])
+            assert code == 0, err or status_out
+            status = json.loads(status_out)
+            assert status["source_hash_unavailable"] is True
+            assert status["review"]["source_hash_unavailable"] is True
+            assert status["profile_lock"]["effective_review_profile"] == "standard"
+        finally:
+            profile_path.chmod(0o644)
+
+
+def test_review_strict_invalid_fast_mvp_source_profile_fail_closed() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        reviewable_project(project, profile="fast-mvp")
+        write_reviewer_findings(project, "correctness", [])
+        (project / star_forge.SOURCE_PROFILE_FILE).write_text("{", encoding="utf-8")
+
+        code, out, err = run_cli(["review", "--project", str(project), "--strict"])
+        assert code == 1, err or out
+        payload = json.loads(out)
+        assert payload["source_hash_unavailable"] is True
+        assert payload["review_profile"] == "standard"
+        assert payload["profile_lock"]["status"] == "blocked"
+        assert "not valid JSON" in payload["fix_queue"][0]["message"]
+
+
+def test_done_strict_unreadable_fast_mvp_source_profile_fail_closed() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        reviewable_project(project, profile="fast-mvp")
+        write_clean_review_wave(project)
+        code, out, err = run_cli(["review", "--project", str(project), "--strict"])
+        assert code == 0, err or out
+        profile_path = project / star_forge.SOURCE_PROFILE_FILE
+        profile_path.chmod(0)
+        try:
+            code, out, err = run_cli(["done", "--project", str(project), "--strict"])
+            assert code == 1, out
+            assert "PermissionError" not in err
+            payload = json.loads(out)
+            assert payload["verdict"] == "NEEDS_CHANGES"
+            assert payload["source_hash_unavailable"] is True
+            assert payload["snapshot"]["source_hash_unavailable"] is True
+            assert payload["drift"]["source_hash_unavailable"] is True
+            assert any(star_forge.SOURCE_PROFILE_FILE in item["message"] for item in payload["problems"])
+        finally:
+            profile_path.chmod(0o644)
+
+
+def test_standard_approved_project_rejects_fast_mvp_downgrade_via_run() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        reviewable_project(project)
+        manifest_path = project / ".starforge" / "project.json"
+        assert star_forge.read_json(manifest_path)["profile"] == "standard"
+
+        code, out, err = run_cli(["run", "--project", str(project), "--fast-mvp", "--no-hooks"])
+        assert code == 1, out
+        assert "Refusing to downgrade review profile from standard to fast-mvp" in err
+        assert "Blueprint.md is approved" in err
+        assert "Plan.md exists" in err
+        assert star_forge.read_json(manifest_path)["profile"] == "standard"
+        assert not (project / star_forge.SOURCE_PROFILE_FILE).exists()
+
+
+def test_standard_project_manifest_tamper_cannot_bypass_security_or_architecture_review_roles() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        tasks = reviewable_project(project)
+        manifest_path = project / ".starforge" / "project.json"
+        manifest = star_forge.read_json(manifest_path)
+        manifest["profile"] = "fast-mvp"
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+        assert star_forge.project_profile(project) == "fast-mvp"
+        assert star_forge.read_source_profile(project) == ""
+        assert star_forge.review_profile(project) == "standard"
+
+        write_reviewer_findings(project, "correctness", [])
+        code, out, err = run_cli(["review", "--project", str(project), "--strict"])
+        assert code == 1, err or out
+        merged = json.loads(out)
+        assert merged["manifest_profile"] == "fast-mvp"
+        assert merged["source_profile"] is None
+        assert merged["review_profile"] == "standard"
+        assert merged["required_review_roles"] == ["correctness", "security", "architecture"]
+        assert merged["missing_review_roles"] == ["security", "architecture"]
+
+        gate = star_forge.review_findings_for_done(project, tasks)
+        assert [item["rule"] for item in gate] == ["reviewer-count-insufficient"]
+        assert "security" in gate[0]["message"]
+        assert "architecture" in gate[0]["message"]
+
+
+def test_manifest_tamper_then_run_fast_mvp_cannot_seed_source_profile_or_drop_review_roles() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        tasks = reviewable_project(project)
+        manifest_path = project / ".starforge" / "project.json"
+        manifest = star_forge.read_json(manifest_path)
+        manifest["profile"] = "fast-mvp"
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+        code, out, err = run_cli(["run", "--project", str(project), "--fast-mvp", "--no-hooks"])
+        assert code == 1, out
+        assert "Refusing to downgrade review profile from standard to fast-mvp" in err
+        assert "Blueprint.md is approved" in err
+        assert "Plan.md exists" in err
+        assert not (project / star_forge.SOURCE_PROFILE_FILE).exists()
+        assert star_forge.project_profile(project) == "fast-mvp"
+        assert star_forge.read_source_profile(project) == ""
+        assert star_forge.review_profile(project) == "standard"
+
+        write_reviewer_findings(project, "correctness", [])
+        code, out, err = run_cli(["review", "--project", str(project), "--strict"])
+        assert code == 1, err or out
+        merged = json.loads(out)
+        assert merged["manifest_profile"] == "fast-mvp"
+        assert merged["source_profile"] is None
+        assert merged["review_profile"] == "standard"
+        assert merged["required_review_roles"] == ["correctness", "security", "architecture"]
+        assert merged["missing_review_roles"] == ["security", "architecture"]
+
+        gate = star_forge.review_findings_for_done(project, tasks)
+        assert [item["rule"] for item in gate] == ["reviewer-count-insufficient"]
+        assert "security" in gate[0]["message"]
+        assert "architecture" in gate[0]["message"]
+
+
+def test_manifest_and_source_profile_tamper_then_run_fast_mvp_cannot_drop_review_roles() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        tasks = reviewable_project(project)
+        manifest_path = project / ".starforge" / "project.json"
+        manifest = star_forge.read_json(manifest_path)
+        manifest["profile"] = "fast-mvp"
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        star_forge.ensure_source_profile(project, "fast-mvp")
+        gate_time = max((project / "Blueprint.md").stat().st_mtime, (project / "Plan.md").stat().st_mtime)
+        os.utime(project / star_forge.SOURCE_PROFILE_FILE, (gate_time + 1, gate_time + 1))
+
+        assert star_forge.project_profile(project) == "fast-mvp"
+        assert star_forge.read_source_profile(project) == "fast-mvp"
+        assert star_forge.review_profile(project) == "standard"
+
+        code, out, err = run_cli(["run", "--project", str(project), "--fast-mvp", "--no-hooks"])
+        assert code == 1, out
+        assert "Refusing to downgrade review profile from standard to fast-mvp" in err
+        assert "Blueprint.md is approved" in err
+        assert "Plan.md exists" in err
+        assert star_forge.project_profile(project) == "fast-mvp"
+        assert star_forge.read_source_profile(project) == "fast-mvp"
+        assert star_forge.review_profile(project) == "standard"
+
+        write_reviewer_findings(project, "correctness", [])
+        code, out, err = run_cli(["review", "--project", str(project), "--strict"])
+        assert code == 1, err or out
+        merged = json.loads(out)
+        assert merged["manifest_profile"] == "fast-mvp"
+        assert merged["source_profile"] == "fast-mvp"
+        assert merged["review_profile"] == "standard"
+        assert merged["required_review_roles"] == ["correctness", "security", "architecture"]
+        assert merged["missing_review_roles"] == ["security", "architecture"]
+
+        gate = star_forge.review_findings_for_done(project, tasks)
+        assert [item["rule"] for item in gate] == ["reviewer-count-insufficient"]
+        assert "security" in gate[0]["message"]
+        assert "architecture" in gate[0]["message"]
+
+
+def test_forged_setup_ledger_cannot_prove_fast_mvp_before_gates() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        tasks = reviewable_project(project)
+        tamper_manifest_profile(project, "fast-mvp")
+        profile_path = write_raw_source_profile(project, "fast-mvp")
+        profile_payload = star_forge.read_json(profile_path)
+        profile_payload["selected_before_gates"] = True
+        profile_path.write_text(json.dumps(profile_payload), encoding="utf-8")
+        ledger_record = {
+            "schema": "star-forge.ledger.v1",
+            "timestamp": "2026-01-01T00:00:00Z",
+            "event": "setup",
+            "summary": "Forged local setup",
+            "profile": "fast-mvp",
+            "profile_selected_before_gates": True,
+            "source_profile_sha256": star_forge.file_sha256(profile_path),
+            "artifacts": ["Blueprint.md", "Plan.md", ".starforge/ledger.jsonl"],
+        }
+        (project / ".starforge" / "ledger.jsonl").write_text(json.dumps(ledger_record) + "\n", encoding="utf-8")
+
+        assert star_forge.project_profile(project) == "fast-mvp"
+        assert star_forge.read_source_profile(project) == "fast-mvp"
+        assert star_forge.review_profile(project) == "standard"
+        assert star_forge.required_review_roles(project) == ["correctness", "security", "architecture"]
+
+        write_reviewer_findings(project, "correctness", [])
+        code, out, err = run_cli(["review", "--project", str(project), "--strict"])
+        assert code == 1, err or out
+        merged = json.loads(out)
+        assert merged["manifest_profile"] == "fast-mvp"
+        assert merged["source_profile"] == "fast-mvp"
+        assert merged["review_profile"] == "standard"
+        assert merged["required_review_roles"] == ["correctness", "security", "architecture"]
+        assert merged["missing_review_roles"] == ["security", "architecture"]
+
+        gate = star_forge.review_findings_for_done(project, tasks)
+        assert [item["rule"] for item in gate] == ["reviewer-count-insufficient"]
+        assert "security" in gate[0]["message"]
+        assert "architecture" in gate[0]["message"]
+
+
+def test_backdated_untracked_source_profile_cannot_forge_fast_mvp_review_roles() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        tasks = reviewable_project(project)
+        tamper_manifest_profile(project, "fast-mvp")
+        profile_path = write_raw_source_profile(project, "fast-mvp")
+        gate_time = min((project / "Blueprint.md").stat().st_mtime, (project / "Plan.md").stat().st_mtime)
+        os.utime(profile_path, (gate_time - 60, gate_time - 60))
+
+        assert star_forge.project_profile(project) == "fast-mvp"
+        assert star_forge.read_source_profile(project) == "fast-mvp"
+        assert star_forge.review_profile(project) == "standard"
+        assert star_forge.required_review_roles(project) == ["correctness", "security", "architecture"]
+
+        write_reviewer_findings(project, "correctness", [])
+        code, out, err = run_cli(["review", "--project", str(project), "--strict"])
+        assert code == 1, err or out
+        merged = json.loads(out)
+        assert merged["manifest_profile"] == "fast-mvp"
+        assert merged["source_profile"] == "fast-mvp"
+        assert merged["review_profile"] == "standard"
+        assert merged["required_review_roles"] == ["correctness", "security", "architecture"]
+        assert merged["missing_review_roles"] == ["security", "architecture"]
+
+        gate = star_forge.review_findings_for_done(project, tasks)
+        assert [item["rule"] for item in gate] == ["reviewer-count-insufficient"]
+        assert "security" in gate[0]["message"]
+        assert "architecture" in gate[0]["message"]
+
+
+def test_late_committed_source_profile_cannot_forge_fast_mvp_review_roles() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        tasks = reviewable_project(project)
+        commit_all(project, "standard gated project")
+        tamper_manifest_profile(project, "fast-mvp")
+        write_raw_source_profile(project, "fast-mvp")
+        commit_all(project, "late fast mvp profile")
+
+        assert star_forge.project_profile(project) == "fast-mvp"
+        assert star_forge.read_source_profile(project) == "fast-mvp"
+        assert star_forge.review_profile(project) == "standard"
+        assert star_forge.required_review_roles(project) == ["correctness", "security", "architecture"]
+
+        write_reviewer_findings(project, "correctness", [])
+        code, out, err = run_cli(["review", "--project", str(project), "--strict"])
+        assert code == 1, err or out
+        merged = json.loads(out)
+        assert merged["manifest_profile"] == "fast-mvp"
+        assert merged["source_profile"] == "fast-mvp"
+        assert merged["review_profile"] == "standard"
+        assert merged["required_review_roles"] == ["correctness", "security", "architecture"]
+        assert merged["missing_review_roles"] == ["security", "architecture"]
+
+        gate = star_forge.review_findings_for_done(project, tasks)
+        assert [item["rule"] for item in gate] == ["reviewer-count-insufficient"]
+        assert "security" in gate[0]["message"]
+        assert "architecture" in gate[0]["message"]
+
+
+def test_temporary_gate_removal_cannot_forge_fast_mvp_review_roles() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        init_project(project)
+        write_blueprint(project)
+        write_plan(project, [f"| SF-1 | Build the greeter module | complete | solo | src/hello.py | - | {REAL_VERIFY} | src/hello.py |"])
+        src = project / "src" / "hello.py"
+        src.parent.mkdir(parents=True, exist_ok=True)
+        src.write_text("print('hello forge')\n", encoding="utf-8")
+        commit_all(project, "standard gates")
+
+        write_blueprint(project, "# Blueprint.md\n\nStatus: draft\n")
+        write_plan(project, [])
+        write_raw_source_profile(project, "fast-mvp")
+        commit_all(project, "temporarily remove gates and add fast mvp")
+
+        write_blueprint(project)
+        write_plan(project, [f"| SF-1 | Build the greeter module | complete | solo | src/hello.py | - | {REAL_VERIFY} | src/hello.py |"])
+        tamper_manifest_profile(project, "fast-mvp")
+        commit_all(project, "restore gates with fast mvp manifest")
+        tasks = star_forge.parse_tasks(project / "Plan.md")
+
+        assert star_forge.project_profile(project) == "fast-mvp"
+        assert star_forge.read_source_profile(project) == "fast-mvp"
+        assert star_forge.git_history_has_fast_mvp_before_gates(project) is False
+        assert star_forge.review_profile(project) == "standard"
+        assert star_forge.required_review_roles(project) == ["correctness", "security", "architecture"]
+
+        write_reviewer_findings(project, "correctness", [])
+        code, out, err = run_cli(["review", "--project", str(project), "--strict"])
+        assert code == 1, err or out
+        merged = json.loads(out)
+        assert merged["review_profile"] == "standard"
+        assert merged["required_review_roles"] == ["correctness", "security", "architecture"]
+        assert merged["missing_review_roles"] == ["security", "architecture"]
+
+        gate = star_forge.review_findings_for_done(project, tasks)
+        assert [item["rule"] for item in gate] == ["reviewer-count-insufficient"]
+        assert "security" in gate[0]["message"]
+        assert "architecture" in gate[0]["message"]
+
+
+def test_done_gate_recomputes_review_roles_after_fast_mvp_profile_switch() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        tasks = reviewable_project(project, profile="fast-mvp")
+        write_reviewer_findings(project, "correctness", [])
+        code, out, err = run_cli(["review", "--project", str(project), "--strict"])
+        assert code == 0, err or out
+        merged = json.loads(out)
+        assert merged["required_review_roles"] == ["correctness"]
+        assert star_forge.review_findings_for_done(project, tasks) == []
+
+        star_forge.ensure_project_manifest(project, profile="standard")
+        assert star_forge.review_profile(project) == "standard"
+        gate = star_forge.review_findings_for_done(project, tasks)
+        assert [item["rule"] for item in gate] == ["review-stale"]
+
+        write_clean_review_wave(project)
+        code, out, err = run_cli(["review", "--project", str(project), "--strict"])
+        assert code == 0, err or out
+        merged = json.loads(out)
+        assert merged["required_review_roles"] == ["correctness", "security", "architecture"]
+        assert merged["missing_review_roles"] == []
+        assert star_forge.review_findings_for_done(project, tasks) == []
+
+
+def test_review_with_empty_findings_counts_as_performed() -> None:
+    # Regression: a clean review (empty findings array) must NOT fire review-empty.
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        tasks = reviewable_project(project)
+        write_clean_review_wave(project)
+        code, out, err = run_cli(["review", "--project", str(project), "--strict"])
+        assert code == 0, err or out
+        merged = json.loads(out)
+        assert merged["reviewer_roles"] == ["architecture", "correctness", "security"]
         assert merged["fix_queue"] == []
         assert star_forge.review_findings_for_done(project, tasks) == []
 
@@ -820,6 +1531,8 @@ def test_blocking_finding_opens_fix_queue_and_done_needs_changes() -> None:
             "correctness",
             [{"severity": "high", "file": "src/hello.py", "line": 1, "title": "Greeting text is wrong", "detail": "Output mismatch"}],
         )
+        write_reviewer_findings(project, "security", [])
+        write_reviewer_findings(project, "architecture", [])
         code, out, err = run_cli(["review", "--project", str(project), "--strict"])
         assert code == 1, err or out
         gate = star_forge.review_findings_for_done(project, tasks)
@@ -839,6 +1552,8 @@ def test_waive_with_reason_clears_fix_queue() -> None:
             "correctness",
             [{"severity": "high", "file": "src/hello.py", "line": 1, "title": "Greeting text is wrong", "detail": "Output mismatch"}],
         )
+        write_reviewer_findings(project, "security", [])
+        write_reviewer_findings(project, "architecture", [])
         run_cli(["review", "--project", str(project)])
         code, out, err = run_cli(["waive", "--project", str(project), "--finding", "F-1", "--reason", "intended copy per Blueprint AC-1"])
         assert code == 0, err or out
@@ -852,7 +1567,7 @@ def test_review_goes_stale_after_source_change() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         project = Path(tmp).resolve()
         tasks = reviewable_project(project)
-        write_reviewer_findings(project, "correctness", [])
+        write_clean_review_wave(project)
         run_cli(["review", "--project", str(project)])
         assert star_forge.review_findings_for_done(project, tasks) == []
         (project / "src" / "extra.py").write_text("print('post-review drift')\n", encoding="utf-8")
@@ -870,7 +1585,7 @@ def test_review_freshness_attested_survives_ledger_reset_and_no_livelock() -> No
         project = Path(tmp).resolve()
         tasks = reviewable_project(project)
         v1 = star_forge.source_hash(project)
-        write_reviewer_findings(project, "correctness", [], source_hash=v1)
+        write_clean_review_wave(project, source_hash=v1)
         run_cli(["review", "--project", str(project)])  # source v1: passes
         assert star_forge.review_findings_for_done(project, tasks) == []
         # Edit a source file -> the attested hash (v1) no longer matches the tree.
@@ -884,17 +1599,101 @@ def test_review_freshness_attested_survives_ledger_reset_and_no_livelock() -> No
         assert code == 1, err or out
         merged = json.loads(out)
         assert merged["reviewer_roles"] == []
-        assert merged["stale_roles"] == ["correctness"]
+        assert merged["stale_roles"] == ["architecture", "correctness", "security"]
         assert [item["rule"] for item in star_forge.review_findings_for_done(project, tasks)] == ["review-stale"]
         # A clean re-review attesting the NEW hash is fresh even though its findings
         # are byte-identical-in-spirit (still empty) -> no livelock.
         v2 = star_forge.source_hash(project)
         assert v2 != v1
-        write_reviewer_findings(project, "correctness", [], source_hash=v2)
+        write_clean_review_wave(project, source_hash=v2)
         code, out, err = run_cli(["review", "--project", str(project), "--strict"])
         assert code == 0, err or out
-        assert json.loads(out)["reviewer_roles"] == ["correctness"]
+        assert json.loads(out)["reviewer_roles"] == ["architecture", "correctness", "security"]
         assert star_forge.review_findings_for_done(project, tasks) == []
+
+
+def test_done_gate_recomputes_reviewer_files_despite_edited_merged_cache() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        tasks = reviewable_project(project)
+        scope = star_forge.scope_hash(project) or "noscope"
+        write_reviewer_findings(project, "correctness", [], source_hash="old-source-hash")
+        write_merged_review_cache(project)
+
+        gate = star_forge.review_findings_for_done(project, tasks)
+        assert [item["rule"] for item in gate] == ["review-stale"]
+
+        write_reviewer_findings(project, "correctness", [])
+        write_merged_review_cache(project)
+        gate = star_forge.review_findings_for_done(project, tasks)
+        assert [item["rule"] for item in gate] == ["reviewer-count-insufficient"]
+        assert "security" in gate[0]["message"]
+        assert "architecture" in gate[0]["message"]
+
+        scope_dir = star_forge.reviews_scope_dir(project, scope)
+        (scope_dir / "security.findings.json").write_text(
+            json.dumps({"role": "security", "findings": []}), encoding="utf-8"
+        )
+        write_merged_review_cache(project)
+        gate = star_forge.review_findings_for_done(project, tasks)
+        assert [item["rule"] for item in gate] == ["review-findings-invalid"]
+        assert "source_hash" in gate[0]["message"]
+
+
+def test_findings_file_without_source_hash_is_rejected_clearly() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        tasks = reviewable_project(project)
+        scope = star_forge.scope_hash(project) or "noscope"
+        scope_dir = star_forge.reviews_scope_dir(project, scope)
+        scope_dir.mkdir(parents=True, exist_ok=True)
+        (scope_dir / "correctness.findings.json").write_text(
+            json.dumps({"role": "correctness", "findings": []}), encoding="utf-8"
+        )
+
+        files, problems = star_forge.load_review_findings(project, scope)
+        assert files == []
+        assert [item["rule"] for item in problems] == ["review-findings-shape"]
+        assert "source_hash" in problems[0]["message"]
+
+        code, out, err = run_cli(["review", "--project", str(project), "--strict"])
+        assert code == 1, err or out
+        merged = json.loads(out)
+        assert merged["reviewer_roles"] == []
+        assert "source_hash" in merged["file_problems"][0]["message"]
+        gate = star_forge.review_findings_for_done(project, tasks)
+        assert [item["rule"] for item in gate] == ["review-findings-invalid"]
+        assert "source_hash" in gate[0]["message"]
+
+
+def test_findings_file_role_contract_mismatches_fail_closed() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        tasks = reviewable_project(project)
+        scope = star_forge.scope_hash(project) or "noscope"
+        scope_dir = star_forge.reviews_scope_dir(project, scope)
+        write_clean_review_wave(project)
+        current = star_forge.source_hash(project)
+        (scope_dir / "security.findings.json").write_text(
+            json.dumps({"role": "correctness", "source_hash": current, "findings": []}), encoding="utf-8"
+        )
+        (scope_dir / "bogus.findings.json").write_text(
+            json.dumps({"role": "qa", "source_hash": current, "findings": []}), encoding="utf-8"
+        )
+
+        files, problems = star_forge.load_review_findings(project, scope)
+        assert {item["role"] for item in files} == {"architecture", "correctness"}
+        messages = [item["message"] for item in problems]
+        assert any("must match payload role" in message for message in messages)
+        assert any("not a known review role" in message for message in messages)
+
+        code, out, err = run_cli(["review", "--project", str(project), "--strict"])
+        assert code == 1, err or out
+        merged = json.loads(out)
+        assert merged["file_problems"]
+        assert "security" in merged["missing_review_roles"]
+        gate = star_forge.review_findings_for_done(project, tasks)
+        assert [item["rule"] for item in gate] == ["review-findings-invalid"]
 
 
 def test_malformed_findings_files_report_problems() -> None:
@@ -1083,6 +1882,59 @@ def test_post_done_drift_scaffolds_single_amend_task() -> None:
         assert plan_text.count("| AMEND-") == 1
 
 
+def test_scaffold_amend_preserves_complete_long_drift_file_list() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        init_project(project)
+        write_blueprint(project)
+        write_plan(project, [f"| SF-1 | Build the greeter module | complete | solo | src/hello.py | - | {REAL_VERIFY} | src/hello.py |"])
+        changed = [
+            *[f"src/feature_{idx:02d}/component_{idx:02d}.py" for idx in range(16)],
+            "scripts/star_forge.py",
+            "skills/forge-review/SKILL.md",
+            "tests/test_star_forge.py",
+        ]
+        amend_id = star_forge.scaffold_amend(project, {"changed_files": [f"M  {path}" for path in changed]})
+        assert amend_id == "AMEND-1"
+        amend = next(task for task in star_forge.parse_tasks(project / "Plan.md") if task["id"] == "AMEND-1")
+        assert len(amend["files"]) > 120
+        assert star_forge.task_files(amend) == changed
+        assert "scrip" not in star_forge.task_files(amend)
+
+
+def test_completed_amend_does_not_rescaffold_same_drift_but_new_source_change_does() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        build_completed_project(project)
+        code, _ = run_done(project)
+        assert code == 0
+
+        (project / "src" / "hello.py").write_text("print('hello forge, drifted')\n", encoding="utf-8")
+        code, out, err = run_cli(["run", "--project", str(project), "--no-hooks"])
+        assert code == 0, err or out
+        record_verify(project, "AMEND-1")
+        code, payload = complete_task(project, "AMEND-1")
+        assert code == 0, payload
+
+        code, out, err = run_cli(["run", "--project", str(project), "--no-hooks"])
+        assert code == 0, err or out
+        state = json.loads((project / ".starforge" / "state.json").read_text(encoding="utf-8"))
+        assert state["phase"] == "review"
+        assert state["drift"]["covered_by_completed_amendment"] == "AMEND-1"
+        assert state["drift"]["actionable"] is False
+        plan_text = (project / "Plan.md").read_text(encoding="utf-8")
+        assert plan_text.count("| AMEND-") == 1
+
+        (project / "src" / "hello.py").write_text("print('hello forge, drifted again')\n", encoding="utf-8")
+        code, out, err = run_cli(["run", "--project", str(project), "--no-hooks"])
+        assert code == 0, err or out
+        state = json.loads((project / ".starforge" / "state.json").read_text(encoding="utf-8"))
+        assert state["phase"] == "amend"
+        assert "AMEND-2" in state["plan"]["ready"]
+        plan_text = (project / "Plan.md").read_text(encoding="utf-8")
+        assert plan_text.count("| AMEND-") == 2
+
+
 def test_amend_loop_closes_and_proof_supersedes() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         project = Path(tmp).resolve()
@@ -1103,7 +1955,7 @@ def test_amend_loop_closes_and_proof_supersedes() -> None:
         record_verify(project, "AMEND-1")
         # The source changed, so the prior review is stale: a real re-review must
         # re-attest the new source hash before review passes.
-        write_reviewer_findings(project, "correctness", [])
+        write_clean_review_wave(project)
         code, out, err = run_cli(["review", "--project", str(project), "--strict"])
         assert code == 0, err or out
         commit_all(project, "amend loop closed")
@@ -1223,6 +2075,65 @@ HOOK_COMMANDS = [
     "stop-hook",
     "pre-compact-hook",
 ]
+
+
+def test_plugin_manifest_exposes_bundled_hooks() -> None:
+    manifest_path = ROOT / ".codex-plugin" / "plugin.json"
+    hooks_path = ROOT / "hooks" / "hooks.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert hooks_path.is_file()
+    assert manifest["hooks"] == "./hooks/hooks.json"
+    assert (ROOT / manifest["hooks"]).resolve() == hooks_path.resolve()
+    assert manifest["interface"]["displayName"] == "Star Forge"
+
+
+def test_packaged_contract_text_does_not_claim_local_hooks_witness_completion() -> None:
+    targets = [
+        ROOT / "docs" / "hooks.md",
+        ROOT / "docs" / "forge-loop.md",
+        ROOT / "docs" / "workflow.md",
+        ROOT / "skills" / "forge" / "SKILL.md",
+        ROOT / "skills" / "forge-review" / "SKILL.md",
+        ROOT / "agents" / "reviewer" / "agent.md",
+        ROOT / "scripts" / "star_forge.py",
+    ]
+    text = "\n".join(path.read_text(encoding="utf-8") for path in targets)
+    normalized = " ".join(text.split())
+    forbidden = [
+        "To earn an unqualified `COMPLETE`, hooks must be trusted",
+        "instead of a witnessed `COMPLETE`",
+        "hook-observed sub-agent thread ids",
+        "done` reads it to decide whether a completion is *witnessed*",
+        "review counts as witnessed",
+        "ABSENT (advisory",
+        "run /hooks in Codex",
+        "+ /hooks",
+    ]
+    for phrase in forbidden:
+        assert phrase not in normalized
+    docs_hooks = (ROOT / "docs" / "hooks.md").read_text(encoding="utf-8")
+    assert "observer diagnostics and continuity" in docs_hooks
+    assert "no supported host-controlled witness source" in docs_hooks
+    manifest = json.loads((ROOT / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8"))
+    assert "diagnostic rather than trusted completion witnesses" in manifest["interface"]["longDescription"]
+
+
+def test_packaged_reviewer_role_contract_requires_source_hash() -> None:
+    text = (ROOT / "agents" / "reviewer" / "agent.md").read_text(encoding="utf-8")
+    assert '"source_hash": "<exact source_hash value from your spawn prompt>"' in text
+    assert "The `source_hash` field is required." in text
+    assert "exactly match the `source_hash` in your spawn prompt" in text
+
+
+def test_packaged_reviewer_role_contract_allows_run_reanchor_only() -> None:
+    text = (ROOT / "agents" / "reviewer" / "agent.md").read_text(encoding="utf-8")
+    assert "You may run one read/state re-anchor command" in text
+    assert "python3 scripts/star_forge.py run --project ." in text
+    assert "current phase, scope, profile lock, and source_hash" in text
+    assert "Never run mutating or proof Star Forge commands" in text
+    for forbidden in ("verify", "browser-run", "complete-task", "review", "waive", "done"):
+        assert f"`{forbidden}`" in text
+    assert "or any Star Forge CLI command" not in text
 
 
 def test_hooks_noop_outside_star_forge_projects() -> None:
@@ -1354,10 +2265,68 @@ def test_run_prints_operating_card_first() -> None:
         code, out, err = run_cli(["run", "--project", str(project), "--objective", "Build the greeter", "--no-hooks"])
         assert code == 0, err or out
         lines = out.splitlines()
-        assert lines[0].startswith(f"star-forge {star_forge.SF_VERSION} | hooks: ABSENT")
+        assert lines[0].startswith(f"star-forge {star_forge.SF_VERSION} | hooks: ADVISORY (no trusted witness source)")
         assert "| phase: plan" in lines[0]
+        assert "/hooks" not in lines[0]
+        assert "witnessed" not in lines[0]
         assert lines[1].startswith("NEXT:")
         assert any(line.startswith("RULES:") for line in lines[:10])
+
+
+def test_operating_card_reports_local_hooks_as_diagnostics_only() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        init_project(project)
+        event = {"cwd": str(project), "hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": "ls"}}
+        code, _, err = run_cli(["hook"], stdin_payload=event)
+        assert code == 0, err
+        code, out, err = run_cli(["run", "--project", str(project), "--objective", "Build the greeter", "--no-hooks"])
+        assert code == 0, err or out
+        first = out.splitlines()[0]
+        assert "hooks: ADVISORY (local hook diagnostics observed)" in first
+        assert "/hooks" not in first
+        assert "witnessed" not in first
+
+
+def test_review_spawn_prompt_treats_agent_id_as_provenance_only() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        reviewable_project(project)
+        prompt = star_forge.reviewer_spawn_prompt(project, star_forge.scope_hash(project) or "noscope")
+        assert "review counts as witnessed" not in prompt
+        assert "agent_id for provenance diagnostics only" in prompt
+        assert "local ids do not create unqualified COMPLETE" in prompt
+
+
+def test_standard_review_spawn_plan_has_distinct_profile_reviewers() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        tasks = reviewable_project(project)
+        scope = star_forge.scope_hash(project) or "noscope"
+        plan = star_forge.spawn_plan(project, tasks, "review")
+        assert [entry["role"] for entry in plan] == ["correctness", "security", "architecture"]
+        for entry in plan:
+            role = entry["role"]
+            findings_file = star_forge.relative_to_project(
+                star_forge.reviews_scope_dir(project, scope) / f"{role}.findings.json",
+                project,
+            )
+            assert entry["agent"] == "starforge-reviewer"
+            assert entry["tag"] == f"SF:review:{role}"
+            assert entry["findings_file"] == findings_file
+            assert findings_file in entry["spawn"]
+            assert f"[SF:review:{role}]" in entry["spawn"]
+            assert f'\\"role\\":\\"{role}\\"' in entry["spawn"]
+
+
+def test_fast_mvp_review_spawn_plan_has_one_reviewer() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        tasks = reviewable_project(project, profile="fast-mvp")
+        plan = star_forge.spawn_plan(project, tasks, "review")
+        assert len(plan) == 1
+        assert plan[0]["role"] == "correctness"
+        assert plan[0]["findings_file"].endswith("correctness.findings.json")
 
 
 def test_manifest_version_build_metadata_matches_semantic_core() -> None:
@@ -1423,7 +2392,7 @@ def test_learnings_digest_surfaces_matching_triggers() -> None:
 # -------------------------------------------------------- 11. enforcement mode
 
 
-def test_enforcement_mode_advisory_then_witnessed() -> None:
+def test_enforcement_mode_keeps_project_local_hooks_advisory() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         project = Path(tmp).resolve()
         init_project(project)
@@ -1432,7 +2401,43 @@ def test_enforcement_mode_advisory_then_witnessed() -> None:
         code, _, err = run_cli(["hook"], stdin_payload=event)
         assert code == 0, err
         assert (project / ".starforge" / "state" / "hook-events.jsonl").exists()
-        assert star_forge.enforcement_mode(project) == "witnessed"
+        liveness = star_forge.hooks_liveness(project)
+        assert liveness["local_events_observed"] is True
+        assert liveness["events_observed"] is False
+        assert star_forge.enforcement_mode(project) == "advisory"
+
+
+def test_env_selected_witness_root_does_not_upgrade_or_receive_mirrors() -> None:
+    old_root = os.environ.get("STAR_FORGE_TRUSTED_WITNESS_ROOT")
+    with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as witness_tmp:
+        try:
+            os.environ["STAR_FORGE_TRUSTED_WITNESS_ROOT"] = witness_tmp
+            project = Path(tmp).resolve()
+            reviewable_project(project)
+            hook_event = {"cwd": str(project), "hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": "ls"}}
+            code, _, err = run_cli(["hook"], stdin_payload=hook_event)
+            assert code == 0, err
+            subagent_event = {"cwd": str(project), "agent_id": "reviewer-7", "agent_type": "starforge-reviewer", "session_id": "sess-7"}
+            code, _, err = run_cli(["subagent-start-hook"], stdin_payload=subagent_event)
+            assert code == 0, err
+            assert not any(Path(witness_tmp).rglob("*.jsonl"))
+            assert star_forge.hooks_liveness(project)["local_events_observed"] is True
+            assert star_forge.hooks_liveness(project)["events_observed"] is False
+            assert star_forge.enforcement_mode(project) == "advisory"
+            assert star_forge.local_subagent_ids(project) == {"reviewer-7"}
+            assert star_forge.known_subagent_ids(project) == set()
+            write_reviewer_findings(project, "correctness", [], agent_id="reviewer-7")
+            write_reviewer_findings(project, "security", [])
+            write_reviewer_findings(project, "architecture", [])
+            code, out, err = run_cli(["review", "--project", str(project), "--strict"])
+            assert code == 0, err or out
+            merged = json.loads(out)
+            assert merged["reviewers_witnessed"] is False
+        finally:
+            if old_root is None:
+                os.environ.pop("STAR_FORGE_TRUSTED_WITNESS_ROOT", None)
+            else:
+                os.environ["STAR_FORGE_TRUSTED_WITNESS_ROOT"] = old_root
 
 
 def test_done_verdict_carries_advisory_suffix_without_hooks() -> None:
@@ -1442,31 +2447,28 @@ def test_done_verdict_carries_advisory_suffix_without_hooks() -> None:
         code, payload = run_done(project)
         assert code == 0, payload
         assert payload["enforcement"] == "advisory"
-        # With no hooks live, the verdict is COMPLETE but advisory, and the reasons
-        # call out the missing hook layer. We assert the prefix and that hooks are
-        # mentioned without pinning the full (semicolon-joined) reason string.
+        # With no trusted hook witness source, the verdict is COMPLETE but
+        # advisory. Project-local hook events are surfaced separately.
         assert payload["verdict"].startswith("COMPLETE")
         assert "advisory" in payload["verdict"]
-        assert "hooks were not live this session" in payload["verdict"]
+        assert "no trusted hook witness source is enabled in this version" in payload["verdict"]
         assert payload["witness"]["hooks_live"] is False
-        # Once a hook event has been observed, the hook-liveness reason drops out and
-        # enforcement flips to witnessed. The review wave here was self-authored
-        # (no witnessed sub-agent ids), so the verdict stays COMPLETE-but-advisory
-        # for the un-witnessed review rather than dropping the suffix entirely.
+        # Project-local hook events are still reported, but they cannot upgrade
+        # enforcement or remove the advisory suffix.
         event = {"cwd": str(project), "hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": "ls"}}
         run_cli(["hook"], stdin_payload=event)
         code, payload = run_done(project)
         assert code == 0, payload
-        assert payload["enforcement"] == "witnessed"
-        assert payload["witness"]["hooks_live"] is True
+        assert payload["enforcement"] == "advisory"
+        assert payload["witness"]["hooks_live"] is False
+        assert payload["witness"]["local_hooks_observed"] is True
         assert payload["verdict"].startswith("COMPLETE")
-        assert "hooks were not live this session" not in payload["verdict"]
+        assert "no trusted hook witness source is enabled in this version" in payload["verdict"]
 
 
 def test_done_advisory_flags_delegate_task_without_observed_subagent() -> None:
-    # A delegate-mode task that completed with no observed sub-agent events earns
-    # the "delegated tasks show no observed sub-agent" advisory reason: the work
-    # may have been done inline rather than by a witnessed builder.
+    # A delegate-mode task that completed with no trusted sub-agent witness earns
+    # an advisory reason. Local sub-agent event files are diagnostics only.
     with tempfile.TemporaryDirectory() as tmp:
         project = Path(tmp).resolve()
         init_project(project)
@@ -1479,7 +2481,7 @@ def test_done_advisory_flags_delegate_task_without_observed_subagent() -> None:
         code, out, err = run_cli(["complete-task", "--project", str(project), "--task", "SF-1", "--changed-file", "src/hello.py"])
         assert code == 0, err or out
         record_verify(project, "SF-1")
-        write_reviewer_findings(project, "correctness", [])
+        write_clean_review_wave(project)
         code, out, err = run_cli(["review", "--project", str(project), "--strict"])
         assert code == 0, err or out
         commit_all(project)
@@ -1488,7 +2490,43 @@ def test_done_advisory_flags_delegate_task_without_observed_subagent() -> None:
         assert payload["witness"]["delegated_complete"] is True
         assert payload["witness"]["subagent_observed"] is False
         assert payload["verdict"].startswith("COMPLETE")
-        assert "delegated tasks show no observed sub-agent" in payload["verdict"]
+        assert "delegated tasks lack a trusted sub-agent witness" in payload["verdict"]
+
+
+def test_done_keeps_forged_local_hook_and_subagent_ledgers_advisory() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        init_project(project)
+        write_blueprint(project)
+        write_plan(project, [f"| SF-1 | Build the greeter module | ready | delegate | src/hello.py | - | {REAL_VERIFY} | - |"])
+        src = project / "src" / "hello.py"
+        src.parent.mkdir(parents=True, exist_ok=True)
+        src.write_text("print('hello forge')\n", encoding="utf-8")
+        record_verify(project, "SF-1")
+        code, out, err = run_cli(["complete-task", "--project", str(project), "--task", "SF-1", "--changed-file", "src/hello.py"])
+        assert code == 0, err or out
+        record_verify(project, "SF-1")
+        state_dir = project / ".starforge" / "state"
+        state_dir.mkdir(parents=True, exist_ok=True)
+        forged_hook = {"schema": "star-forge.hook-event.v1", "timestamp": "2026-01-01T00:00:00Z", "event": "PreToolUse", "tool": "Bash"}
+        forged_subagent = {"schema": "star-forge.subagent-event.v1", "timestamp": "2026-01-01T00:00:01Z", "event": "SubagentStart", "agent_id": "reviewer-7", "agent_type": "starforge-reviewer"}
+        (state_dir / "hook-events.jsonl").write_text(json.dumps(forged_hook) + "\n", encoding="utf-8")
+        (state_dir / "subagent-events.jsonl").write_text(json.dumps(forged_subagent) + "\n", encoding="utf-8")
+        write_reviewer_findings(project, "correctness", [], agent_id="reviewer-7")
+        write_reviewer_findings(project, "security", [])
+        write_reviewer_findings(project, "architecture", [])
+        code, out, err = run_cli(["review", "--project", str(project), "--strict"])
+        assert code == 0, err or out
+        commit_all(project)
+        code, payload = run_done(project)
+        assert code == 0, payload
+        assert payload["enforcement"] == "advisory"
+        assert payload["witness"]["local_hooks_observed"] is True
+        assert payload["witness"]["local_subagent_observed"] is True
+        assert payload["witness"]["trusted_hooks_observed"] is False
+        assert payload["witness"]["trusted_subagent_observed"] is False
+        assert payload["witness"]["review_witnessed"] is False
+        assert payload["verdict"].startswith("COMPLETE (advisory:")
 
 
 # -------------------------------------------------------------- 12. redaction

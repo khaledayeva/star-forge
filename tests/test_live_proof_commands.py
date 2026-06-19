@@ -337,6 +337,29 @@ def assert_fail(code: int, payload: dict[str, Any], rule: str) -> None:
     assert rule in problem_rules(payload), payload.get("problems")
 
 
+def source_hash_problem_count(payload: dict[str, Any]) -> int:
+    return sum(1 for item in payload.get("problems", []) if isinstance(item, dict) and item.get("rule") == "source-hash-unavailable")
+
+
+def assert_source_hash_unavailable_fail(code: int, payload: dict[str, Any]) -> None:
+    assert_fail(code, payload, "source-hash-unavailable")
+    assert source_hash_problem_count(payload) == 1, payload.get("problems")
+    snapshot = payload.get("source_snapshot")
+    assert isinstance(snapshot, dict), payload
+    assert snapshot.get("source_hash_unavailable") is True, snapshot
+    assert snapshot.get("source_hash") is None, snapshot
+
+
+def corrupt_source_profile(project: Path) -> Path:
+    return write_text(project / "StarForge.profile.json", "{not valid json\n")
+
+
+def make_source_profile_unreadable(project: Path) -> Path:
+    path = write_json(project / "StarForge.profile.json", {"schema": "star-forge.source-profile.v1", "profile": "standard"})
+    path.chmod(0)
+    return path
+
+
 def rewrite_manifest(path: Path, mutator: Any) -> None:
     payload = json.loads(path.read_text(encoding="utf-8"))
     mutator(payload)
@@ -427,6 +450,178 @@ def test_proof_run_strict_rejects_degraded_source_and_runtime_mismatch() -> None
         write_text(project / ".starforge" / "runtime" / "server.json", "{}\n")
         code, payload, _ = run_cli(["proof-run", "--project", str(project), "--task", "SF-1", "--profile", "security", "--artifact", str(fresh), "--strict"])
         assert_fail(code, payload, "manifest-runtime")
+
+
+def test_proof_run_manifest_validation_fail_closed_when_source_profile_malformed() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        init_project(project)
+        root = live_dir(project, "security")
+        artifact = write_text(root / "proof.json", "{}\n")
+        manifest = write_manifest(project, "security", {"proof": artifact})
+        corrupt_source_profile(project)
+
+        code, payload, err = run_cli([
+            "proof-run", "--project", str(project), "--task", "SF-1",
+            "--profile", "custom", "--artifact", str(manifest), "--strict",
+        ])
+
+        assert err == ""
+        assert_source_hash_unavailable_fail(code, payload)
+        assert "manifest-source" not in problem_rules(payload)
+
+
+def test_preview_proof_manifest_validation_fail_closed_when_source_profile_unreadable() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        init_project(project)
+        root = live_dir(project, "preview")
+        url = "http://93.184.216.34/"
+        http = write_json(root / "http.json", valid_preview_http_payload(url))
+        deployment = write_json(root / "deployment.json", {"source_hash": star_forge.source_hash(project), "deployment_id": "dep-1"})
+        smoke = write_json(root / "smoke.json", {"checks": [{"name": "home", "passed": True}]})
+        write_manifest(project, "preview", {"http": http, "deployment": deployment, "smoke": smoke}, summary={"url": url})
+        profile = make_source_profile_unreadable(project)
+        try:
+            code, payload, err = run_cli([
+                "preview-proof", "--project", str(project), "--task", "SF-1",
+                "--url", url, "--expect-status", "200",
+                "--deployment-metadata", str(deployment), "--smoke-checks", str(smoke), "--strict",
+            ])
+        finally:
+            profile.chmod(0o644)
+
+        assert err == ""
+        assert_source_hash_unavailable_fail(code, payload)
+        rules = problem_rules(payload)
+        assert "manifest-source" not in rules
+        assert "preview-source-binding" not in rules
+
+
+def test_security_proof_skips_source_binding_comparison_when_source_profile_malformed() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        init_project(project)
+        manifest, findings = write_clean_security_fixture(project)
+        corrupt_source_profile(project)
+
+        code, payload, err = run_cli([
+            "security-proof", "--project", str(project), "--task", "SF-1",
+            "--profile", "security-diff", "--scanner", "codex-security",
+            "--scanner-version", "1.0", "--findings", str(findings),
+            "--artifact", str(manifest), "--strict",
+        ])
+
+        assert err == ""
+        assert_source_hash_unavailable_fail(code, payload)
+        rules = problem_rules(payload)
+        assert "manifest-source" not in rules
+        assert "security-source-binding" not in rules
+
+
+def test_native_ios_proof_transcript_validation_fail_closed_when_source_profile_malformed() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        init_project(project)
+        root = live_dir(project, "native-ios")
+        session = write_json(root / "session-defaults.json", {"scheme": "App", "simulator": "iPhone 16", "runtime": "iOS 18"})
+        transcript = write_json(root / "mcp-transcript.json", {
+            "source_hash": star_forge.source_hash(project),
+            "exported_by": "test-agent",
+            "mcp": {"tool_surface": "mcp", "server": "XcodeBuildMCP", "version": "test"},
+            "calls": [
+                {"tool": "session_show_defaults", "result": {"scheme": "App", "simulator": "iPhone 16", "runtime": "iOS 18"}},
+                {"tool": "build_run_sim", "args": {"scheme": "App", "simulator": "iPhone 16"}},
+                {"tool": "test_sim", "args": {"scheme": "App", "simulator": "iPhone 16"}},
+                {"tool": "screenshot", "args": {"simulator": "iPhone 16"}},
+            ],
+        })
+        build = write_native_ios_result(root, "build")
+        launch = write_native_ios_result(root, "launch")
+        test = write_native_ios_result(root, "test")
+        screenshot = make_png(root / "screenshot.png")
+        write_manifest(
+            project,
+            "native-ios",
+            {"session": session, "transcript": transcript, "build": build, "launch": launch, "test": test, "screenshot": screenshot},
+            summary={"app_identity": "com.example.App"},
+        )
+        corrupt_source_profile(project)
+
+        code, payload, err = run_cli([
+            "native-ios-proof", "--project", str(project), "--task", "SF-1",
+            "--scheme", "App", "--simulator", "iPhone 16",
+            "--build-result", str(build), "--launch-result", str(launch), "--test-result", str(test),
+            "--screenshot", str(screenshot), "--strict",
+        ])
+
+        assert err == ""
+        assert_source_hash_unavailable_fail(code, payload)
+        rules = problem_rules(payload)
+        assert "manifest-source" not in rules
+        assert "native-ios-transcript" not in rules
+
+
+def test_native_macos_proof_manifest_validation_fail_closed_when_source_profile_malformed() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        init_project(project)
+        root = live_dir(project, "native-macos")
+        build, build_stdout, build_stderr = write_native_macos_result(project, root, "build")
+        run, stdout, stderr = write_native_macos_result(project, root, "run", stdout_name="stdout.txt", stderr_name="stderr.txt", extra={
+            "pid": os.getpid(),
+            "gui_launch_failed": False,
+            "cleanup_failed": False,
+            "readiness": {"status": "observed"},
+            "termination": {"attempted": True, "success": True},
+            "cleanup": {"attempted": True, "success": True},
+        })
+        app, metadata, signing, packaging = write_native_macos_identity_artifacts(project, root)
+        write_manifest(
+            project,
+            "native-macos",
+            {
+                "build": build,
+                "build_stdout": build_stdout,
+                "build_stderr": build_stderr,
+                "run": run,
+                "stdout": stdout,
+                "stderr": stderr,
+                "metadata": metadata,
+                "signing": signing,
+                "packaging": packaging,
+            },
+            summary={"app_bundle_metadata": star_forge.relative_to_project(metadata, project)},
+        )
+        corrupt_source_profile(project)
+
+        code, payload, err = run_cli([
+            "native-macos-proof", "--project", str(project), "--task", "SF-1",
+            "--build-result", str(build), "--run-result", str(run), "--app-bundle", str(app),
+            "--app-name", "Test", "--bundle-id", "com.example.Test",
+            "--signing-note", str(signing), "--packaging-note", str(packaging), "--strict",
+        ])
+
+        assert err == ""
+        assert_source_hash_unavailable_fail(code, payload)
+        assert "manifest-source" not in problem_rules(payload)
+
+
+def test_source_packet_proof_manifest_validation_fail_closed_when_source_profile_malformed() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        init_project(project)
+        manifest = write_github_packet(project)
+        corrupt_source_profile(project)
+
+        code, payload, err = run_cli([
+            "source-packet-proof", "--project", str(project), "--task", "SF-1",
+            "--profile", "production-review", "--input", str(manifest), "--strict",
+        ])
+
+        assert err == ""
+        assert_source_hash_unavailable_fail(code, payload)
+        assert "manifest-source" not in problem_rules(payload)
 
 
 def test_proof_run_strict_rejects_profiles_with_dedicated_proof_commands() -> None:

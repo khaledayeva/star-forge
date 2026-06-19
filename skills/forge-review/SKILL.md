@@ -9,7 +9,7 @@ Resolve `<plugin-root>` as two directories up from this skill file (`skills/forg
 
 ## 1. Spawn the Review Wave
 
-Spawn `starforge-reviewer` agents with the spawn prompt from `spawn_plan` in `.starforge/state.json` (the operating card prints it ready to paste). One reviewer under the fast-mvp profile; 2–3 otherwise, each assigned a distinct lens (e.g. correctness, security, regression). Each reviewer writes its own findings file — `.starforge/reviews/<scope>/<role>.findings.json` — and never edits source. Do not write findings files on a reviewer's behalf: an unperformed review cannot be back-filled.
+Spawn `starforge-reviewer` agents with the role-specific prompts from `spawn_plan` in `.starforge/state.json` (the operating card prints them ready to paste). The `standard` profile requires correctness, security, and architecture reviewers. The `fast-mvp` profile requires one correctness reviewer. Each entry names its `role` and `findings_file`; paste it as-is so each reviewer writes only `.starforge/reviews/<scope>/<role>.findings.json` and never edits source. Do not write findings files on a reviewer's behalf: an unperformed review cannot be back-filled.
 
 ## 2. Merge
 
@@ -17,7 +17,7 @@ Spawn `starforge-reviewer` agents with the spawn prompt from `spawn_plan` in `.s
 python3 <plugin-root>/scripts/star_forge.py review --project . --strict
 ```
 
-This merges and dedups all reviewer findings, scans the tree itself (secrets, residual placeholders, architecture debt), and writes the fix queue into state. Exit 1 under `--strict` means blocking findings remain or no reviewer files existed.
+This merges and dedups all reviewer findings, scans the tree itself (secrets, residual placeholders, architecture debt), and writes the fix queue into state. Exit 1 under `--strict` means blocking findings remain, reviewer files are malformed or stale, no reviewer files existed, or the project profile's required reviewer roles are missing.
 
 ## 3. Clear the Queue
 
@@ -50,4 +50,4 @@ python3 <plugin-root>/scripts/star_forge.py done --project . --strict --write-su
 
 ## Report the Verdict
 
-QUOTE THE VERDICT LINE VERBATIM in your final message — `COMPLETE`, or a `COMPLETE (advisory: ...)` line (hooks were not live, or delegated/reviewed work showed no observed sub-agents), or `NEEDS_CHANGES`. The advisory reasons and any `[N waived finding(s)]` suffix are part of the verdict — do not paraphrase an advisory verdict into an unqualified "complete". To earn an unqualified `COMPLETE`, hooks must be trusted (`/hooks`) and the review wave must run as real spawned sub-agents whose `agent_id` the hooks observed. Remember any post-done edit reopens the project as `amend` on the next `run`.
+QUOTE THE VERDICT LINE VERBATIM in your final message: `COMPLETE (advisory: ...)`, `NEEDS_CHANGES`, or a future unqualified `COMPLETE` only if the CLI itself reports one. The advisory reasons and any `[N waived finding(s)]` suffix are part of the verdict. Do not paraphrase an advisory verdict into an unqualified "complete". In this version there is no supported host-controlled witness source, so `/hooks` and local reviewer `agent_id` values do not produce unqualified `COMPLETE`. Remember any post-done edit reopens the project as `amend` on the next `run`.

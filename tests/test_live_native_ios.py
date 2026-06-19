@@ -138,6 +138,13 @@ def remove_arg(args: list[str], flag: str) -> list[str]:
     return out
 
 
+def replace_arg(args: list[str], flag: str, value: Path | str) -> list[str]:
+    out = list(args)
+    idx = out.index(flag)
+    out[idx + 1] = str(value)
+    return out
+
+
 def base_inputs(
     project: Path,
     *,
@@ -206,6 +213,64 @@ def test_missing_mcp_transcript_degrades_and_blocks() -> None:
         assert output["degraded"] is True
         assert "mcp-transcript" in output["unavailable_capabilities"]
         assert_collector_rule(project, output, "native-ios-mcp-transcript")
+
+
+def test_absolute_outside_mcp_transcript_is_rejected_before_reading() -> None:
+    with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as outside_tmp:
+        project = Path(tmp).resolve()
+        outside = Path(outside_tmp).resolve()
+        init_project(project)
+        paths = base_inputs(project)
+        transcript = fixture_payload("mcp-transcript-happy.json")
+        transcript.setdefault("source_hash", star_forge.source_hash(project))
+        transcript["outside_marker"] = "OUTSIDE_TRANSCRIPT_SECRET"
+        outside_transcript = write_json(outside / "mcp-transcript.json", transcript)
+        args = replace_arg(base_args(project, paths), "--mcp-transcript", outside_transcript)
+
+        code, output, _ = run_collector(args)
+
+        assert code == 1
+        assert "mcp_transcript" in output["artifacts"]
+        assert_collector_rule(project, output, "native-ios-mcp-transcript")
+        copied = live_dir(project) / "mcp-transcript.json"
+        assert copied.exists()
+        assert "OUTSIDE_TRANSCRIPT_SECRET" not in copied.read_text(encoding="utf-8")
+
+
+def test_absolute_outside_log_is_rejected_before_copying() -> None:
+    with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as outside_tmp:
+        project = Path(tmp).resolve()
+        outside = Path(outside_tmp).resolve()
+        init_project(project)
+        paths = base_inputs(project, include_log=True)
+        outside_log = write_text(outside / "device.log", "OUTSIDE_LOG_SECRET\n")
+        args = replace_arg(base_args(project, paths), "--log", outside_log)
+
+        code, output, _ = run_collector(args)
+
+        assert code == 1
+        assert "log" not in output["artifacts"]
+        assert_collector_rule(project, output, "native-ios-log")
+        copied = live_dir(project) / "log.txt"
+        assert not copied.exists()
+
+
+def test_absolute_outside_screenshot_is_rejected_before_copying() -> None:
+    with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as outside_tmp:
+        project = Path(tmp).resolve()
+        outside = Path(outside_tmp).resolve()
+        init_project(project)
+        paths = base_inputs(project)
+        outside_screenshot = make_png(outside / "screenshot.png")
+        args = replace_arg(base_args(project, paths), "--screenshot", outside_screenshot)
+
+        code, output, _ = run_collector(args)
+
+        assert code == 1
+        assert "screenshot" not in output["artifacts"]
+        assert_collector_rule(project, output, "native-ios-screenshot")
+        copied = live_dir(project) / "screenshot.png"
+        assert not copied.exists()
 
 
 def test_missing_session_show_defaults_blocks_ordered_proof() -> None:

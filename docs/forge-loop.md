@@ -11,15 +11,14 @@ Gates prefer evidence that is expensive for the model to fake:
 - command output captured by the CLI (`verify`), bound to the task's declared command,
 - screenshot bytes and image magic (`browser-run`),
 - git tree state (source hash, clean tree, HEAD),
-- the source hash each reviewer attests in its own findings file (a re-review must re-attest the current tree),
-- hook-observed sub-agent thread ids (which decide *witnessed* vs *advisory*).
+- the source hash each reviewer attests in its own findings file (a re-review must re-attest the current tree).
 
 Reviewer findings are load-bearing because they are the **input** to the fix queue
 that `done` consumes — skipping the review starves the pipeline; it cannot be
-back-filled. All state lives in local files the model *could* write, so the
-"witnessed" label is an integrity signal (the hook layer was live and observed the
-sub-agents), not a cryptographic guarantee — when it cannot be established, the
-verdict degrades to advisory rather than blocking.
+back-filled. Hook and sub-agent ledgers currently live in project-local files the
+model *could* write, so they are diagnostics, not witnesses. In this local version
+there is no supported host-controlled witness source; when all gates pass, the
+verdict remains advisory rather than pretending the local ledgers are trusted.
 
 ## The loop
 
@@ -44,8 +43,10 @@ Phases in `.starforge/state.json`: `setup, plan, build, review, done, amend, blo
   refuses while the queue has unresolved blocking findings or the review is stale.
 - **done** — a predicate computed from git, not a recorded fact. On pass it writes
   `.starforge/final/proof.json {head, source_hash, scope_hash}`. Verdict is
-  `COMPLETE` (witnessed) / `COMPLETE (advisory: ...)` when hooks are dead /
-  `NEEDS_CHANGES`. A fresh pass legitimately supersedes the old proof — the
+  `COMPLETE (advisory: ...)` in this version when the only hook/sub-agent evidence
+  is project-local, or `NEEDS_CHANGES` when a gate fails. A future trusted witness
+  source may allow unqualified `COMPLETE`; the bundled hooks do not. A fresh pass
+  legitimately supersedes the old proof — the
   verify/review freshness gates already force real re-work after any source change.
 - **amend** — every `run` recomputes the source hash; if it diverged from the proof
   (post-done edit), the phase becomes `amend` and an `AMEND-n` task is scaffolded
@@ -54,7 +55,7 @@ Phases in `.starforge/state.json`: `setup, plan, build, review, done, amend, blo
 
 ## Hooks are observers, never police
 
-Zero blocking. `PreToolUse`/`PostToolUse` log events for the liveness signal and the
+Zero blocking. `PreToolUse`/`PostToolUse` log events for diagnostics and the
 changed-file trail; there is no deny path, no leases, no override grants, no
 edit-time secret block (which trained evasion in the session). Secrets are caught at
 `review`/`done` by scanning the **tree** with the placeholder-tolerant regex, so an
@@ -81,7 +82,7 @@ positives are mined into `.starforge/state/incidents.jsonl`.
 
 ## Liveness, surfaced first
 
-Line 1 of every `run`: version, newest cache, and `hooks: LIVE/ABSENT`. A stale
-plugin cache (the single biggest Boss Fight failure multiplier) prints a reinstall
-warning. `done` in advisory mode passes but labels the verdict so a dead-hook session
-can never be mistaken for a witnessed one.
+Line 1 of every `run`: version, newest cache, and advisory hook witness status. A
+stale plugin cache (the single biggest Boss Fight failure multiplier) prints a
+reinstall warning. `done` in advisory mode passes but labels the verdict so local
+hook diagnostics can never be mistaken for a trusted witness.

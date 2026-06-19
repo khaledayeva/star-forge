@@ -4,9 +4,9 @@
 The loop is plan -> build -> review -> done, with automatic amend re-entry on
 post-done drift. Gates consume only evidence the model cannot author about itself:
 captured command output (verify), screenshot bytes (browser-run), git tree state,
-and hook-observed sub-agent ids. Reviewer findings are load-bearing -- they feed the
-fix queue that `done` consumes -- so review cannot be back-filled. Hooks observe and
-re-anchor; they never deny. See docs/forge-loop.md.
+and reviewer freshness attestations. Reviewer findings are load-bearing -- they
+feed the fix queue that `done` consumes -- so review cannot be back-filled. Hooks
+observe and re-anchor; they never deny. See docs/forge-loop.md.
 """
 
 from __future__ import annotations
@@ -20,6 +20,7 @@ import os
 import plistlib
 import re
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -51,6 +52,8 @@ SCREENSHOTS_DIR = STATE_DIR / "screenshots"
 RUNTIME_DIR = STATE_DIR / "runtime"
 CANONICAL_STATE = STATE_DIR / "state.json"
 PROJECT_MANIFEST = STATE_DIR / "project.json"
+SOURCE_PROFILE_FILE = "StarForge.profile.json"
+SOURCE_PROFILE_SCHEMA = "star-forge.source-profile.v1"
 PROOF_FILE = FINAL_DIR / "proof.json"
 FINAL_SUMMARY = FINAL_DIR / "summary.md"
 LEDGER_FILE = STATE_DIR / "ledger.jsonl"
@@ -64,6 +67,16 @@ INCIDENTS_FILE = STATE_SUBDIR / "incidents.jsonl"
 SERVER_LEASE = RUNTIME_DIR / "server.json"
 SCREENSHOT_MANIFEST = SCREENSHOTS_DIR / "manifest.json"
 AGENT_NAME_PREFIX = "starforge-"
+REVIEW_PROFILE_ROLES: dict[str, tuple[str, ...]] = {
+    "standard": ("correctness", "security", "architecture"),
+    "fast-mvp": ("correctness",),
+}
+KNOWN_REVIEW_ROLES = frozenset(role for roles in REVIEW_PROFILE_ROLES.values() for role in roles)
+REVIEW_ROLE_LENSES: dict[str, str] = {
+    "correctness": "functional correctness, regressions, edge cases, and acceptance-criteria coverage",
+    "security": "security, privacy, secrets, injection, auth, unsafe IO, and dependency exposure",
+    "architecture": "maintainability, coupling, data flow, boundaries, performance risks, and future change safety",
+}
 MAX_AUTO_CONTINUES = 3
 STAR_FORGE_STATE_VERSION = "3.0"
 LEARNINGS_HOME = Path.home() / ".star-forge" / "learnings"
@@ -488,12 +501,431 @@ def product_slug_from_objective(project: Path, objective: str = "", explicit: st
     return slugify(project.name or "star-forge-project").lower()
 
 
+def normalize_project_profile(profile: str) -> str:
+    candidate = str(profile or "").strip()
+    return candidate if candidate in REVIEW_PROFILE_ROLES else "standard"
+
+
+def source_profile_path(project: Path) -> Path:
+    return project / SOURCE_PROFILE_FILE
+
+
+def source_profile_exists(project: Path) -> bool:
+    try:
+        source_profile_path(project).lstat()
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    return True
+
+
+def source_profile_path_problem(project: Path) -> str:
+    project_root = project.resolve()
+    path = source_profile_path(project)
+    try:
+        parent = path.parent.resolve(strict=True)
+    except OSError:
+        return f"{SOURCE_PROFILE_FILE} parent cannot be inspected"
+    anchored = parent / path.name
+    try:
+        anchored.relative_to(project_root)
+    except ValueError:
+        return f"{SOURCE_PROFILE_FILE} resolves outside project root"
+    try:
+        mode = path.lstat().st_mode
+    except FileNotFoundError:
+        return ""
+    except OSError:
+        return f"{SOURCE_PROFILE_FILE} cannot be inspected"
+    if stat.S_ISLNK(mode):
+        return f"{SOURCE_PROFILE_FILE} is a symlink"
+    if not stat.S_ISREG(mode):
+        return f"{SOURCE_PROFILE_FILE} is not a regular file"
+    return ""
+
+
+def source_profile_read_problem(project: Path) -> str:
+    path = source_profile_path(project)
+    path_problem = source_profile_path_problem(project)
+    if path_problem:
+        return path_problem
+    if not source_profile_exists(project):
+        return ""
+    try:
+        mode = path.lstat().st_mode
+    except OSError:
+        return f"{SOURCE_PROFILE_FILE} cannot be inspected"
+    if mode & 0o444 == 0:
+        return f"{SOURCE_PROFILE_FILE} is not readable"
+    try:
+        read_text(path)
+    except PermissionError:
+        return f"{SOURCE_PROFILE_FILE} is not readable"
+    except UnicodeDecodeError:
+        return ""
+    except OSError:
+        return f"{SOURCE_PROFILE_FILE} cannot be read"
+    return ""
+
+
+def source_profile_invalid_problem(project: Path) -> str:
+    if not source_profile_exists(project):
+        return ""
+    read_problem = source_profile_read_problem(project)
+    if read_problem:
+        return read_problem
+    try:
+        payload = read_json(source_profile_path(project))
+    except json.JSONDecodeError:
+        return f"{SOURCE_PROFILE_FILE} is not valid JSON"
+    except ForgeError:
+        return f"{SOURCE_PROFILE_FILE} must contain a JSON object"
+    except UnicodeDecodeError:
+        return f"{SOURCE_PROFILE_FILE} is not valid UTF-8"
+    except PermissionError:
+        return f"{SOURCE_PROFILE_FILE} is not readable"
+    except OSError:
+        return f"{SOURCE_PROFILE_FILE} cannot be read"
+    if payload.get("schema") != SOURCE_PROFILE_SCHEMA:
+        return f"{SOURCE_PROFILE_FILE} has invalid schema"
+    profile = str(payload.get("profile") or "").strip()
+    if profile not in REVIEW_PROFILE_ROLES:
+        return f"{SOURCE_PROFILE_FILE} records an invalid review profile"
+    return ""
+
+
+def source_profile_hash_blocker(project: Path) -> str:
+    read_problem = source_profile_read_problem(project)
+    if read_problem:
+        return read_problem
+    if source_profile_exists(project):
+        return source_profile_invalid_problem(project)
+    return ""
+
+
+def source_profile_blocks_source_hash(project: Path) -> bool:
+    return bool(source_profile_hash_blocker(project))
+
+
+def source_hash_unavailable_problem(project: Path) -> dict[str, Any] | None:
+    problem = source_profile_hash_blocker(project)
+    if not problem:
+        return None
+    return {
+        "severity": "high",
+        "rule": "source-hash-unavailable",
+        "file": SOURCE_PROFILE_FILE,
+        "message": f"Cannot compute source_hash because {problem}. Standard review remains required.",
+    }
+
+
+def source_hash_exception_problem(exc: BaseException) -> dict[str, Any]:
+    return {
+        "severity": "high",
+        "rule": "source-hash-unavailable",
+        "file": "source tree",
+        "message": f"Cannot compute source_hash: {exc}",
+    }
+
+
+def try_source_hash(project: Path) -> tuple[str | None, dict[str, Any] | None]:
+    problem = source_hash_unavailable_problem(project)
+    if problem:
+        return None, problem
+    try:
+        return source_hash(project), None
+    except (PermissionError, OSError) as exc:
+        return None, source_hash_exception_problem(exc)
+
+
+def read_source_profile_payload(project: Path) -> dict[str, Any]:
+    path = source_profile_path(project)
+    if not source_profile_exists(project):
+        return {}
+    if source_profile_read_problem(project) or source_profile_invalid_problem(project):
+        return {}
+    try:
+        payload = read_json(path)
+    except Exception:
+        return {}
+    return payload if payload.get("schema") == SOURCE_PROFILE_SCHEMA else {}
+
+
+def read_source_profile(project: Path) -> str:
+    payload = read_source_profile_payload(project)
+    if not payload:
+        return ""
+    profile = str(payload.get("profile") or "").strip()
+    return profile if profile in REVIEW_PROFILE_ROLES else ""
+
+
+def ensure_source_profile(project: Path, profile: str) -> None:
+    normalized = normalize_project_profile(profile)
+    write_problem = source_profile_path_problem(project)
+    if write_problem:
+        raise ForgeError(f"Refusing to write {SOURCE_PROFILE_FILE}: {write_problem}")
+    existing = read_source_profile_payload(project)
+    selected_before_gates = bool(existing.get("selected_before_gates"))
+    if not existing:
+        selected_before_gates = not profile_downgrade_lock_reasons(project)
+    payload = {
+        "schema": SOURCE_PROFILE_SCHEMA,
+        "profile": normalized,
+        "initial_profile": str(existing.get("initial_profile") or normalized),
+        "selected_before_gates": selected_before_gates,
+        "review_roles": review_roles_for_profile(normalized),
+    }
+    write_json_if_changed(source_profile_path(project), payload)
+
+
+def review_records_exist(project: Path) -> bool:
+    root = project / REVIEWS_DIR
+    if not root.exists():
+        return False
+    return any(path.is_file() for path in root.rglob("*"))
+
+
+def profile_downgrade_lock_reasons(project: Path) -> list[str]:
+    reasons: list[str] = []
+    plan = project / PLAN_FILE
+    if blueprint_is_approved(project):
+        reasons.append("Blueprint.md is approved")
+    if plan.exists():
+        try:
+            tasks = parse_tasks(plan)
+        except ForgeError:
+            tasks = []
+        if tasks and not plan_is_placeholder(tasks):
+            reasons.append("Plan.md exists")
+            reasons.append("Plan.md has real tasks")
+    if load_proof(project) is not None:
+        reasons.append("final proof exists")
+    if review_records_exist(project):
+        reasons.append("review records exist")
+    return reasons
+
+
+def source_profile_payload_from_text(text: str) -> dict[str, Any]:
+    try:
+        payload = json.loads(text)
+    except Exception:
+        return {}
+    if not isinstance(payload, dict) or payload.get("schema") != SOURCE_PROFILE_SCHEMA:
+        return {}
+    profile = str(payload.get("profile") or "").strip()
+    return payload if profile in REVIEW_PROFILE_ROLES else {}
+
+
+def plan_text_has_real_tasks(text: str) -> bool:
+    try:
+        tasks = parse_tasks_from_text(text)
+    except Exception:
+        return False
+    return bool(tasks) and not plan_is_placeholder(tasks)
+
+
+def git_show_text(project: Path, revision: str, relpath: str) -> str | None:
+    code, out, _ = run_git(["show", f"{revision}:{relpath}"], project)
+    return out if code == 0 else None
+
+
+def git_revision_has_review_gates(project: Path, revision: str) -> bool:
+    blueprint = git_show_text(project, revision, BLUEPRINT_FILE)
+    if blueprint is not None and blueprint_text_is_approved(blueprint):
+        return True
+    plan = git_show_text(project, revision, PLAN_FILE)
+    if plan is not None and plan_text_has_real_tasks(plan):
+        return True
+    return False
+
+
+def git_revision_or_ancestors_have_review_gates(project: Path, revision: str) -> bool:
+    code, out, _ = run_git(["rev-list", "--reverse", revision], project)
+    if code != 0:
+        return True
+    for ancestor in [line.strip() for line in out.splitlines() if line.strip()]:
+        if git_revision_has_review_gates(project, ancestor):
+            return True
+    return False
+
+
+def git_history_has_fast_mvp_before_gates(project: Path) -> bool:
+    if not is_git_repo(project) or git_head(project) is None:
+        return False
+    code, out, _ = run_git(["rev-list", "--reverse", "HEAD", "--", SOURCE_PROFILE_FILE], project)
+    if code != 0:
+        return False
+    for revision in [line.strip() for line in out.splitlines() if line.strip()]:
+        text = git_show_text(project, revision, SOURCE_PROFILE_FILE)
+        payload = source_profile_payload_from_text(text or "")
+        if str(payload.get("profile") or "") != "fast-mvp":
+            continue
+        return not git_revision_or_ancestors_have_review_gates(project, revision)
+    return False
+
+
+def source_profile_lock_is_durable(project: Path) -> bool:
+    path = source_profile_path(project)
+    if not source_profile_exists(project) or not is_git_repo(project) or git_head(project) is None:
+        return False
+    if source_profile_read_problem(project):
+        return False
+    code, _, _ = run_git(["ls-files", "--error-unmatch", "--", SOURCE_PROFILE_FILE], project)
+    if code != 0:
+        return False
+    for entry in git_status(project):
+        if git_status_path(entry) == SOURCE_PROFILE_FILE:
+            return False
+    return any(candidate.resolve() == path.resolve() for candidate in live_common.snapshot_file_candidates(project))
+
+
+def fast_mvp_profile_predates_gates(project: Path) -> bool:
+    if read_source_profile(project) != "fast-mvp":
+        return False
+    if not source_profile_lock_is_durable(project):
+        return False
+    return git_history_has_fast_mvp_before_gates(project)
+
+
+def fast_mvp_profile_selected_before_gates(project: Path) -> bool:
+    payload = read_source_profile_payload(project)
+    return str(payload.get("profile") or "") == "fast-mvp" and bool(payload.get("selected_before_gates"))
+
+
+def setup_ledger_records_fast_mvp_before_gates(project: Path) -> bool:
+    for payload in jsonl_payloads(project / LEDGER_FILE):
+        if payload.get("schema") != "star-forge.ledger.v1":
+            continue
+        if payload.get("event") != "setup":
+            continue
+        if str(payload.get("profile") or "") != "fast-mvp":
+            continue
+        if bool(payload.get("profile_selected_before_gates")):
+            return True
+    return False
+
+
+def review_profile(project: Path) -> str:
+    manifest_profile = project_profile(project)
+    if manifest_profile == "fast-mvp" and fast_mvp_profile_predates_gates(project):
+        return "fast-mvp"
+    return "standard"
+
+
+def profile_lock_gate_reasons(project: Path) -> list[str]:
+    reasons: list[str] = []
+    if blueprint_is_approved(project):
+        reasons.append("Blueprint.md is approved")
+    plan = project / PLAN_FILE
+    if plan.exists():
+        try:
+            tasks = parse_tasks(plan)
+        except ForgeError:
+            tasks = []
+        if tasks and not plan_is_placeholder(tasks):
+            reasons.append("Plan.md has real tasks")
+    return reasons
+
+
+def source_profile_lock_problems(project: Path) -> list[str]:
+    problems: list[str] = []
+    path = source_profile_path(project)
+    if not source_profile_exists(project):
+        return [f"{SOURCE_PROFILE_FILE} is missing"]
+    profile_problem = source_profile_read_problem(project) or source_profile_invalid_problem(project)
+    if profile_problem:
+        problems.append(profile_problem)
+        return problems
+    elif read_source_profile(project) != "fast-mvp":
+        problems.append(f"{SOURCE_PROFILE_FILE} does not record fast-mvp")
+    if not is_git_repo(project):
+        problems.append("project is not a git repository")
+        return problems
+    if git_head(project) is None:
+        problems.append("git history has no commits")
+    code, _, _ = run_git(["ls-files", "--error-unmatch", "--", SOURCE_PROFILE_FILE], project)
+    if code != 0:
+        problems.append(f"{SOURCE_PROFILE_FILE} is not tracked by git")
+    for entry in git_status(project):
+        if git_status_path(entry) == SOURCE_PROFILE_FILE:
+            problems.append(f"{SOURCE_PROFILE_FILE} has uncommitted changes")
+            break
+    if not any(candidate.resolve() == path.resolve() for candidate in live_common.snapshot_file_candidates(project)):
+        problems.append(f"{SOURCE_PROFILE_FILE} is not included in the durable source snapshot")
+    if git_head(project) is not None and not git_history_has_fast_mvp_before_gates(project):
+        problems.append(f"git history does not show {SOURCE_PROFILE_FILE} committed before Blueprint.md approval or real Plan.md tasks")
+    return problems
+
+
+def fast_mvp_profile_lock_state(project: Path) -> dict[str, Any]:
+    manifest_profile = project_profile(project)
+    profile_problem = source_profile_read_problem(project) or source_profile_invalid_problem(project)
+    source_profile = read_source_profile(project)
+    source_payload = read_source_profile_payload(project)
+    effective_profile = review_profile(project)
+    selected_before_gates = bool(source_payload.get("selected_before_gates"))
+    requested_fast_mvp = manifest_profile == "fast-mvp" or source_profile == "fast-mvp"
+    gate_reasons = profile_lock_gate_reasons(project)
+    problems = source_profile_lock_problems(project) if requested_fast_mvp else []
+    status = "inactive"
+    message = ""
+    next_action = ""
+    if effective_profile == "fast-mvp":
+        status = "active"
+        message = f"{SOURCE_PROFILE_FILE} is durably tracked before Blueprint.md approval or real Plan.md tasks."
+    elif requested_fast_mvp and profile_problem:
+        status = "blocked"
+        message = (
+            f"Fast-mvp cannot be proven because {profile_problem}. "
+            "Standard review remains required."
+        )
+        next_action = (
+            f"Restore read permission and a valid {SOURCE_PROFILE_FILE}, then rerun. "
+            "If durable pre-gate proof cannot be established, keep standard review or switch the project profile to standard."
+        )
+    elif requested_fast_mvp and selected_before_gates:
+        if gate_reasons:
+            status = "blocked"
+            message = (
+                f"Fast-mvp was selected before gates, but {SOURCE_PROFILE_FILE} is not durably tracked "
+                "before the current Blueprint.md or Plan.md gates. Standard review remains required."
+            )
+            next_action = (
+                f"Commit only {SOURCE_PROFILE_FILE} now if Blueprint.md and Plan.md gate changes are still uncommitted, "
+                "then rerun. If those gates were already committed first, keep standard review or switch the project profile to standard."
+            )
+        else:
+            status = "pending"
+            message = f"Fast-mvp is selected, but {SOURCE_PROFILE_FILE} is not durable yet."
+            next_action = f"Commit {SOURCE_PROFILE_FILE} by itself before approving Blueprint.md or adding real Plan.md tasks, then rerun."
+    elif requested_fast_mvp:
+        status = "standard-required"
+        message = (
+            f"Fast-mvp is recorded without durable pre-gate proof from {SOURCE_PROFILE_FILE}. "
+            "Standard review remains required."
+        )
+        next_action = "Keep standard review roles, or start a new fast-mvp flow before approval and planning."
+    return {
+        "status": status,
+        "manifest_profile": manifest_profile,
+        "source_profile": source_profile or None,
+        "effective_review_profile": effective_profile,
+        "selected_before_gates": selected_before_gates,
+        "gate_reasons": gate_reasons,
+        "problems": problems,
+        "message": message,
+        "next_action": next_action,
+    }
+
+
 def project_manifest_payload(project: Path, *, objective: str = "", product_slug: str = "", profile: str = "standard", root_mode: str = "dedicated") -> dict[str, Any]:
     slug = product_slug_from_objective(project, objective, product_slug)
     project_root = str(project.resolve())
     project_id = stable_json_hash({"root": project_root, "slug": slug})[:16]
     blueprint = project / BLUEPRINT_FILE
     plan = project / PLAN_FILE
+    normalized_profile = normalize_project_profile(profile)
     return {
         "schema": "star-forge.project.v1",
         "created_at": now_utc(),
@@ -501,7 +933,8 @@ def project_manifest_payload(project: Path, *, objective: str = "", product_slug
         "project_root": project_root,
         "product_slug": slug,
         "project_id": project_id,
-        "profile": profile or "standard",
+        "profile": normalized_profile,
+        "source_profile_path": SOURCE_PROFILE_FILE,
         "root_mode": root_mode or "dedicated",
         "state_machine_version": STAR_FORGE_STATE_VERSION,
         "blueprint_path": BLUEPRINT_FILE,
@@ -521,11 +954,23 @@ def ensure_project_manifest(project: Path, *, objective: str = "", product_slug:
             existing = {}
     if existing.get("schema") == "star-forge.project-redirect.v1":
         raise ForgeError(f"Refusing to overwrite the project redirect at {path}; the project lives at {existing.get('project_root')}.")
+    requested_profile = normalize_project_profile(profile) if str(profile or "").strip() else normalize_project_profile(str(existing.get("profile") or "standard"))
+    explicit_profile = bool(str(profile or "").strip())
+    if explicit_profile and requested_profile == "fast-mvp":
+        lock_reasons = profile_downgrade_lock_reasons(project)
+        if lock_reasons and not fast_mvp_profile_predates_gates(project):
+            raise ForgeError(
+                "Refusing to downgrade review profile from standard to fast-mvp after project gates exist: "
+                + ", ".join(lock_reasons)
+                + ". Start fast-mvp before approval or planning, or keep the standard review roles."
+            )
+    if explicit_profile:
+        ensure_source_profile(project, requested_profile)
     payload = project_manifest_payload(
         project,
         objective=objective,
         product_slug=product_slug or str(existing.get("product_slug") or ""),
-        profile=profile or str(existing.get("profile") or "standard"),
+        profile=requested_profile,
         root_mode=root_mode or str(existing.get("root_mode") or "dedicated"),
     )
     if existing:
@@ -541,10 +986,18 @@ def project_profile(project: Path) -> str:
     path = project / PROJECT_MANIFEST
     if path.exists():
         try:
-            return str(read_json(path).get("profile") or "standard")
+            return normalize_project_profile(str(read_json(path).get("profile") or "standard"))
         except Exception:
             return "standard"
     return "standard"
+
+
+def review_roles_for_profile(profile: str) -> list[str]:
+    return list(REVIEW_PROFILE_ROLES.get(profile or "standard") or REVIEW_PROFILE_ROLES["standard"])
+
+
+def required_review_roles(project: Path) -> list[str]:
+    return review_roles_for_profile(review_profile(project))
 
 
 # -------------------------------------------------------------- file scanning
@@ -685,6 +1138,33 @@ def release_snapshot(project: Path) -> dict[str, Any]:
     }
 
 
+def release_snapshot_unavailable(project: Path, problems: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    blueprint = project / BLUEPRINT_FILE
+    plan = project / PLAN_FILE
+    return {
+        "schema": "star-forge.release-snapshot.v1",
+        "created_at": now_utc(),
+        "git_head": git_head(project),
+        "source_hash": None,
+        "source_hash_unavailable": True,
+        "problems": list(problems),
+        "source_files": [],
+        "blueprint_hash": file_sha256(blueprint) if blueprint.exists() else None,
+        "plan_hash": file_sha256(plan) if plan.exists() else None,
+    }
+
+
+def safe_release_snapshot(project: Path) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    problem = source_hash_unavailable_problem(project)
+    if problem:
+        return release_snapshot_unavailable(project, [problem]), problem
+    try:
+        return release_snapshot(project), None
+    except (PermissionError, OSError) as exc:
+        problem = source_hash_exception_problem(exc)
+        return release_snapshot_unavailable(project, [problem]), problem
+
+
 def artifact_entry(project: Path, path: Path, *, kind: str) -> dict[str, Any]:
     candidate = path if path.is_absolute() else project / path
     entry: dict[str, Any] = {"kind": kind, "path": relative_to_project(candidate, project), "exists": candidate.exists()}
@@ -739,10 +1219,8 @@ def task_tables(lines: list[str]) -> Iterable[tuple[int, list[str], int, int]]:
         yield idx, headers, idx + 2, end
 
 
-def parse_tasks(plan_path: Path) -> list[dict[str, Any]]:
-    if not plan_path.exists():
-        raise ForgeError(f"{plan_path} does not exist")
-    lines = read_text(plan_path).splitlines()
+def parse_tasks_from_text(text: str) -> list[dict[str, Any]]:
+    lines = text.splitlines()
     tasks: list[dict[str, Any]] = []
     for header_idx, headers, start, end in task_tables(lines):
         index = {name.lower(): i for i, name in enumerate(headers)}
@@ -774,6 +1252,12 @@ def parse_tasks(plan_path: Path) -> list[dict[str, Any]]:
                 }
             )
     return tasks
+
+
+def parse_tasks(plan_path: Path) -> list[dict[str, Any]]:
+    if not plan_path.exists():
+        raise ForgeError(f"{plan_path} does not exist")
+    return parse_tasks_from_text(read_text(plan_path))
 
 
 def plan_parse_problem(plan_path: Path, tasks: Sequence[dict[str, Any]]) -> str | None:
@@ -1067,17 +1551,21 @@ def append_plan_task(plan_path: Path, row: dict[str, str]) -> bool:
 # ------------------------------------------------------------------- blueprint
 
 
-def blueprint_is_approved(project: Path) -> bool:
-    path = project / BLUEPRINT_FILE
-    if not path.exists():
-        return False
-    text = re.sub(r"\*\*|__", "", read_text(path))
+def blueprint_text_is_approved(text: str) -> bool:
+    text = re.sub(r"\*\*|__", "", text)
     if re.search(r"^\s*Status\s*[:\-—]\s*approved\b", text, re.IGNORECASE | re.MULTILINE):
         return True
     match = re.search(r"^\s*Last approved\s*[:\-—]\s*(.+)$", text, re.IGNORECASE | re.MULTILINE)
     if not match:
         return False
     return bool(re.match(r"^\d{4}-\d{2}-\d{2}\b", match.group(1).strip()))
+
+
+def blueprint_is_approved(project: Path) -> bool:
+    path = project / BLUEPRINT_FILE
+    if not path.exists():
+        return False
+    return blueprint_text_is_approved(read_text(path))
 
 
 def scope_hash(project: Path) -> str | None:
@@ -1204,7 +1692,9 @@ def cmd_verify(args: argparse.Namespace) -> int:
             proc_returncode = 124
             stdout = exc.stdout if isinstance(exc.stdout, str) else ""
             stderr = (exc.stderr if isinstance(exc.stderr, str) else "") + f"\nCommand timed out after {args.timeout} seconds."
-    verdict = "PASS" if proc_returncode == 0 else "FAIL"
+    snapshot, snapshot_problem = safe_release_snapshot(project)
+    problems = [snapshot_problem] if snapshot_problem else []
+    verdict = "PASS" if proc_returncode == 0 and not problems else "FAIL"
     payload = {
         "schema": "star-forge.verify-run.v1",
         "kind": "verify-run",
@@ -1217,9 +1707,10 @@ def cmd_verify(args: argparse.Namespace) -> int:
         "returncode": proc_returncode,
         "verdict": verdict,
         "duration_timeout_seconds": args.timeout,
-        "source_snapshot": release_snapshot(project),
+        "source_snapshot": snapshot,
         "stdout_tail": command_output_tail(stdout),
         "stderr_tail": command_output_tail(stderr),
+        "problems": problems,
         "summary": args.summary,
     }
     path = write_run_record(project, payload)
@@ -1236,7 +1727,9 @@ def fresh_passing_verify(project: Path, task: dict[str, Any]) -> bool:
     true` bypass: to fake it the model would have to write a fake-but-real-looking
     command into the plan, where the review wave and the operating card surface it.
     """
-    current = source_hash(project)
+    current, hash_problem = try_source_hash(project)
+    if hash_problem or current is None:
+        return False
     declared = normalize_command(task_verify_command(task))
     # A non-docs task with no declared Verify command is not completable: the
     # human-reviewable plan must say HOW the task is verified. Without this, an
@@ -1449,6 +1942,9 @@ def cmd_browser_run(args: argparse.Namespace) -> int:
     ensure_state_dirs(project)
     viewports: dict[str, Any] = {}
     problems: list[dict[str, Any]] = []
+    snapshot, snapshot_problem = safe_release_snapshot(project)
+    if snapshot_problem:
+        problems.append(snapshot_problem)
     manifest: dict[str, Any] | None = None
     manifest_path: Path | None = None
     browser_playwright = None
@@ -1469,6 +1965,8 @@ def cmd_browser_run(args: argparse.Namespace) -> int:
         viewports[name] = entry
         if not entry.get("exists"):
             problems.append(browser_run_problem(f"screenshot does not exist: {entry.get('path')}", rule="screenshot", path=str(entry.get("path") or "")))
+        elif args.strict and not entry.get("valid_image"):
+            problems.append(browser_run_problem(f"screenshot is not a decodable PNG/JPEG image: {entry.get('path')}", rule="screenshot", path=str(entry.get("path") or "")))
     artifact_lists = {
         "interaction_evidence": args.interaction_evidence or [],
         "console_evidence": args.console_evidence or [],
@@ -1494,7 +1992,7 @@ def cmd_browser_run(args: argparse.Namespace) -> int:
         problems.append(browser_run_problem("browser run requires interaction evidence", rule="interaction-evidence"))
     if args.require_console and not artifacts["console_evidence"]:
         problems.append(browser_run_problem("browser run requires console evidence", severity="medium", rule="console-evidence"))
-    if args.strict:
+    if args.strict and not snapshot_problem:
         if not args.live_manifest:
             problems.append(browser_run_problem("strict browser-run requires --live-manifest from the browser collector", rule="manifest-missing"))
         manifest, manifest_path = load_and_validate_live_manifest(project, args.live_manifest, problems, task=args.task, collector="browser")
@@ -1522,22 +2020,24 @@ def cmd_browser_run(args: argparse.Namespace) -> int:
             elif args.url and str(summary.get("url")) != str(args.url):
                 problems.append(browser_run_problem("browser-run URL does not match live manifest URL", rule="browser-url"))
     lease = None
-    if args.strict or args.url or args.server_lease or args.require_server_lease:
+    if not snapshot_problem and (args.strict or args.url or args.server_lease or args.require_server_lease):
         try:
             from live_collectors import browser_playwright
             parsed_url, url_problems = browser_playwright.validate_url(args.url or "")
             problems.extend(url_problems)
             if not url_problems:
-                _lease_path, lease, lease_problems = browser_playwright.validate_server_lease(
-                    project,
-                    str(args.server_lease or ""),
-                    parsed_url,
-                    source_hash(project),
-                    live_common.compute_runtime_asset_hash(project, exclude_paths=[project / SERVER_LEASE]),
-                )
-                problems.extend(lease_problems)
-                if lease:
-                    browser_allowed_local_origins = (browser_playwright.normalize_origin(parsed_url),)
+                current_source = current_live_source_hash(project, problems)
+                if current_source is not None:
+                    _lease_path, lease, lease_problems = browser_playwright.validate_server_lease(
+                        project,
+                        str(args.server_lease or ""),
+                        parsed_url,
+                        current_source,
+                        live_common.compute_runtime_asset_hash(project, exclude_paths=[project / SERVER_LEASE]),
+                    )
+                    problems.extend(lease_problems)
+                    if lease:
+                        browser_allowed_local_origins = (browser_playwright.normalize_origin(parsed_url),)
         except Exception as exc:
             problems.append(browser_run_problem(f"server lease validation failed: {exc}", rule="server-lease"))
     if args.require_server_lease and not lease:
@@ -1569,7 +2069,7 @@ def cmd_browser_run(args: argparse.Namespace) -> int:
         "viewports": viewports,
         "interaction_evidence": artifacts["interaction_evidence"],
         "console_evidence": artifacts["console_evidence"],
-        "source_snapshot": release_snapshot(project),
+        "source_snapshot": snapshot,
         "live_manifest": relative_to_project(manifest_path, project) if manifest_path else None,
         "problems": problems,
         "summary": args.summary,
@@ -1602,6 +2102,33 @@ def live_problem(message: str, *, severity: str = "high", rule: str = "live-proo
     if path:
         payload["path"] = path
     return payload
+
+
+def append_live_problem_once(problems: list[dict[str, Any]], problem: dict[str, Any] | None) -> None:
+    if not problem:
+        return
+    key = (
+        str(problem.get("rule") or ""),
+        str(problem.get("file") or problem.get("path") or ""),
+        str(problem.get("message") or ""),
+    )
+    for item in problems:
+        existing = (
+            str(item.get("rule") or ""),
+            str(item.get("file") or item.get("path") or ""),
+            str(item.get("message") or ""),
+        )
+        if existing == key:
+            return
+    problems.append(dict(problem))
+
+
+def current_live_source_hash(project: Path, problems: list[dict[str, Any]]) -> str | None:
+    current, problem = try_source_hash(project)
+    if problem:
+        append_live_problem_once(problems, problem)
+        return None
+    return current
 
 
 def live_has_blockers(problems: Sequence[dict[str, Any]]) -> bool:
@@ -1990,11 +2517,12 @@ def load_and_validate_live_manifest(
             if item.get("blocking") or severity in BLOCKING_SEVERITIES:
                 msg = str(item.get("message") or "manifest contains a blocking problem")
                 problems.append(live_problem(msg, severity=severity or "high", rule=str(item.get("rule") or "manifest-problem"), path=str(item.get("path") or rel)))
-    current_source = source_hash(project)
-    for field in ("source_hash_before", "source_hash_after"):
-        value = str(payload.get(field) or "")
-        if value != current_source:
-            problems.append(live_problem(f"manifest {field} does not match current source hash", rule="manifest-source", path=rel))
+    current_source = current_live_source_hash(project, problems)
+    if current_source is not None:
+        for field in ("source_hash_before", "source_hash_after"):
+            value = str(payload.get(field) or "")
+            if value != current_source:
+                problems.append(live_problem(f"manifest {field} does not match current source hash", rule="manifest-source", path=rel))
     current_runtime = live_common.compute_runtime_asset_hash(project)
     if str(payload.get("runtime_asset_hash") or "") != current_runtime:
         problems.append(live_problem("manifest runtime_asset_hash does not match current runtime assets", rule="manifest-runtime", path=rel))
@@ -2303,11 +2831,14 @@ def validate_preview_server_lease_artifact(
         problems.extend(dict(item) for item in url_problems)
         if url_problems:
             return False
+        current_source = current_live_source_hash(project, problems)
+        if current_source is None:
+            return False
         _lease_path, lease_payload, lease_problems = browser_playwright.validate_server_lease(
             project,
             str(lease_path),
             parsed_url,
-            source_hash(project),
+            current_source,
             live_common.compute_runtime_asset_hash(project, exclude_paths=[project / SERVER_LEASE]),
         )
         problems.extend(dict(item) for item in lease_problems)
@@ -2341,18 +2872,21 @@ def preview_allow_local_for_url(
     return lease_cache[url]
 
 
-def deployment_bound_to_current(project: Path, deployment: Any) -> bool:
+def deployment_bound_to_current(project: Path, deployment: Any, *, current_source_hash: str | None = None) -> bool:
     if not isinstance(deployment, dict):
         return False
-    current_source = source_hash(project)
-    for key in ("source_hash", "sourceHash", "source_hash_after", "sourceHashAfter"):
-        if str(deployment.get(key) or "") == current_source:
-            return not dirty_paths_missing_from_source_snapshot(project)
+    has_source_binding = any(str(deployment.get(key) or "") for key in ("source_hash", "sourceHash", "source_hash_after", "sourceHashAfter"))
+    if current_source_hash is not None:
+        for key in ("source_hash", "sourceHash", "source_hash_after", "sourceHashAfter"):
+            if str(deployment.get(key) or "") == current_source_hash:
+                return not dirty_paths_missing_from_source_snapshot(project)
     head = git_head(project)
     if head and tree_clean_for_commit_binding(project):
         for key in ("commit_sha", "commitSha", "head_sha", "headSha", "git_head", "gitHead"):
             if str(deployment.get(key) or "") == head:
                 return True
+    if current_source_hash is None and has_source_binding:
+        return True
     return False
 
 
@@ -2369,6 +2903,10 @@ def write_live_proof_record(
     artifacts: list[dict[str, Any]] | None = None,
     summary: str = "",
 ) -> int:
+    snapshot, snapshot_problem = safe_release_snapshot(project)
+    problems = list(problems)
+    if snapshot_problem:
+        append_live_problem_once(problems, snapshot_problem)
     blocking = live_has_blockers(problems)
     verdict = "FAIL" if blocking else "PASS"
     safe_inputs = {key: value for key, value in inputs.items() if key != "func"}
@@ -2381,7 +2919,7 @@ def write_live_proof_record(
         "strict": bool(strict),
         "inputs": redact(safe_inputs),
         "verdict": verdict,
-        "source_snapshot": release_snapshot(project),
+        "source_snapshot": snapshot,
         "runtime_asset_hash": live_common.compute_runtime_asset_hash(project),
         "manifest": live_rel(project, manifest_path) if manifest_path else None,
         "collector": manifest.get("collector") if isinstance(manifest, dict) else None,
@@ -2511,7 +3049,8 @@ def validate_preview_proof_artifacts(
         require_object=True,
     )
     append_artifact_once(artifacts, deployment_entry)
-    if deployment_payload is not None and not deployment_bound_to_current(project, deployment_payload):
+    current_source = current_live_source_hash(project, problems)
+    if deployment_payload is not None and not deployment_bound_to_current(project, deployment_payload, current_source_hash=current_source):
         problems.append(live_problem("deployment metadata is not bound to the current source", rule="preview-source-binding", path=deployment_entry.get("path", "") if deployment_entry else ""))
     smoke_entry, smoke_payload = validate_manifest_bound_artifact_arg(
         project,
@@ -2795,17 +3334,19 @@ def cmd_native_ios_proof(args: argparse.Namespace) -> int:
                 udid="",
                 problems=problems,
             )
-            _transcript_summary, transcript_problems, _unavailable = native_ios.validate_transcript(
-                transcript_payload,
-                session_payload,
-                scheme=args.scheme,
-                simulator=args.simulator,
-                current_source_hash=source_hash(project),
-                has_screenshot=screenshot_entry is not None,
-                has_ui_snapshot=snapshot_entry is not None,
-                args=validator_args,
-            )
-            problems.extend(dict(item) for item in transcript_problems)
+            current_source = current_live_source_hash(project, problems)
+            if current_source is not None:
+                _transcript_summary, transcript_problems, _unavailable = native_ios.validate_transcript(
+                    transcript_payload,
+                    session_payload,
+                    scheme=args.scheme,
+                    simulator=args.simulator,
+                    current_source_hash=current_source,
+                    has_screenshot=screenshot_entry is not None,
+                    has_ui_snapshot=snapshot_entry is not None,
+                    args=validator_args,
+                )
+                problems.extend(dict(item) for item in transcript_problems)
         except Exception as exc:
             problems.append(live_problem(f"native iOS transcript validation failed: {exc}", rule="native-ios-transcript"))
     if not summary.get("app_identity"):
@@ -3209,14 +3750,14 @@ def security_clean_problem(message: str, *, path: str = "") -> dict[str, Any]:
     return live_problem(message, rule="security-clean-proof", path=path)
 
 
-def source_binding_is_fresh(project: Path, binding: Mapping[str, Any]) -> bool:
-    current_source = source_hash(project)
-    if str(binding.get("source_hash") or "") == current_source:
+def source_binding_is_fresh(project: Path, binding: Mapping[str, Any], *, current_source_hash: str | None = None) -> bool:
+    has_source_hash = bool(str(binding.get("source_hash") or ""))
+    if current_source_hash is not None and str(binding.get("source_hash") or "") == current_source_hash:
         return not dirty_paths_missing_from_source_snapshot(project)
     commit_sha = str(binding.get("commit_sha") or "")
     head = git_head(project)
     if not commit_sha or not head or commit_sha != head:
-        return False
+        return current_source_hash is None and has_source_hash
     return tree_clean_for_commit_binding(project)
 
 
@@ -3273,6 +3814,7 @@ def validate_clean_security_artifacts(
     normalized = payloads.get("normalized-findings")
     redaction = payloads.get("redaction-report")
     summary = live_manifest_summary(manifest)
+    current_source = current_live_source_hash(project, problems)
 
     if isinstance(normalized, dict):
         if normalized.get("schema") != SECURITY_FINDINGS_SCHEMA:
@@ -3344,7 +3886,7 @@ def validate_clean_security_artifacts(
         if not handoff.get("scan_scope"):
             problems.append(live_problem("security proof requires scan scope", rule="security-scope", path=handoff_path))
         source_binding = handoff.get("source_binding")
-        if not isinstance(source_binding, dict) or not source_binding_is_fresh(project, source_binding):
+        if not isinstance(source_binding, dict) or not source_binding_is_fresh(project, source_binding, current_source_hash=current_source):
             problems.append(live_problem("security proof requires a fresh source_hash or commit binding", rule="security-source-binding", path=handoff_path))
         handoff_input_hash = handoff.get("input_hash")
         if isinstance(handoff_input_hash, dict) and isinstance(input_hash, dict):
@@ -4026,7 +4568,22 @@ def load_review_findings(project: Path, scope: str) -> tuple[list[dict[str, Any]
         if not isinstance(payload, dict):
             problems.append({"severity": "high", "rule": "review-findings-shape", "file": rel, "message": "reviewer findings file must be a JSON object"})
             continue
-        role = str(payload.get("role") or path.stem.replace(".findings", ""))
+        payload_role = payload.get("role")
+        if not isinstance(payload_role, str) or not payload_role.strip():
+            problems.append({"severity": "high", "rule": "review-findings-shape", "file": rel, "message": "reviewer findings file must contain a top-level `role` string"})
+            continue
+        role = payload_role.strip()
+        if role not in KNOWN_REVIEW_ROLES:
+            problems.append({"severity": "high", "rule": "review-findings-shape", "file": rel, "message": f"reviewer findings role `{role}` is not a known review role"})
+            continue
+        expected_name = f"{role}.findings.json"
+        if path.name != expected_name:
+            problems.append({"severity": "high", "rule": "review-findings-shape", "file": rel, "message": f"reviewer findings file `{path.name}` must match payload role `{role}` as `{expected_name}`"})
+            continue
+        source_attestation = payload.get("source_hash")
+        if not isinstance(source_attestation, str) or not source_attestation.strip():
+            problems.append({"severity": "high", "rule": "review-findings-shape", "file": rel, "message": "reviewer findings file must contain a top-level `source_hash` string"})
+            continue
         raw = payload.get("findings")
         if not isinstance(raw, list):
             problems.append({"severity": "high", "rule": "review-findings-shape", "file": rel, "message": "reviewer findings file must contain a `findings` array"})
@@ -4055,7 +4612,7 @@ def load_review_findings(project: Path, scope: str) -> tuple[list[dict[str, Any]
                 "path": rel,
                 "role": role,
                 "agent_id": payload.get("agent_id"),
-                "declared_source_hash": str(payload.get("source_hash") or ""),
+                "declared_source_hash": source_attestation,
                 "findings": normalized,
             }
         )
@@ -4250,28 +4807,78 @@ def secret_scan_findings(project: Path) -> list[dict[str, Any]]:
     return out
 
 
-def known_subagent_ids(project: Path) -> set[str]:
-    """Agent ids the hook layer actually observed starting, from the append-only
-    subagent ledger. Empty when hooks were never live (advisory mode)."""
-    path = project / SUBAGENT_EVENTS
-    ids: set[str] = set()
+def jsonl_payloads(path: Path) -> list[dict[str, Any]]:
+    payloads: list[dict[str, Any]] = []
     if not path.exists():
-        return ids
+        return payloads
     try:
         for line in read_text(path).splitlines():
             if not line.strip():
                 continue
             payload = json.loads(line)
-            if payload.get("event") == "SubagentStart" and payload.get("agent_id"):
-                ids.add(str(payload["agent_id"]))
+            if isinstance(payload, dict):
+                payloads.append(payload)
     except Exception:
-        return ids
+        return []
+    return payloads
+
+
+def subagent_ids_from(path: Path) -> set[str]:
+    ids: set[str] = set()
+    for payload in jsonl_payloads(path):
+        if payload.get("event") == "SubagentStart" and payload.get("agent_id"):
+            ids.add(str(payload["agent_id"]))
     return ids
+
+
+def local_subagent_ids(project: Path) -> set[str]:
+    return subagent_ids_from(project / SUBAGENT_EVENTS)
+
+
+def known_subagent_ids(project: Path) -> set[str]:
+    """Trusted subagent ids that could qualify review or done as witnessed.
+
+    This version has no supported host-controlled witness source. Project-local
+    subagent events remain useful diagnostics, but they cannot witness reviewer
+    files or completion.
+    """
+    return set()
+
+
+def review_payload_source_hash_unavailable(project: Path, scope: str, problem: dict[str, Any]) -> dict[str, Any]:
+    profile_lock = fast_mvp_profile_lock_state(project)
+    required_roles = list(REVIEW_PROFILE_ROLES["standard"])
+    return {
+        "schema": "star-forge.review.v2",
+        "created_at": now_utc(),
+        "project": str(project),
+        "scope": scope,
+        "source_hash": None,
+        "source_hash_unavailable": True,
+        "problems": [problem],
+        "manifest_profile": project_profile(project),
+        "source_profile": read_source_profile(project) or None,
+        "review_profile": "standard",
+        "profile_lock": profile_lock,
+        "reviewer_roles": [],
+        "reviewer_count": 0,
+        "required_review_roles": required_roles,
+        "required_reviewer_count": len(required_roles),
+        "missing_review_roles": required_roles,
+        "stale_roles": [],
+        "reviewers_witnessed": False,
+        "findings": [],
+        "fix_queue": [problem],
+        "waived": sorted(load_waives(project, scope)),
+        "file_problems": [problem],
+    }
 
 
 def merge_review(project: Path, scope: str) -> dict[str, Any]:
     files, file_problems = load_review_findings(project, scope)
-    current = source_hash(project)
+    current, hash_problem = try_source_hash(project)
+    if hash_problem or current is None:
+        return review_payload_source_hash_unavailable(project, scope, hash_problem or source_hash_exception_problem(ForgeError("source_hash unavailable")))
     # Freshness is keyed on the source_hash each reviewer ATTESTED in its own file
     # (the spawn prompt hands it the current hash). A reviewer file counts only if
     # its attested hash equals the current tree. This survives deleting merged.json
@@ -4289,9 +4896,9 @@ def merge_review(project: Path, scope: str) -> dict[str, Any]:
             continue
         fresh_roles.append(entry["role"])
         fresh_findings.extend(entry["findings"])
-        # Witness check: when hooks observed real sub-agents, every fresh reviewer
-        # file should carry one of those ids. A self-authored file with no/unknown
-        # id downgrades the verdict to advisory rather than blocking the build.
+        # Witness check: a future host-controlled source may supply known ids.
+        # In this version known_ids is empty, so local reviewer agent_id values are
+        # provenance diagnostics only and the verdict remains advisory.
         if known_ids and str(entry.get("agent_id") or "") not in known_ids:
             reviewers_witnessed = False
     if not known_ids:
@@ -4304,14 +4911,25 @@ def merge_review(project: Path, scope: str) -> dict[str, Any]:
         if finding["severity"] in BLOCKING_SEVERITIES and not finding["waived"]:
             open_blocking.append(finding)
     reviewer_roles = sorted(set(fresh_roles))
+    required_roles = required_review_roles(project)
+    missing_roles = [role for role in required_roles if role not in reviewer_roles]
+    manifest_profile = project_profile(project)
+    effective_profile = review_profile(project)
     return {
         "schema": "star-forge.review.v2",
         "created_at": now_utc(),
         "project": str(project),
         "scope": scope,
         "source_hash": current,
+        "manifest_profile": manifest_profile,
+        "source_profile": read_source_profile(project) or None,
+        "review_profile": effective_profile,
+        "profile_lock": fast_mvp_profile_lock_state(project),
         "reviewer_roles": reviewer_roles,
         "reviewer_count": len(reviewer_roles),
+        "required_review_roles": required_roles,
+        "required_reviewer_count": len(required_roles),
+        "missing_review_roles": missing_roles,
         "stale_roles": sorted(set(stale_roles)),
         "reviewers_witnessed": reviewers_witnessed,
         "findings": merged,
@@ -4338,28 +4956,39 @@ def load_merged_review(project: Path, scope: str) -> dict[str, Any] | None:
 
 
 def review_findings_for_done(project: Path, tasks: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Done-time review gate: a fresh merged review with an empty fix queue."""
+    """Done-time review gate rebuilt from reviewer files and the current tree."""
     if not all_tasks_complete(tasks):
         return []
+    hash_problem = source_hash_unavailable_problem(project)
+    if hash_problem:
+        return [hash_problem]
     scope = scope_hash(project) or "noscope"
-    merged = load_merged_review(project, scope)
-    if merged is None:
+    if load_merged_review(project, scope) is None:
         return [{"severity": "high", "rule": "review-not-performed", "file": str(REVIEWS_DIR), "message": "No review wave recorded for the current scope. Spawn starforge-reviewer agents, then run `review`."}]
+    merged = merge_review(project, scope)
     problems = merged.get("file_problems") or []
     if problems:
         first = next((item for item in problems if isinstance(item, dict)), {})
         return [{"severity": "high", "rule": "review-findings-invalid", "file": first.get("file", str(REVIEWS_DIR)), "message": f"A reviewer findings file is malformed and its findings cannot be trusted: {first.get('message')}. Fix the file and rerun `review`."}]
-    if merged.get("source_hash") != source_hash(project):
-        return [{"severity": "high", "rule": "review-stale", "file": str(REVIEWS_DIR), "message": "The recorded review is stale (source changed since review). Re-spawn reviewers and rerun `review`."}]
     if not merged.get("reviewer_roles"):
         if merged.get("stale_roles"):
             return [{"severity": "high", "rule": "review-stale", "file": str(REVIEWS_DIR), "message": "Every reviewer findings file predates the current source; re-spawn reviewers (rewrite their findings files) and rerun `review`."}]
         return [{"severity": "high", "rule": "review-empty", "file": str(REVIEWS_DIR), "message": "No reviewer findings files were present for the review; spawn at least one starforge-reviewer."}]
     queue = [item for item in (merged.get("fix_queue") or []) if isinstance(item, dict)]
-    raw_queue = merged.get("fix_queue") or []
-    if raw_queue and not queue:
-        # A hand-corrupted merged.json with non-dict queue entries: fail closed.
-        return [{"severity": "high", "rule": "review-findings-invalid", "file": str(REVIEWS_DIR), "message": "The merged review fix queue is corrupt; re-run `review` to regenerate it."}]
+    required_roles = required_review_roles(project)
+    reviewer_roles = {str(role) for role in (merged.get("reviewer_roles") or [])}
+    missing_roles = [role for role in required_roles if role not in reviewer_roles]
+    if missing_roles:
+        return [{
+            "severity": "high",
+            "rule": "reviewer-count-insufficient",
+            "file": str(REVIEWS_DIR),
+            "message": (
+                f"Review profile `{review_profile(project)}` requires {len(required_roles)} fresh reviewer role(s): "
+                f"{', '.join(required_roles)}. Missing: {', '.join(missing_roles)}. "
+                "Spawn the missing starforge-reviewer agents and rerun `review`."
+            ),
+        }]
     if queue:
         first = queue[0]
         return [{"severity": "high", "rule": "review-fix-queue-open", "file": str(REVIEWS_DIR), "message": f"{len(queue)} unresolved blocking review finding(s); first: {first.get('id')} {first.get('title')} ({first.get('file')}). Fix and re-review, or waive with a reason."}]
@@ -4379,8 +5008,9 @@ def cmd_review(args: argparse.Namespace) -> int:
     print(json.dumps(payload, indent=2))
     blocking = payload.get("fix_queue") or []
     no_reviewers = not payload.get("reviewer_roles")
+    missing_reviewers = bool(payload.get("missing_review_roles"))
     bad_files = bool(payload.get("file_problems"))
-    return 0 if (not blocking and not no_reviewers and not bad_files) or not args.strict else 1
+    return 0 if (not blocking and not no_reviewers and not missing_reviewers and not bad_files) or not args.strict else 1
 
 
 def cmd_waive(args: argparse.Namespace) -> int:
@@ -4408,6 +5038,12 @@ def cmd_complete_task(args: argparse.Namespace) -> int:
     tasks = parse_tasks(plan_path)
     task = next((item for item in tasks if item.get("id") == args.task), None)
     findings: list[dict[str, Any]] = []
+    hash_problem = source_hash_unavailable_problem(project)
+    _current_source_hash, snapshot_problem = try_source_hash(project)
+    if hash_problem:
+        findings.append(hash_problem)
+    elif snapshot_problem:
+        findings.append(snapshot_problem)
     if task is None:
         findings.append({"severity": "critical", "rule": "task-missing", "message": f"Task {args.task} does not exist."})
     else:
@@ -4417,7 +5053,9 @@ def cmd_complete_task(args: argparse.Namespace) -> int:
         unmet = [dep for dep in parse_depends(task.get("depends", "")) if dep not in complete_ids]
         if unmet:
             findings.append({"severity": "high", "rule": "task-dependencies-incomplete", "message": f"Task {args.task} has incomplete dependencies: {', '.join(unmet)}."})
-        if task_allows_noop_verification(task):
+        if hash_problem or snapshot_problem:
+            pass
+        elif task_allows_noop_verification(task):
             if not has_noop_verify(project, args.task):
                 findings.append({"severity": "high", "rule": "verify-noop-missing", "message": f"Docs task {args.task} needs a recorded no-op verify run."})
         elif not fresh_passing_verify(project, task):
@@ -4434,6 +5072,7 @@ def cmd_complete_task(args: argparse.Namespace) -> int:
     summary = args.summary or f"Task {args.task} completed with verified evidence."
     update_plan_task_row(plan_path, args.task, {"Status": "complete", "Evidence": evidence or summary})
     completion_artifact = project / STATE_SUBDIR / f"complete-task-{slugify(args.task)}.json"
+    snapshot, _snapshot_problem = safe_release_snapshot(project)
     payload = {
         "schema": "star-forge.complete-task.v1",
         "created_at": now_utc(),
@@ -4441,7 +5080,7 @@ def cmd_complete_task(args: argparse.Namespace) -> int:
         "verdict": "COMPLETE",
         "changed_files": args.changed_file or [],
         "summary": summary,
-        "source_snapshot": release_snapshot(project),
+        "source_snapshot": snapshot,
     }
     write_json(completion_artifact, payload)
     append_jsonl(project / LEDGER_FILE, {"schema": "star-forge.ledger.v1", "timestamp": now_utc(), "event": "task-complete", "task": args.task, "summary": summary, "artifacts": args.changed_file or []})
@@ -4455,6 +5094,8 @@ def cmd_complete_task(args: argparse.Namespace) -> int:
 def done_payload(project: Path) -> dict[str, Any]:
     problems: list[dict[str, Any]] = []
     tasks: list[dict[str, Any]] = []
+    profile_lock = fast_mvp_profile_lock_state(project)
+    hash_problem = source_hash_unavailable_problem(project)
     if not blueprint_is_approved(project):
         problems.append({"severity": "critical", "message": "Blueprint.md is missing or not explicitly approved"})
     plan_path = project / PLAN_FILE
@@ -4473,13 +5114,16 @@ def done_payload(project: Path) -> dict[str, Any]:
                 problems.append({"severity": "high", "message": "not all Plan.md tasks are complete"})
         except ForgeError as exc:
             problems.append({"severity": "critical", "message": str(exc)})
-    for finder in (verify_findings, browser_findings):
-        for finding in finder(project, tasks):
+    if hash_problem:
+        problems.append(finding_problem(hash_problem))
+    else:
+        for finder in (verify_findings, browser_findings):
+            for finding in finder(project, tasks):
+                if finding["severity"] in BLOCKING_SEVERITIES:
+                    problems.append(finding_problem(finding))
+        for finding in review_findings_for_done(project, tasks):
             if finding["severity"] in BLOCKING_SEVERITIES:
                 problems.append(finding_problem(finding))
-    for finding in review_findings_for_done(project, tasks):
-        if finding["severity"] in BLOCKING_SEVERITIES:
-            problems.append(finding_problem(finding))
     dirty = source_dirty_entries(git_status(project))
     if dirty:
         problems.append({"severity": "medium", "message": "working tree is not clean", "files": dirty[:30]})
@@ -4488,24 +5132,38 @@ def done_payload(project: Path) -> dict[str, Any]:
     # passing predicate legitimately supersedes the old proof. Amend re-entry
     # (scaffolding the AMEND task) is `run`'s job.
     proof = load_proof(project)
-    drift = detect_drift(project, proof)
+    if hash_problem:
+        drift = source_hash_unavailable_state(profile_lock, problems=[hash_problem])
+    else:
+        try:
+            drift = detect_drift(project, proof)
+        except (PermissionError, OSError) as exc:
+            hash_problem = source_hash_exception_problem(exc)
+            problems.append(finding_problem(hash_problem))
+            drift = source_hash_unavailable_state(profile_lock, problems=[hash_problem])
+    snapshot, snapshot_problem = safe_release_snapshot(project)
+    if snapshot_problem and not hash_problem:
+        problems.append(finding_problem(snapshot_problem))
     blocking = blocking_items(problems)
     enforcement = enforcement_mode(project)
-    # "Witnessed" is honest only when the hook layer actually observed sub-agents
-    # for the work that claims to have used them. All state is local files, so this
-    # is an integrity signal (hooks were live and saw the delegation/review), not a
-    # cryptographic proof — but it can no longer be flipped by appending one
-    # hook-event line while building entirely inline.
+    # Project-local JSONL ledgers are useful diagnostics, but they are advisory
+    # because the same actors being evaluated can write them.
     scope = scope_hash(project) or "noscope"
-    merged = load_merged_review(project, scope)
+    merged = None if hash_problem else (merge_review(project, scope) if load_merged_review(project, scope) is not None else None)
     review_performed = bool(merged and merged.get("reviewer_roles"))
     review_witnessed = bool(merged and merged.get("reviewers_witnessed"))
     delegated_complete = any(task.get("status") == "complete" and task_requires_real_workers(task) for task in tasks)
-    subagent_observed = bool(known_subagent_ids(project))
+    hooks = hooks_liveness(project)
+    trusted_subagent_observed = bool(known_subagent_ids(project))
+    local_subagent_observed = bool(local_subagent_ids(project))
     waive_count = len(merged.get("waived") or []) if merged else 0
     witness = {
         "hooks_live": enforcement == "witnessed",
-        "subagent_observed": subagent_observed,
+        "local_hooks_observed": bool(hooks.get("local_events_observed")),
+        "trusted_hooks_observed": bool(hooks.get("events_observed")),
+        "subagent_observed": trusted_subagent_observed,
+        "local_subagent_observed": local_subagent_observed,
+        "trusted_subagent_observed": trusted_subagent_observed,
         "delegated_complete": delegated_complete,
         "review_performed": review_performed,
         "review_witnessed": review_witnessed,
@@ -4513,11 +5171,11 @@ def done_payload(project: Path) -> dict[str, Any]:
     }
     advisory_reasons: list[str] = []
     if enforcement != "witnessed":
-        advisory_reasons.append("hooks were not live this session")
-    if delegated_complete and not subagent_observed:
-        advisory_reasons.append("delegated tasks show no observed sub-agent (work may have been done inline)")
+        advisory_reasons.append("no trusted hook witness source is enabled in this version")
+    if delegated_complete and not trusted_subagent_observed:
+        advisory_reasons.append("delegated tasks lack a trusted sub-agent witness (local events are diagnostic only)")
     if review_performed and not review_witnessed:
-        advisory_reasons.append("review findings were not witnessed sub-agent output")
+        advisory_reasons.append("review findings lack a trusted sub-agent witness")
     if blocking:
         verdict = "NEEDS_CHANGES"
     elif advisory_reasons:
@@ -4536,9 +5194,10 @@ def done_payload(project: Path) -> dict[str, Any]:
         "witness": witness,
         "task_count": len(tasks),
         "counts": task_counts(tasks),
-        "snapshot": release_snapshot(project),
+        "snapshot": snapshot,
         "drift": drift,
         "problems": problems,
+        "source_hash_unavailable": bool(hash_problem or snapshot_problem),
     }
 
 
@@ -4561,12 +5220,48 @@ def detect_drift(project: Path, proof: dict[str, Any] | None) -> dict[str, Any]:
     scope_changed = (proof.get("scope_hash") or "noscope") != current_scope
     changed: list[str] = []
     if source_changed:
-        changed = source_dirty_entries(git_status(project))[:30] or _diff_since(project, proof.get("head"))
+        changed = source_dirty_entries(git_status(project)) or _diff_since(project, proof.get("head"))
     return {
         "detected": bool(source_changed or scope_changed),
         "source_changed": source_changed,
         "scope_changed": scope_changed,
         "changed_files": changed,
+    }
+
+
+def completed_amendment_covering_drift(project: Path, tasks: Sequence[dict[str, Any]], drift: dict[str, Any]) -> str | None:
+    if not drift.get("detected"):
+        return None
+    if any(task.get("id", "").startswith("AMEND-") and task.get("status") != "complete" for task in tasks):
+        return None
+    current = source_hash(project)
+    completed_amends = (
+        task for task in tasks
+        if str(task.get("id", "")).startswith("AMEND-") and task.get("status") == "complete"
+    )
+    for task in sorted(completed_amends, key=lambda item: str(item.get("id") or ""), reverse=True):
+        task_id = str(task.get("id") or "")
+        path = project / STATE_SUBDIR / f"complete-task-{slugify(task_id)}.json"
+        try:
+            payload = read_json(path)
+        except Exception:
+            continue
+        snapshot = payload.get("source_snapshot")
+        if (
+            payload.get("task") == task_id
+            and payload.get("verdict") == "COMPLETE"
+            and isinstance(snapshot, dict)
+            and snapshot.get("source_hash") == current
+        ):
+            return task_id
+    return None
+
+
+def annotate_drift_coverage(project: Path, tasks: Sequence[dict[str, Any]], drift: dict[str, Any]) -> dict[str, Any]:
+    covered_by = completed_amendment_covering_drift(project, tasks, drift)
+    return dict(drift) | {
+        "covered_by_completed_amendment": covered_by,
+        "actionable": bool(drift.get("detected") and not covered_by),
     }
 
 
@@ -4576,7 +5271,7 @@ def _diff_since(project: Path, head: str | None) -> list[str]:
     code, out, _ = run_git(["diff", "--name-only", f"{head}..HEAD"], project)
     if code != 0:
         return []
-    return [line.strip() for line in out.splitlines() if line.strip()][:30]
+    return [line.strip() for line in out.splitlines() if line.strip()]
 
 
 def cmd_done(args: argparse.Namespace) -> int:
@@ -4724,19 +5419,20 @@ def ensure_state_dirs(project: Path) -> None:
 
 
 def hooks_liveness(project: Path) -> dict[str, Any]:
-    events_path = project / HOOK_EVENTS
-    last_event_at: str | None = None
-    if events_path.exists():
-        try:
-            lines = [line for line in read_text(events_path).splitlines() if line.strip()]
-            if lines:
-                last_event_at = str(json.loads(lines[-1]).get("timestamp") or "") or None
-        except Exception:
-            last_event_at = None
+    def last_timestamp(path: Path) -> str | None:
+        events = jsonl_payloads(path)
+        if not events:
+            return None
+        return str(events[-1].get("timestamp") or "") or None
+
+    local_last_event_at = last_timestamp(project / HOOK_EVENTS)
     return {
-        "events_observed": last_event_at is not None,
-        "last_event_at": last_event_at,
-        "remediation": None if last_event_at else "No hook events observed yet. Run /hooks in Codex and trust the Star Forge entries; trust is re-required after any hooks.json change.",
+        "events_observed": False,
+        "last_event_at": None,
+        "local_events_observed": local_last_event_at is not None,
+        "local_last_event_at": local_last_event_at,
+        "trusted_witness_source": None,
+        "remediation": "No trusted hook witness source is enabled in this version. Project-local hook events are advisory diagnostics.",
     }
 
 
@@ -4894,8 +5590,12 @@ def cmd_init(args: argparse.Namespace) -> int:
     else:
         skipped.append(".git/ already exists")
     ensure_state_dirs(project)
-    ensure_project_manifest(project, product_slug=args.product_slug or "")
+    requested_profile = "fast-mvp" if getattr(args, "fast_mvp", False) else str(getattr(args, "profile", "") or "")
+    profile_selected_before_gates = requested_profile == "fast-mvp" and not profile_downgrade_lock_reasons(project)
+    ensure_project_manifest(project, product_slug=args.product_slug or "", profile=requested_profile)
     created.append(str(PROJECT_MANIFEST))
+    if requested_profile:
+        created.append(SOURCE_PROFILE_FILE)
     for template_name, target_name in [("Blueprint.md", BLUEPRINT_FILE), ("Plan.md", PLAN_FILE)]:
         target = project / target_name
         if args.force or not target.exists():
@@ -4921,7 +5621,19 @@ def cmd_init(args: argparse.Namespace) -> int:
         for role in agent_role_names():
             write_text(agents_dir / f"{AGENT_NAME_PREFIX}{role}.toml", render_agent_toml(role))
         created.append(".codex/agents/")
-    append_jsonl(project / LEDGER_FILE, {"schema": "star-forge.ledger.v1", "timestamp": now_utc(), "event": "setup", "summary": "Initialized Star Forge project", "artifacts": [BLUEPRINT_FILE, PLAN_FILE, str(LEDGER_FILE)]})
+    setup_record = {
+        "schema": "star-forge.ledger.v1",
+        "timestamp": now_utc(),
+        "event": "setup",
+        "summary": "Initialized Star Forge project",
+        "profile": normalize_project_profile(requested_profile or "standard"),
+        "profile_selected_before_gates": profile_selected_before_gates,
+        "artifacts": [BLUEPRINT_FILE, PLAN_FILE, str(LEDGER_FILE)],
+    }
+    profile_path = source_profile_path(project)
+    if profile_path.exists():
+        setup_record["source_profile_sha256"] = file_sha256(profile_path)
+    append_jsonl(project / LEDGER_FILE, setup_record)
     print(json.dumps({"schema": "star-forge.init.v1", "created": created, "skipped": skipped, "project": str(project)}, indent=2))
     return 0
 
@@ -4929,17 +5641,38 @@ def cmd_init(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------- state engine
 
 
-def reviewer_spawn_prompt(project: Path, scope: str) -> str:
-    rel = relative_to_project(reviews_scope_dir(project, scope), project)
-    sh = source_hash(project)
+def reviewer_spawn_prompt(project: Path, scope: str, role: str = "correctness", *, source_hash_value: str | None = None) -> str:
+    rel = relative_to_project(reviews_scope_dir(project, scope) / f"{role}.findings.json", project)
+    if source_hash_value is None:
+        source_hash_value, hash_problem = try_source_hash(project)
+        if hash_problem or source_hash_value is None:
+            message = (hash_problem or source_hash_exception_problem(ForgeError("source_hash unavailable"))).get("message")
+            raise ForgeError(str(message))
+    sh = source_hash_value
+    lens = REVIEW_ROLE_LENSES.get(role, "project quality risks, regressions, and release blockers")
+    sample = json.dumps(
+        {
+            "role": role,
+            "agent_id": "<your real thread id>",
+            "source_hash": sh,
+            "findings": [
+                {
+                    "severity": "high",
+                    "file": "...",
+                    "title": "...",
+                    "detail": "...",
+                    "suggested_fix": "...",
+                }
+            ],
+        },
+        separators=(",", ":"),
+    ).replace('"', '\\"')
     return (
-        f"spawn_agent {AGENT_NAME_PREFIX}reviewer \"[SF:review] Review the diff against the approved Blueprint. "
-        f"Write findings ONLY to {rel}/<your-role>.findings.json as "
-        '{\\\"role\\\":\\\"correctness\\\",\\\"agent_id\\\":\\\"<your real thread id>\\\",'
-        f'\\\"source_hash\\\":\\\"{sh}\\\",'
-        '\\\"findings\\\":[{\\\"severity\\\":\\\"high\\\",\\\"file\\\":\\\"...\\\",\\\"title\\\":\\\"...\\\",\\\"detail\\\":\\\"...\\\",\\\"suggested_fix\\\":\\\"...\\\"}]}. '
+        f"spawn_agent {AGENT_NAME_PREFIX}reviewer \"[SF:review:{role}] Review the diff against the approved Blueprint with the {role} lens: {lens}. "
+        f"Write findings ONLY to {rel} as {sample}. "
+        f'The role MUST be exactly {role}. '
         f'The source_hash MUST be exactly {sh} (it attests you reviewed the current tree). '
-        'Include your real thread id as agent_id so the review counts as witnessed. Do not edit source. Report an empty findings array if clean.\"'
+        'Include your real thread id as agent_id for provenance diagnostics only; local ids do not create unqualified COMPLETE in this version. Do not edit source. Report an empty findings array if clean.\"'
     )
 
 
@@ -4962,19 +5695,45 @@ def spawn_plan(project: Path, tasks: Sequence[dict[str, Any]], phase: str) -> li
                 break
     elif phase == "review":
         scope = scope_hash(project) or "noscope"
-        plan.append({"task": "review-wave", "agent": f"{AGENT_NAME_PREFIX}reviewer", "tag": "SF:review", "spawn": reviewer_spawn_prompt(project, scope)})
+        current_source_hash, hash_problem = try_source_hash(project)
+        if hash_problem or current_source_hash is None:
+            return plan
+        for role in required_review_roles(project):
+            findings_file = relative_to_project(reviews_scope_dir(project, scope) / f"{role}.findings.json", project)
+            plan.append({
+                "task": "review-wave",
+                "role": role,
+                "findings_file": findings_file,
+                "agent": f"{AGENT_NAME_PREFIX}reviewer",
+                "tag": f"SF:review:{role}",
+                "spawn": reviewer_spawn_prompt(project, scope, role, source_hash_value=current_source_hash),
+            })
     return plan
 
 
 def operating_card(project: Path, state: dict[str, Any]) -> str:
     versions = state.get("versions", {})
-    hooks = "LIVE (witnessed)" if state.get("enforcement") == "witnessed" else "ABSENT (advisory — run /hooks in Codex)"
+    liveness = hooks_liveness(project)
+    if state.get("enforcement") == "witnessed":
+        hooks = "TRUSTED (witnessed)"
+    elif liveness.get("local_events_observed"):
+        hooks = "ADVISORY (local hook diagnostics observed)"
+    else:
+        hooks = "ADVISORY (no trusted witness source)"
     lines = [
         f"star-forge {versions.get('script')} | hooks: {hooks} | phase: {state.get('phase')}",
         f"NEXT: {state.get('required_next_action')}",
     ]
+    profile_lock = state.get("profile_lock") or {}
+    if profile_lock.get("status") in {"pending", "blocked", "standard-required"}:
+        note = str(profile_lock.get("message") or "")
+        action = str(profile_lock.get("next_action") or "")
+        if note and action:
+            lines.append(f"PROFILE: {note} Next: {action}")
+        elif note:
+            lines.append(f"PROFILE: {note}")
     if versions.get("stale_cache"):
-        lines.append(f"PLUGIN: cache {versions.get('newest_cache')} is older than {versions.get('script')} — reinstall (codex plugin marketplace add <path>) + /hooks.")
+        lines.append(f"PLUGIN: cache {versions.get('newest_cache')} is older than {versions.get('script')} - reinstall with `codex plugin marketplace add <path>` before relying on bundled hook diagnostics.")
     spawn = state.get("spawn_plan") or []
     if spawn:
         lines.append("SPAWN (paste as-is):")
@@ -4995,11 +5754,14 @@ def operating_card(project: Path, state: dict[str, Any]) -> str:
 
 def canonical_state_payload(project: Path, *, objective: str = "", mode: str = "cruise", fast_mvp: bool = False) -> dict[str, Any]:
     manifest = ensure_project_manifest(project, objective=objective)
+    profile_lock = fast_mvp_profile_lock_state(project)
+    _current_source_hash, hash_problem = try_source_hash(project)
+    source_hash_blocked = hash_problem is not None
     plan_path = project / PLAN_FILE
     tasks = parse_tasks(plan_path) if plan_path.exists() else []
     parse_problem = plan_parse_problem(plan_path, tasks)
     proof = load_proof(project)
-    drift = detect_drift(project, proof)
+    drift = source_hash_unavailable_state(profile_lock, problems=[hash_problem] if hash_problem else None) if source_hash_blocked else detect_drift(project, proof)
     setup_missing = (
         not is_git_repo(project)
         or not (project / BLUEPRINT_FILE).exists()
@@ -5007,16 +5769,21 @@ def canonical_state_payload(project: Path, *, objective: str = "", mode: str = "
         or not (project / LEDGER_FILE).exists()
     )
     scope = scope_hash(project) or "noscope"
-    review_blockers = review_findings_for_done(project, tasks)
+    review_blockers = [] if source_hash_blocked else review_findings_for_done(project, tasks)
+    drift = annotate_drift_coverage(project, tasks, drift)
     if setup_missing:
         phase = "setup"
     elif parse_problem:
+        phase = "blocked"
+    elif source_hash_blocked:
+        phase = "blocked"
+    elif profile_lock.get("status") == "blocked":
         phase = "blocked"
     elif not blueprint_is_approved(project):
         phase = "plan"
     elif not tasks or plan_is_placeholder(tasks):
         phase = "plan"
-    elif drift.get("detected") and proof:
+    elif drift.get("actionable") and proof:
         phase = "amend"
     elif not all_tasks_complete(tasks):
         phase = "build"
@@ -5025,15 +5792,20 @@ def canonical_state_payload(project: Path, *, objective: str = "", mode: str = "
     else:
         done = done_payload(project)
         phase = "done" if done.get("is_complete") else "review"
-    next_action = {
-        "setup": "Initialize Star Forge project artifacts.",
-        "plan": "Create or revise Blueprint.md (with AC-n acceptance criteria), get explicit approval, then a normalized Plan.md.",
-        "build": "Build ready tasks — spawn starforge-builder for delegate-mode tasks — then `verify` (and `browser-run` for UI).",
-        "review": "Spawn starforge-reviewer agents, run `review`, fix or waive the queue, then `done`.",
-        "amend": "Post-completion changes were detected; an amendment task was scaffolded. Build, verify, review it, then re-run `done`.",
-        "done": "Project is complete; publish only if explicitly requested.",
-        "blocked": f"Repair Plan.md before continuing: {parse_problem}" if parse_problem else "Inspect blockers and continue the safest unblocked phase.",
-    }.get(phase, "Inspect state and continue the safest unblocked phase.")
+    if source_hash_blocked and hash_problem and not parse_problem:
+        next_action = f"{hash_problem.get('message')} Repair the source hash blocker, then rerun."
+    elif profile_lock.get("status") == "blocked" and not parse_problem:
+        next_action = f"{profile_lock.get('message')} Next action: {profile_lock.get('next_action')}"
+    else:
+        next_action = {
+            "setup": "Initialize Star Forge project artifacts.",
+            "plan": "Create or revise Blueprint.md (with AC-n acceptance criteria), get explicit approval, then a normalized Plan.md.",
+            "build": "Build ready tasks — spawn starforge-builder for delegate-mode tasks — then `verify` (and `browser-run` for UI).",
+            "review": "Spawn starforge-reviewer agents, run `review`, fix or waive the queue, then `done`.",
+            "amend": "Post-completion changes were detected; an amendment task was scaffolded. Build, verify, review it, then re-run `done`.",
+            "done": "Project is complete; publish only if explicitly requested.",
+            "blocked": f"Repair Plan.md before continuing: {parse_problem}" if parse_problem else "Inspect blockers and continue the safest unblocked phase.",
+        }.get(phase, "Inspect state and continue the safest unblocked phase.")
     state = {
         "schema": "star-forge.state.v3",
         "created_at": now_utc(),
@@ -5042,6 +5814,7 @@ def canonical_state_payload(project: Path, *, objective: str = "", mode: str = "
         "mode": mode,
         "objective": objective,
         "fast_mvp": fast_mvp,
+        "profile_lock": profile_lock,
         "enforcement": enforcement_mode(project),
         "versions": version_info(project),
         "phase": phase,
@@ -5060,8 +5833,10 @@ def canonical_state_payload(project: Path, *, objective: str = "", mode: str = "
         },
         "proof": proof,
         "drift": drift,
-        "review": review_summary(project, scope),
+        "review": review_summary_source_hash_unavailable(project, scope, profile_lock, problems=[hash_problem] if hash_problem else None) if source_hash_blocked else review_summary(project, scope),
         "spawn_plan": spawn_plan(project, tasks, phase),
+        "source_hash_unavailable": source_hash_blocked,
+        "source_hash_problems": [hash_problem] if hash_problem else [],
         "learnings_digest": learnings_digest(project),
         "required_next_action": next_action,
     }
@@ -5069,13 +5844,44 @@ def canonical_state_payload(project: Path, *, objective: str = "", mode: str = "
     return state
 
 
+def source_hash_unavailable_state(profile_lock: dict[str, Any], *, problems: Sequence[dict[str, Any]] | None = None) -> dict[str, Any]:
+    return {
+        "detected": False,
+        "source_changed": None,
+        "scope_changed": False,
+        "changed_files": [],
+        "source_hash_unavailable": True,
+        "problems": list(problems) if problems is not None else profile_lock.get("problems") or [],
+    }
+
+
+def review_summary_source_hash_unavailable(project: Path, scope: str, profile_lock: dict[str, Any], *, problems: Sequence[dict[str, Any]] | None = None) -> dict[str, Any]:
+    merged = load_merged_review(project, scope)
+    base = {
+        "source_hash_unavailable": True,
+        "problems": list(problems) if problems is not None else profile_lock.get("problems") or [],
+    }
+    if not merged:
+        return base | {"recorded": False, "open_findings": None, "reviewer_count": 0}
+    return base | {
+        "recorded": True,
+        "fresh": False,
+        "reviewer_count": merged.get("reviewer_count", 0),
+        "open_findings": len(merged.get("fix_queue") or []),
+        "waived": len(merged.get("waived") or []),
+    }
+
+
 def review_summary(project: Path, scope: str) -> dict[str, Any]:
     merged = load_merged_review(project, scope)
     if not merged:
         return {"recorded": False, "open_findings": None, "reviewer_count": 0}
+    current, hash_problem = try_source_hash(project)
+    if hash_problem or current is None:
+        return review_summary_source_hash_unavailable(project, scope, fast_mvp_profile_lock_state(project), problems=[hash_problem] if hash_problem else None)
     return {
         "recorded": True,
-        "fresh": merged.get("source_hash") == source_hash(project),
+        "fresh": merged.get("source_hash") == current,
         "reviewer_count": merged.get("reviewer_count", 0),
         "open_findings": len(merged.get("fix_queue") or []),
         "waived": len(merged.get("waived") or []),
@@ -5113,7 +5919,7 @@ def scaffold_amend(project: Path, drift: dict[str, Any]) -> str | None:
             "description": "Post-completion amendment: re-verify and review the drifted files.",
             "status": "ready",
             "mode": "solo",
-            "files": files[:120],
+            "files": files,
             "depends": "-",
             "verify": inherited or "set the real verification command for the amended files",
             "evidence": "-",
@@ -5130,6 +5936,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         return 1 if args.strict else 0
     assert project is not None
     project.mkdir(parents=True, exist_ok=True)
+    requested_profile = "fast-mvp" if args.fast_mvp else (args.profile or "")
     setup_missing = (
         not is_git_repo(project)
         or not (project / BLUEPRINT_FILE).exists()
@@ -5137,12 +5944,19 @@ def cmd_run(args: argparse.Namespace) -> int:
         or not (project / LEDGER_FILE).exists()
     )
     if setup_missing and not args.no_auto_init:
-        init_args = argparse.Namespace(project=str(project), force=False, no_agents=args.no_hooks, product_slug=args.product_slug, adopt_root=True)
+        init_args = argparse.Namespace(project=str(project), force=False, no_agents=args.no_hooks, product_slug=args.product_slug, adopt_root=True, profile=requested_profile, fast_mvp=args.fast_mvp)
         code = cmd_init(init_args)
         if code != 0:
             return code
-    requested_profile = "fast-mvp" if args.fast_mvp else (args.profile or "")
-    ensure_project_manifest(project, objective=args.objective or "", product_slug=args.product_slug or "", profile=requested_profile)
+    profile_for_manifest = requested_profile
+    if requested_profile == "fast-mvp":
+        existing_manifest_profile = project_profile(project)
+        if fast_mvp_profile_selected_before_gates(project) or (
+            existing_manifest_profile == "fast-mvp"
+            and setup_ledger_records_fast_mvp_before_gates(project)
+        ):
+            profile_for_manifest = ""
+    ensure_project_manifest(project, objective=args.objective or "", product_slug=args.product_slug or "", profile=profile_for_manifest)
     plan_path = project / PLAN_FILE
     if blueprint_is_approved(project) and plan_path.exists():
         try:
@@ -5153,12 +5967,27 @@ def cmd_run(args: argparse.Namespace) -> int:
             pass
     # Post-done drift: scaffold an amendment task so the loop re-enters cleanly.
     proof = load_proof(project)
-    drift = detect_drift(project, proof)
-    if drift.get("detected") and proof and plan_path.exists():
+    profile_lock_for_run = fast_mvp_profile_lock_state(project)
+    _current_source_hash, hash_problem = try_source_hash(project)
+    source_hash_blocked = hash_problem is not None
+    drift = source_hash_unavailable_state(profile_lock_for_run, problems=[hash_problem] if hash_problem else None) if source_hash_blocked else detect_drift(project, proof)
+    drift_tasks: list[dict[str, Any]] = []
+    if plan_path.exists():
+        try:
+            drift_tasks = parse_tasks(plan_path)
+        except ForgeError:
+            drift_tasks = []
+    if (
+        not source_hash_blocked
+        and drift.get("detected")
+        and proof
+        and plan_path.exists()
+        and not completed_amendment_covering_drift(project, drift_tasks, drift)
+    ):
         amend_id = scaffold_amend(project, drift)
         if amend_id:
             append_jsonl(project / INCIDENTS_FILE, {"schema": "star-forge.incident.v1", "timestamp": now_utc(), "kind": "post-done-drift", "amend_task": amend_id, "changed_files": drift.get("changed_files")})
-    payload = canonical_state_payload(project, objective=args.objective or "", mode=args.mode, fast_mvp=project_profile(project) == "fast-mvp")
+    payload = canonical_state_payload(project, objective=args.objective or "", mode=args.mode, fast_mvp=review_profile(project) == "fast-mvp")
     ensure_state_dirs(project)
     previous_phase: str | None = None
     state_path = project / CANONICAL_STATE
@@ -5172,13 +6001,18 @@ def cmd_run(args: argparse.Namespace) -> int:
         append_jsonl(project / LEDGER_FILE, {"schema": "star-forge.ledger.v1", "timestamp": now_utc(), "event": "state-machine", "summary": f"phase={payload['phase']}", "artifacts": [str(CANONICAL_STATE)]})
     print(payload["operating_card"])
     print(json.dumps(payload, indent=2))
-    return 0 if payload["phase"] not in {"blocked"} or not args.strict else 1
+    profile_lock_status = str((payload.get("profile_lock") or {}).get("status") or "")
+    strict_blocked = payload["phase"] == "blocked" or profile_lock_status in {"blocked", "standard-required"} or bool(payload.get("source_hash_unavailable"))
+    return 1 if args.strict and strict_blocked else 0
 
 
 def cmd_status(args: argparse.Namespace) -> int:
     project = resolve_project(args.project)
     plan_path = project / PLAN_FILE
     tasks = parse_tasks(plan_path) if plan_path.exists() else []
+    profile_lock = fast_mvp_profile_lock_state(project)
+    hash_problem = source_hash_unavailable_problem(project)
+    scope = scope_hash(project) or "noscope"
     payload = {
         "schema": "star-forge.status.v1",
         "project": str(project),
@@ -5190,7 +6024,9 @@ def cmd_status(args: argparse.Namespace) -> int:
         "task_count": len(tasks),
         "counts": task_counts(tasks),
         "ready": [task["id"] for task in ready_tasks(tasks)],
-        "review": review_summary(project, scope_hash(project) or "noscope"),
+        "review": review_summary_source_hash_unavailable(project, scope, profile_lock, problems=[hash_problem] if hash_problem else None) if hash_problem else review_summary(project, scope),
+        "profile_lock": profile_lock,
+        "source_hash_unavailable": bool(hash_problem),
         "git_status": git_status(project),
         "canonical_state": str(project / CANONICAL_STATE) if (project / CANONICAL_STATE).exists() else None,
     }
@@ -5323,7 +6159,8 @@ def cmd_hook(args: argparse.Namespace) -> int:
     if project is None:
         return 0
     ensure_state_dirs(project)
-    append_jsonl(project / HOOK_EVENTS, {"schema": "star-forge.hook-event.v1", "timestamp": now_utc(), "event": str(event.get("hook_event_name", "PreToolUse")), "tool": event.get("tool_name")})
+    payload = {"schema": "star-forge.hook-event.v1", "timestamp": now_utc(), "event": str(event.get("hook_event_name", "PreToolUse")), "tool": event.get("tool_name")}
+    append_jsonl(project / HOOK_EVENTS, payload)
     return 0
 
 
@@ -5387,7 +6224,8 @@ def cmd_session_start_hook(args: argparse.Namespace) -> int:
     if project is None:
         return 0
     ensure_state_dirs(project)
-    append_jsonl(project / HOOK_EVENTS, {"schema": "star-forge.hook-event.v1", "timestamp": now_utc(), "event": "SessionStart", "source": event.get("source")})
+    payload = {"schema": "star-forge.hook-event.v1", "timestamp": now_utc(), "event": "SessionStart", "source": event.get("source")}
+    append_jsonl(project / HOOK_EVENTS, payload)
     incidents = unprocessed_incident_note(project)
     context = reanchor_text(project)
     if incidents:
@@ -5461,18 +6299,16 @@ def record_subagent_event(event: dict[str, Any], event_name: str) -> int:
     if project is None:
         return 0
     ensure_state_dirs(project)
-    append_jsonl(
-        project / SUBAGENT_EVENTS,
-        {
-            "schema": "star-forge.subagent-event.v1",
-            "timestamp": now_utc(),
-            "event": event_name,
-            "agent_id": event.get("agent_id"),
-            "agent_type": event.get("agent_type"),
-            "session_id": event.get("session_id"),
-            "parent_session_id": event.get("parent_session_id") or event.get("parent_thread_id"),
-        },
-    )
+    payload = {
+        "schema": "star-forge.subagent-event.v1",
+        "timestamp": now_utc(),
+        "event": event_name,
+        "agent_id": event.get("agent_id"),
+        "agent_type": event.get("agent_type"),
+        "session_id": event.get("session_id"),
+        "parent_session_id": event.get("parent_session_id") or event.get("parent_thread_id"),
+    }
+    append_jsonl(project / SUBAGENT_EVENTS, payload)
     return 0
 
 
@@ -5594,6 +6430,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-agents", action="store_true")
     p.add_argument("--product-slug", default="")
     p.add_argument("--adopt-root", action="store_true")
+    p.add_argument("--fast-mvp", action="store_true")
+    p.add_argument("--profile", default="", choices=["", "standard", "fast-mvp"])
     p.set_defaults(func=cmd_init)
 
     p = sub.add_parser("validate-plan", help="Validate Plan.md")

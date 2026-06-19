@@ -19,7 +19,7 @@
   "interface": {
     "displayName": "Star Forge",
     "shortDescription": "Plan, build with sub-agents, review, and prove completion from git facts \u2014 the Forge Loop.",
-    "longDescription": "Star Forge is a Codex-native software factory built on the Forge Loop: plan (Blueprint with acceptance criteria, one approval) -> build (sub-agent builders, coordinator-recorded verify and browser-run evidence) -> review (reviewer agents write findings that feed a fix queue the completion gate consumes) -> done (a predicate computed from git tree state, never a recorded claim). Post-completion edits automatically reopen the project as an amendment. Hooks observe and re-anchor across compaction; they never block. Lessons compound across projects via a global learnings store.",
+    "longDescription": "Star Forge is a Codex-native software factory built on the Forge Loop: plan (Blueprint with acceptance criteria, one approval) -> build (sub-agent builders, coordinator-recorded verify and browser-run evidence) -> review (reviewer agents write findings that feed a fix queue the completion gate consumes) -> done (a predicate computed from git tree state, never a recorded claim). Post-completion edits automatically reopen the project as an amendment. Hooks observe and re-anchor across compaction; they never block, and local hook ledgers are diagnostic rather than trusted completion witnesses. Lessons compound across projects via a global learnings store.",
     "developerName": "Khaled Ayeva",
     "category": "Productivity",
     "capabilities": [

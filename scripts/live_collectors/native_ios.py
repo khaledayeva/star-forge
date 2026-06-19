@@ -244,10 +244,11 @@ def resolve_input_path(project: Path, raw_path: str, label: str, problems: list[
     if raw.startswith("~"):
         problems.append(problem(f"{label} path must not be home-relative", rule="native-ios-input-path", path="[home]"))
         return None
-    candidate = Path(raw)
-    if not candidate.is_absolute():
-        candidate = project / candidate
-    resolved = candidate.resolve()
+    try:
+        resolved = common.safe_project_path(project, raw, must_exist=False)
+    except ValueError:
+        problems.append(problem(f"{label} path must stay inside the project", rule=rule, path=common.sanitize_external_path(Path(raw))))
+        return None
     if not resolved.exists():
         problems.append(problem(f"{label} does not exist", rule=rule, path=input_display_path(project, resolved)))
         return None

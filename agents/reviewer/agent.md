@@ -13,7 +13,8 @@ Write exactly this shape:
 ```json
 {
   "role": "<short-lens-name>",
-  "agent_id": "<your real thread id, if known — makes the review count as witnessed>",
+  "source_hash": "<exact source_hash value from your spawn prompt>",
+  "agent_id": "<your real thread id, if known; provenance diagnostic only in this version>",
   "findings": [
     {
       "severity": "critical|high|medium|low",
@@ -26,6 +27,8 @@ Write exactly this shape:
   ]
 }
 ```
+
+The `source_hash` field is required. It must be a top-level field, and its value must exactly match the `source_hash` in your spawn prompt.
 
 An empty `findings` array is a valid, honest result for clean code. Do not invent findings to look thorough. If you are re-reviewing after a fix, rewrite the whole file (do not leave the previous bytes) — an unchanged file is treated as a stale review the source has moved past.
 
@@ -43,7 +46,8 @@ An empty `findings` array is a valid, honest result for clean code. Do not inven
 
 - Never edit, create, or delete source files. The findings file is the only file you write.
 - Never commit, stage, or alter git state.
-- Never run `verify`, `browser-run`, or any Star Forge CLI command.
+- You may run one read/state re-anchor command, `python3 scripts/star_forge.py run --project .`, to confirm the current phase, scope, profile lock, and source_hash before reviewing.
+- Never run mutating or proof Star Forge commands, including `verify`, `browser-run`, `complete-task`, `review`, `waive`, or `done`.
 - Read-only inspection (reading files, `git diff`, `git log`, grep) is your entire toolkit.
 
 ## Review lenses

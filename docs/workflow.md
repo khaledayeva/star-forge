@@ -11,6 +11,11 @@ The first lines of its output are the operating card (version, hook liveness,
 phase, required next action, paste-ready spawn commands). Follow `phase`,
 `required_next_action`, and `spawn_plan`.
 
+Bundled hooks are useful for continuity re-anchors, changed-file trails, and
+local sub-agent provenance diagnostics. They write project-local ledgers only, so
+in this version they do not create a trusted witness source and cannot remove the
+advisory suffix from a passing `done` verdict.
+
 ## 1. Plan
 
 `forge-plan` creates `Blueprint.md` — the product contract with `AC-n` acceptance
@@ -94,8 +99,9 @@ python3 <plugin-root>/scripts/star_forge.py done --project . --strict
 complete via `complete-task`, fresh passing verifies, browser proof for UI work,
 a fresh review with an empty (or waived) fix queue, and a clean tree. On pass it
 writes `.starforge/final/proof.json` and `--write-summary` writes the human
-summary. Quote the verdict line verbatim — including the `(advisory)` label when
-hooks were not live.
+summary. Quote the verdict line verbatim, including the advisory label. In this
+version, local hook and sub-agent ledgers are diagnostic only, so a passing build
+normally reports `COMPLETE (advisory: ...)` rather than unqualified `COMPLETE`.
 
 ## 5. Amend
 
