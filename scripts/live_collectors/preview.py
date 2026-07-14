@@ -102,8 +102,12 @@ def dirty_paths_missing_from_source_snapshot(project: Path) -> list[str]:
     return missing
 
 
-def json_write(path: Path, payload: Any) -> dict[str, Any]:
+def json_write(path: Path, payload: Any, *, preserve_fields: Sequence[str] = ()) -> dict[str, Any]:
     redacted, report = common.redact_sensitive_values(payload)
+    if isinstance(payload, Mapping) and isinstance(redacted, dict):
+        for field in preserve_fields:
+            if field in payload:
+                redacted[field] = payload[field]
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(redacted, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return report
@@ -855,7 +859,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             problems.append(problem(f"server lease artifact could not be copied: {exc}", rule="preview-localhost", path=str(args.server_lease)))
         else:
             lease_artifact_path = root / "server-lease.json"
-            artifact_reports.append(json_write(lease_artifact_path, lease_payload))
+            artifact_reports.append(json_write(lease_artifact_path, lease_payload, preserve_fields=("project",)))
 
     source_after = common.compute_source_hash(project)
     degraded = any(item.get("blocking", True) for item in problems)
@@ -924,7 +928,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         "proof_command_shell": shlex.join(command),
         "recorded": False,
     }
-    print(json.dumps(common.redact_sensitive_values(result)[0], indent=2, sort_keys=True))
+    output, _ = common.redact_sensitive_values(result)
+    if isinstance(output, dict):
+        output["proof_command"] = command
+        output["proof_command_shell"] = shlex.join(command)
+    print(json.dumps(output, indent=2, sort_keys=True))
     if args.record:
         return run_record_command(record_command)
     return 1 if degraded else 0
