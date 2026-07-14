@@ -450,7 +450,8 @@ def test_happy_path_writes_artifacts_manifest_and_handoff_command() -> None:
         assert manifest["schema"] == live_common.LIVE_MANIFEST_SCHEMA
         assert manifest["collector"] == "browser"
         assert manifest["source_hash_before"] == manifest["source_hash_after"]
-        assert manifest["summary"]["browser_run_argv"] == payload["browser_run_argv"]
+        expected_argv, _ = live_common.redact_sensitive_values(payload["browser_run_argv"])
+        assert manifest["summary"]["browser_run_argv"] == expected_argv
         assert manifest["summary"]["service_workers"] == "block"
         assert manifest["summary"]["network_control"] == browser_playwright.BROWSER_NETWORK_CONTROL_MODE
         assert_artifacts_scoped(manifest)

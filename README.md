@@ -1,5 +1,6 @@
 <div align="center">
-  <img src="assets/star-forge-logo.svg" alt="Star Forge" width="560">
+  <img src="assets/star-forge-icon.png" alt="Star Forge logo" width="240">
+  <h1>Star Forge</h1>
   <p><strong>A Codex-native software factory that plans, builds, reviews, and proves completion.</strong></p>
   <p>
     <a href="https://github.com/khaledayeva/star-forge/actions/workflows/ci.yml"><img src="https://github.com/khaledayeva/star-forge/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
