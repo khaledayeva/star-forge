@@ -13,3 +13,12 @@
 .starforge/state/auto-continue.json
 
 .starforge/state/incidents.jsonl
+
+.starforge/state/hook-trust-notice.json
+
+.DS_Store
+.pytest_cache/
+__pycache__/
+*.py[cod]
+.venv/
+venv/

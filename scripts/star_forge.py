@@ -64,6 +64,7 @@ CHANGED_FILES = STATE_SUBDIR / "changed-files.jsonl"
 HANDOFF_ARTIFACT = STATE_SUBDIR / "handoff-artifact.json"
 WAIVES_FILE = STATE_SUBDIR / "waives.jsonl"
 INCIDENTS_FILE = STATE_SUBDIR / "incidents.jsonl"
+HOOK_TRUST_NOTICE_FILE = STATE_SUBDIR / "hook-trust-notice.json"
 SERVER_LEASE = RUNTIME_DIR / "server.json"
 SCREENSHOT_MANIFEST = SCREENSHOTS_DIR / "manifest.json"
 AGENT_NAME_PREFIX = "starforge-"
@@ -5436,6 +5437,34 @@ def hooks_liveness(project: Path) -> dict[str, Any]:
     }
 
 
+def hook_trust_notice(project: Path) -> dict[str, Any]:
+    liveness = hooks_liveness(project)
+    show = bool(
+        not liveness.get("local_events_observed")
+        and not (project / HOOK_TRUST_NOTICE_FILE).exists()
+    )
+    return {
+        "show": show,
+        "message": (
+            "Optional observer hooks are not trusted yet. Use Codex `/hooks` and trust the "
+            "Star Forge entries to enable continuity re-anchors; Star Forge still works without them."
+        ),
+        "marker": str(HOOK_TRUST_NOTICE_FILE),
+    }
+
+
+def mark_hook_trust_notice_seen(project: Path) -> None:
+    ensure_state_dirs(project)
+    write_json_stable(
+        project / HOOK_TRUST_NOTICE_FILE,
+        {
+            "schema": "star-forge.hook-trust-notice.v1",
+            "shown_at": now_utc(),
+            "message": "Optional observer hooks notice was shown to the user.",
+        },
+    )
+
+
 def enforcement_mode(project: Path) -> str:
     return "witnessed" if hooks_liveness(project)["events_observed"] else "advisory"
 
@@ -5613,6 +5642,7 @@ def cmd_init(args: argparse.Namespace) -> int:
             ".starforge/state/subagent-events.jsonl",
             ".starforge/state/auto-continue.json",
             ".starforge/state/incidents.jsonl",
+            ".starforge/state/hook-trust-notice.json",
         ],
     )
     created.extend(f".gitignore {item}" for item in gitignore_changes)
@@ -5734,6 +5764,9 @@ def operating_card(project: Path, state: dict[str, Any]) -> str:
             lines.append(f"PROFILE: {note}")
     if versions.get("stale_cache"):
         lines.append(f"PLUGIN: cache {versions.get('newest_cache')} is older than {versions.get('script')} - reinstall with `codex plugin marketplace add <path>` before relying on bundled hook diagnostics.")
+    hook_notice = state.get("hook_trust_notice") or {}
+    if hook_notice.get("show") and hook_notice.get("message"):
+        lines.append(f"HOOKS: {hook_notice.get('message')}")
     spawn = state.get("spawn_plan") or []
     if spawn:
         lines.append("SPAWN (paste as-is):")
@@ -5816,6 +5849,7 @@ def canonical_state_payload(project: Path, *, objective: str = "", mode: str = "
         "fast_mvp": fast_mvp,
         "profile_lock": profile_lock,
         "enforcement": enforcement_mode(project),
+        "hook_trust_notice": hook_trust_notice(project),
         "versions": version_info(project),
         "phase": phase,
         "scope_hash": scope,
@@ -6001,6 +6035,8 @@ def cmd_run(args: argparse.Namespace) -> int:
         append_jsonl(project / LEDGER_FILE, {"schema": "star-forge.ledger.v1", "timestamp": now_utc(), "event": "state-machine", "summary": f"phase={payload['phase']}", "artifacts": [str(CANONICAL_STATE)]})
     print(payload["operating_card"])
     print(json.dumps(payload, indent=2))
+    if (payload.get("hook_trust_notice") or {}).get("show"):
+        mark_hook_trust_notice_seen(project)
     profile_lock_status = str((payload.get("profile_lock") or {}).get("status") or "")
     strict_blocked = payload["phase"] == "blocked" or profile_lock_status in {"blocked", "standard-required"} or bool(payload.get("source_hash_unavailable"))
     return 1 if args.strict and strict_blocked else 0

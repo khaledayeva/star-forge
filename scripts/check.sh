@@ -31,6 +31,9 @@ scripts/live_collectors/github_pr.py
 
 python3 -m json.tool .codex-plugin/plugin.json >/dev/null
 python3 -m json.tool hooks/hooks.json >/dev/null
+sh -n scripts/check.sh
+sh -n scripts/install-codex.sh
+sh -n scripts/release-check.sh
 for file in $PYTHON_FILES; do
     python3 -m py_compile "$file"
 done

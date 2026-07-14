@@ -135,6 +135,8 @@ def test_release_check_wrapper_includes_core_and_all_live_suites() -> None:
     text = CHECK_SH.read_text(encoding="utf-8")
     assert "python3 -m json.tool .codex-plugin/plugin.json" in text
     assert "python3 -m json.tool hooks/hooks.json" in text
+    assert "sh -n scripts/install-codex.sh" in text
+    assert "sh -n scripts/release-check.sh" in text
     for path in sorted(REQUIRED_CHECK_COMPILES):
         assert path in text, path
     for path in sorted(REQUIRED_CHECK_TESTS):

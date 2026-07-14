@@ -2077,13 +2077,12 @@ HOOK_COMMANDS = [
 ]
 
 
-def test_plugin_manifest_exposes_bundled_hooks() -> None:
+def test_plugin_package_includes_standard_hooks_without_unsupported_manifest_field() -> None:
     manifest_path = ROOT / ".codex-plugin" / "plugin.json"
     hooks_path = ROOT / "hooks" / "hooks.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     assert hooks_path.is_file()
-    assert manifest["hooks"] == "./hooks/hooks.json"
-    assert (ROOT / manifest["hooks"]).resolve() == hooks_path.resolve()
+    assert "hooks" not in manifest
     assert manifest["interface"]["displayName"] == "Star Forge"
 
 
@@ -2286,6 +2285,33 @@ def test_operating_card_reports_local_hooks_as_diagnostics_only() -> None:
         assert "hooks: ADVISORY (local hook diagnostics observed)" in first
         assert "/hooks" not in first
         assert "witnessed" not in first
+
+
+def test_run_prints_hook_trust_notice_once_until_local_hooks_observed() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        init_project(project)
+        code, out, err = run_cli(["run", "--project", str(project), "--objective", "Build the greeter", "--no-hooks"])
+        assert code == 0, err or out
+        assert "HOOKS: Optional observer hooks are not trusted yet." in out
+        marker = project / star_forge.HOOK_TRUST_NOTICE_FILE
+        assert marker.exists()
+        state = json.loads((project / ".starforge" / "state.json").read_text(encoding="utf-8"))
+        assert state["hook_trust_notice"]["show"] is True
+
+        code, out, err = run_cli(["run", "--project", str(project), "--objective", "Build the greeter", "--no-hooks"])
+        assert code == 0, err or out
+        assert "HOOKS: Optional observer hooks are not trusted yet." not in out
+        state = json.loads((project / ".starforge" / "state.json").read_text(encoding="utf-8"))
+        assert state["hook_trust_notice"]["show"] is False
+
+        marker.unlink()
+        event = {"cwd": str(project), "hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": "ls"}}
+        code, _, err = run_cli(["hook"], stdin_payload=event)
+        assert code == 0, err
+        code, out, err = run_cli(["run", "--project", str(project), "--objective", "Build the greeter", "--no-hooks"])
+        assert code == 0, err or out
+        assert "HOOKS: Optional observer hooks are not trusted yet." not in out
 
 
 def test_review_spawn_prompt_treats_agent_id_as_provenance_only() -> None:
