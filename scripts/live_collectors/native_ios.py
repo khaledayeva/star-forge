@@ -1318,6 +1318,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(raw_argv)
     code, output = collect(args, ["python3", "scripts/live_collectors/native_ios.py", *raw_argv])
     redacted, _report = common.redact_sensitive_values(output)
+    if isinstance(redacted, dict):
+        for field in ("proof_command_argv", "proof_command", "native_ios_proof_command"):
+            redacted[field] = output[field]
     print(json.dumps(redacted, indent=2, sort_keys=True))
     return code
 
