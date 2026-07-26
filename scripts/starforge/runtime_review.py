@@ -1,4 +1,3 @@
-"""Cohesive Star Forge runtime extracted from the CLI facade."""
 from __future__ import annotations
 from .policy_data import mapping as policy_mapping, project as project_record, record as policy_record, value as _policy_value
 import argparse
@@ -44,7 +43,6 @@ def review_file_header(path: Path, rel: str, payload: Any) -> tuple[tuple[str, s
     problem = next((review_file_problem(rel, kind, **values) for failed, kind, values in checks if failed), None)
     return (None, problem) if problem else ((role, source_attestation, findings), None)
 def load_review_findings(project: Path, scope: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Read and normalize source-attested reviewer findings for one scope."""
     files: list[dict[str, Any]] = []
     problems: list[dict[str, Any]] = []
     root = reviews_scope_dir(project, scope)
@@ -185,7 +183,6 @@ def subagent_ids_from(path: Path) -> set[str]:
 def local_subagent_ids(project: Path) -> set[str]:
     return subagent_ids_from(project / SUBAGENT_EVENTS)
 def known_subagent_ids(project: Path) -> set[str]:
-    """Return host-controlled reviewer witnesses, unavailable in this version."""
     return set()
 def review_payload_source_hash_unavailable(project: Path, scope: str, problem: dict[str, Any]) -> dict[str, Any]:
     profile_lock = fast_mvp_profile_lock_state(project)
@@ -233,8 +230,6 @@ def write_merged_review(project: Path, payload: dict[str, Any]) -> Path:
     write_json(path, payload)
     return path
 def load_optional_json(path: Path) -> dict[str, Any] | None:
-    if not path.exists():
-        return None
     try:
         return read_json(path)
     except Exception:
@@ -245,7 +240,6 @@ def done_gate_finding(rule: str, *, file: Any = None, **values: Any) -> list[dic
     message = REVIEW_POLICY["review_gate_messages"][rule].format(**values)
     return [policy_mapping("done_gate_finding", rule=rule, file=str(REVIEWS_DIR) if file is None else file, message=message)]
 def review_findings_for_done(project: Path, tasks: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Done-time review gate rebuilt from reviewer files and the current tree."""
     if not all_tasks_complete(tasks):
         return []
     hash_problem = source_hash_unavailable_problem(project)
@@ -306,7 +300,6 @@ def cmd_waive(args: argparse.Namespace) -> int:
     append_jsonl(project / INCIDENTS_FILE, extended_policy_record(
         "incident_waive", binding, timestamp=now_utc(), kind="waive",
         finding=args.finding, reason=args.reason))
-    # Re-merge so the fix queue reflects the waive immediately.
     payload = merge_review(project, scope)
     write_merged_review(project, payload)
     output = extended_policy_record(
@@ -452,8 +445,7 @@ def done_payload(project: Path) -> dict[str, Any]:
             project, tasks, drift, require_current_proof=True)
         if drift.get("actionable"):
             problems.append({"severity": "high", "rule": "post-proof-change-packet-required",
-                             "message": "Source drift after a final proof requires a completed, "
-                                        "approved, source-fresh change packet before done can pass."})
+                             "message": "Repository drift after a final proof requires a completed, approved, source-fresh change packet before done can pass."})
     snapshot, snapshot_problem = safe_release_snapshot(project)
     if snapshot_problem and not hash_problem:
         problems.append(finding_problem(snapshot_problem))
@@ -466,8 +458,6 @@ def done_payload(project: Path) -> dict[str, Any]:
         problems.append(finding_problem(lifecycle_hash_problem))
     blocking = blocking_items(problems)
     enforcement = enforcement_mode(project)
-    # Project-local JSONL ledgers are useful diagnostics, but they are advisory
-    # because the same actors being evaluated can write them.
     scope = scope_hash(project) or "noscope"
     merged = None if hash_problem else (merge_review(project, scope) if load_merged_review(project, scope) is not None else None)
     witness, advisory_reasons, waive_count = done_witness(project, tasks, merged, enforcement)
@@ -482,14 +472,12 @@ def load_proof(project: Path) -> dict[str, Any] | None:
 def detect_drift(project: Path, proof: dict[str, Any] | None) -> dict[str, Any]:
     if not proof:
         return policy_mapping("drift_empty")
-    current_source = source_hash(project)
-    current_scope = scope_hash(project) or "noscope"
+    current_head, current_source, current_scope = git_head(project), source_hash(project), scope_hash(project) or "noscope"
+    head_changed = proof.get("head") != current_head
     source_changed = proof.get("source_hash") != current_source
     scope_changed = (proof.get("scope_hash") or "noscope") != current_scope
-    changed: list[str] = []
-    if source_changed:
-        changed = source_dirty_entries(git_status(project)) or _diff_since(project, proof.get("head"))
-    return policy_mapping("drift", detected=bool(source_changed or scope_changed), source_changed=source_changed, scope_changed=scope_changed, changed_files=changed)
+    changed = (source_dirty_entries(git_status(project)) or _diff_since(project, proof.get("head"))) if source_changed or head_changed else []
+    return policy_mapping("drift", detected=bool(head_changed or source_changed or scope_changed), head_changed=head_changed, source_changed=source_changed, scope_changed=scope_changed, changed_files=changed)
 def completed_task_matches_source(project: Path, task_id: str, current: str, *, attest_task: bool = False) -> bool:
     payload = load_optional_json(project / STATE_SUBDIR / f"complete-task-{slugify(task_id)}.json")
     snapshot = payload.get("source_snapshot") if payload else None
@@ -563,32 +551,44 @@ def _diff_since(project: Path, head: str | None) -> list[str]:
         code, out, _ = run_git(["diff", "--name-only", f"{head}..HEAD"], project)
         return [line.strip() for line in out.splitlines() if line.strip()] if code == 0 else []
     return []
+def proof_binding_state(project: Path) -> tuple[bool, str | None, list[str]]:
+    repository = is_git_repo(project)
+    return repository, git_head(project) if repository else None, source_dirty_entries(git_status(project))
+def proof_binding_matches(project: Path, head: str, source: str) -> bool:
+    before = proof_binding_state(project)
+    current_source, problem = try_source_hash(project)
+    after = proof_binding_state(project)
+    return bool(head and source and before == (True, head, []) == after
+                and not problem and current_source == source)
+def refuse_proof_binding(payload: dict[str, Any]) -> None:
+    payload["problems"].append({"severity": "high", "rule": "git-proof-binding", "message": "Git state changed before final proof publication."})
+    payload.update(is_complete=False, verdict=REVIEW_POLICY["done_verdicts"]["blocked"])
 def cmd_done(args: argparse.Namespace) -> int:
     project = resolve_project(args.project)
     payload = done_payload(project)
     gated_snapshot = payload.get("snapshot") or {}
     proof_head = str(gated_snapshot.get("git_head") or "")
     proof_source_hash = str(gated_snapshot.get("source_hash") or "")
+    if payload["is_complete"] and not proof_binding_matches(project, proof_head, proof_source_hash):
+        refuse_proof_binding(payload)
     if payload["is_complete"]:
-        final_repository = is_git_repo(project)
-        final_status = source_dirty_entries(git_status(project))
-        final_head = git_head(project) if final_repository else None
-        final_source_hash, final_hash_problem = try_source_hash(project)
-        confirmed_repository = is_git_repo(project)
-        confirmed_status = source_dirty_entries(git_status(project))
-        confirmed_head = git_head(project) if confirmed_repository else None
-        if (not final_repository or not confirmed_repository or not proof_head or not proof_source_hash
-                or final_head != proof_head or confirmed_head != proof_head
-                or final_status or confirmed_status or final_hash_problem
-                or final_source_hash != proof_source_hash):
-            payload["problems"].append({"severity": "high", "rule": "git-proof-binding", "message": "Git state changed before final proof publication."})
-            payload.update(is_complete=False, verdict=REVIEW_POLICY["done_verdicts"]["blocked"])
-    if payload["is_complete"]:
-        ensure_state_dirs(project)
-        write_json(project / PROOF_FILE, policy_record(
+        proof_path = project / PROOF_FILE
+        try:
+            prior_proof = read_text(proof_path)
+        except FileNotFoundError:
+            prior_proof = None
+        proof = policy_record(
             "proof", created_at=now_utc(), head=proof_head, source_hash=proof_source_hash,
-            scope_hash=scope_hash(project) or "noscope", verdict=payload["verdict"]))
-        if args.write_summary:
+            scope_hash=scope_hash(project) or "noscope", verdict=payload["verdict"])
+        ensure_state_dirs(project)
+        write_json(proof_path, proof)
+        if not proof_binding_matches(project, proof_head, proof_source_hash):
+            if prior_proof is None:
+                write_json(proof_path, dict(proof, verdict=REVIEW_POLICY["done_verdicts"]["blocked"]))
+            else:
+                write_text(proof_path, prior_proof)
+            refuse_proof_binding(payload)
+        elif args.write_summary:
             write_text(project / FINAL_SUMMARY, done_summary_markdown(payload))
             payload["summary_artifact"] = str(FINAL_SUMMARY)
     print(json.dumps(payload, indent=2))

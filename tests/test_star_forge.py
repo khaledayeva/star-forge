@@ -2574,6 +2574,99 @@ def test_done_rejects_commits_during_final_source_hash_and_preserves_prior_proof
             assert proof["head"] != star_forge.git_head(project)
 
 
+def test_done_handles_commits_at_proof_publication_boundary() -> None:
+    for empty_commit, keep_prior in ((False, True), (True, False)):
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp).resolve()
+            build_completed_project(project)
+            proof_path = project / star_forge.PROOF_FILE
+            prior_proof = None
+            if keep_prior:
+                code, payload = run_done(project)
+                assert code == 0, payload
+                prior_proof = proof_path.read_bytes()
+
+            original_ensure_state_dirs = runtime_review.ensure_state_dirs
+            raced = False
+
+            def commit_during_publication(target: Path) -> None:
+                nonlocal raced
+                original_ensure_state_dirs(target)
+                if raced:
+                    return
+                if empty_commit:
+                    code, _, error = star_forge.run_git([
+                        "-c", "user.name=Star Forge Test",
+                        "-c", "user.email=starforge@example.com",
+                        "commit", "--allow-empty", "-m",
+                        "empty commit at proof publication boundary",
+                    ], target)
+                    assert code == 0, error
+                else:
+                    (target / "src" / "hello.py").write_text(
+                        "print('changed at proof publication boundary')\n",
+                        encoding="utf-8",
+                    )
+                    commit_all(target, "source commit at proof publication boundary")
+                raced = True
+
+            with mock.patch.object(
+                runtime_review, "ensure_state_dirs",
+                side_effect=commit_during_publication,
+            ):
+                code, payload = run_done(project)
+
+            assert raced is True
+            assert code == 1, payload
+            assert payload["is_complete"] is False
+            assert any(
+                problem.get("rule") == "git-proof-binding"
+                for problem in payload["problems"]
+            )
+            if prior_proof is not None:
+                assert proof_path.read_bytes() == prior_proof
+            else:
+                proof = star_forge.read_json(proof_path)
+                assert proof["verdict"] == runtime_review.REVIEW_POLICY[
+                    "done_verdicts"
+                ]["blocked"]
+                assert not proof["verdict"].startswith("COMPLETE")
+
+
+def test_allow_empty_commit_after_completion_is_actionable_head_drift() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        build_completed_project(project)
+        code, payload = run_done(project)
+        assert code == 0, payload
+        proof_path = project / star_forge.PROOF_FILE
+        prior_proof = proof_path.read_bytes()
+
+        code, _, error = star_forge.run_git([
+            "-c", "user.name=Star Forge Test",
+            "-c", "user.email=starforge@example.com",
+            "commit", "--allow-empty", "-m", "post completion head drift",
+        ], project)
+        assert code == 0, error
+
+        proof = json.loads(prior_proof)
+        drift = runtime_review.detect_drift(project, proof)
+        assert drift["detected"] is True
+        assert drift["head_changed"] is True
+        assert drift["source_changed"] is False
+        assert drift["scope_changed"] is False
+        assert drift["changed_files"] == []
+
+        code, payload = run_done(project)
+        assert code == 1, payload
+        assert payload["drift"]["actionable"] is True
+        assert any(
+            problem.get("rule") == "post-proof-change-packet-required"
+            for problem in payload["problems"]
+        )
+        assert proof_path.read_bytes() == prior_proof
+
+
 def test_done_requires_change_packet_for_post_proof_drift_without_run() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         project = Path(tmp).resolve()

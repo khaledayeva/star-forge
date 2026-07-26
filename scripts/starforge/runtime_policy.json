@@ -3012,7 +3012,7 @@
     "defaults": {}
   },
   "mappings.drift": {
-    "fields": ["detected", "source_changed", "scope_changed", "changed_files"],
+    "fields": ["detected", "head_changed", "source_changed", "scope_changed", "changed_files"],
     "defaults": {}
   },
   "mappings.drift_empty": {
