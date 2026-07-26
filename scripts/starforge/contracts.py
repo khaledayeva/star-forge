@@ -10,13 +10,38 @@ import re
 import stat
 import tempfile
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 
 BLUEPRINT_FILE = "Blueprint.md"
 BLUEPRINT_LOCK_FILE = "Blueprint.lock.json"
 BLUEPRINT_LOCK_SCHEMA = "star-forge.blueprint-lock.v1"
 BLUEPRINT_CONTRACT_VERSION = 1
+PLAN_FILE = "Plan.md"
+PLAN_MIGRATION_SCHEMA = "star-forge.plan-migration.v1"
+PLAN_LEGACY_COLUMNS = (
+    "Task",
+    "Description",
+    "Status",
+    "Mode",
+    "Files",
+    "Depends",
+    "Verify",
+    "Evidence",
+)
+PLAN_V2_COLUMNS = (
+    "Task",
+    "Description",
+    "Status",
+    "Mode",
+    "Files",
+    "Depends",
+    "ACs",
+    "Proof",
+    "Verify",
+    "Evidence",
+)
+PLAN_REVIEW_REQUIRED = "REVIEW_REQUIRED"
 
 _LOCK_FIELDS = frozenset(
     {
@@ -31,6 +56,292 @@ _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 class ContractError(ValueError):
     """A project contract could not be read or safely updated."""
+
+
+def split_plan_row(line: str) -> list[str]:
+    """Split a Markdown table row while preserving escaped pipe characters."""
+    stripped = line.strip()
+    if stripped.startswith("|"):
+        stripped = stripped[1:]
+    if stripped.endswith("|") and not stripped.endswith(r"\|"):
+        stripped = stripped[:-1]
+
+    cells: list[str] = []
+    cell: list[str] = []
+    index = 0
+    while index < len(stripped):
+        char = stripped[index]
+        if char == "\\" and index + 1 < len(stripped):
+            escaped = stripped[index + 1]
+            if escaped == "|":
+                cell.append(escaped)
+                index += 2
+                continue
+        if char == "|":
+            cells.append("".join(cell).strip())
+            cell = []
+        else:
+            cell.append(char)
+        index += 1
+    cells.append("".join(cell).strip())
+    return cells
+
+
+def _is_plan_separator(line: str) -> bool:
+    cells = split_plan_row(line)
+    return bool(cells) and all(
+        re.fullmatch(r":?-{3,}:?", cell.replace(" ", "")) for cell in cells
+    )
+
+
+def _plan_tables(
+    lines: Sequence[str],
+) -> list[tuple[int, list[str], int, int]]:
+    tables: list[tuple[int, list[str], int, int]] = []
+    for header_index, line in enumerate(lines):
+        if not line.strip().startswith("|"):
+            continue
+        headers = split_plan_row(line)
+        lowered = [header.lower() for header in headers]
+        if "task" not in lowered or "status" not in lowered:
+            continue
+        if (
+            header_index + 1 >= len(lines)
+            or not _is_plan_separator(lines[header_index + 1])
+        ):
+            continue
+        end = header_index + 2
+        while end < len(lines) and lines[end].strip().startswith("|"):
+            end += 1
+        tables.append((header_index, headers, header_index + 2, end))
+    return tables
+
+
+def plan_table_version(headers: Sequence[str]) -> str:
+    """Classify an exact task-table header as legacy, v2, or compatible."""
+    normalized = tuple(header.strip().lower() for header in headers)
+    if normalized == tuple(column.lower() for column in PLAN_LEGACY_COLUMNS):
+        return "legacy"
+    if normalized == tuple(column.lower() for column in PLAN_V2_COLUMNS):
+        return "v2"
+    return "compatible"
+
+
+def parse_plan_tasks_text(text: str) -> list[dict[str, Any]]:
+    """Read both eight-column legacy tasks and ten-column Plan v2 tasks."""
+    lines = text.splitlines()
+    tasks: list[dict[str, Any]] = []
+    for header_index, headers, start, end in _plan_tables(lines):
+        index = {name.lower(): position for position, name in enumerate(headers)}
+        version = plan_table_version(headers)
+        for line_index in range(start, end):
+            cells = split_plan_row(lines[line_index])
+            if len(cells) < len(headers):
+                cells.extend([""] * (len(headers) - len(cells)))
+            task_id = cells[index["task"]].strip()
+            if not task_id:
+                continue
+
+            def cell(name: str, fallback: str = "") -> str:
+                position = index.get(name.lower())
+                return fallback if position is None else cells[position].strip()
+
+            tasks.append(
+                {
+                    "id": task_id,
+                    "status": cell("status"),
+                    "mode": cell("mode").lower() or "delegate",
+                    "files": cell("files"),
+                    "depends": cell("depends"),
+                    "acs": cell("acs"),
+                    "proof": cell("proof"),
+                    "verify": cell("verify"),
+                    "evidence": cell("evidence"),
+                    "description": cell("description", cell("task", task_id)),
+                    "line": line_index + 1,
+                    "headers": list(headers),
+                    "header_line": header_index + 1,
+                    "plan_version": version,
+                }
+            )
+    return tasks
+
+
+def _escape_plan_cell(value: Any) -> str:
+    return str(value if value is not None else "").replace("|", r"\|")
+
+
+def serialize_plan_tasks(
+    tasks: Sequence[Mapping[str, Any]],
+    *,
+    version: str = "v2",
+) -> str:
+    """Serialize task mappings as an exact legacy or Plan v2 Markdown table."""
+    if version == "v2":
+        columns = PLAN_V2_COLUMNS
+    elif version == "legacy":
+        columns = PLAN_LEGACY_COLUMNS
+    else:
+        raise ContractError("Plan version must be `legacy` or `v2`")
+
+    key_for_column = {
+        "Task": "id",
+        "Description": "description",
+        "Status": "status",
+        "Mode": "mode",
+        "Files": "files",
+        "Depends": "depends",
+        "ACs": "acs",
+        "Proof": "proof",
+        "Verify": "verify",
+        "Evidence": "evidence",
+    }
+    lines = [
+        "| " + " | ".join(columns) + " |",
+        "|" + "|".join("-" * max(3, len(column)) for column in columns) + "|",
+    ]
+    for task in tasks:
+        values: list[str] = []
+        for column in columns:
+            key = key_for_column[column]
+            value = task.get(key)
+            if column == "Task" and value is None:
+                value = task.get("task", "")
+            values.append(_escape_plan_cell(value))
+        lines.append("| " + " | ".join(values) + " |")
+    return "\n".join(lines) + "\n"
+
+
+def migrate_plan_text(text: str) -> tuple[str, dict[str, int]]:
+    """Convert every exact legacy task table to v2 without guessing mappings."""
+    lines = text.splitlines()
+    trailing_newline = text.endswith(("\n", "\r"))
+    tables = _plan_tables(lines)
+    legacy_tables = [
+        table for table in tables if plan_table_version(table[1]) == "legacy"
+    ]
+    if not legacy_tables:
+        if any(plan_table_version(table[1]) == "v2" for table in tables):
+            raise ContractError("Plan already uses the v2 task-table schema")
+        raise ContractError(
+            "Plan has no exact eight-column legacy task table to migrate"
+        )
+
+    migrated_rows = 0
+    for header_index, headers, start, end in reversed(legacy_tables):
+        index = {name.lower(): position for position, name in enumerate(headers)}
+        migrated_tasks: list[dict[str, str]] = []
+        for line_index in range(start, end):
+            cells = split_plan_row(lines[line_index])
+            if len(cells) < len(headers):
+                cells.extend([""] * (len(headers) - len(cells)))
+
+            def cell(name: str) -> str:
+                return cells[index[name.lower()]].strip()
+
+            task_id = cell("task")
+            if not task_id:
+                continue
+            migrated_tasks.append(
+                {
+                    "id": task_id,
+                    "description": cell("description"),
+                    "status": cell("status"),
+                    "mode": cell("mode"),
+                    "files": cell("files"),
+                    "depends": cell("depends"),
+                    "acs": PLAN_REVIEW_REQUIRED,
+                    "proof": PLAN_REVIEW_REQUIRED,
+                    "verify": cell("verify"),
+                    "evidence": cell("evidence"),
+                }
+            )
+        replacement = serialize_plan_tasks(migrated_tasks, version="v2").splitlines()
+        lines[header_index:end] = replacement
+        migrated_rows += len(migrated_tasks)
+
+    migrated = "\n".join(lines)
+    if trailing_newline:
+        migrated += "\n"
+    return migrated, {
+        "legacy_tables_migrated": len(legacy_tables),
+        "task_rows_migrated": migrated_rows,
+    }
+
+
+def write_plan_v2_migration(source: Path, output: Path) -> dict[str, Any]:
+    """Atomically create a separate, reviewable Plan v2 draft."""
+    source = Path(os.path.abspath(source))
+    output = Path(os.path.abspath(output))
+    source_problem = _regular_file_problem(source, required=True)
+    if source_problem:
+        raise ContractError(source_problem)
+    if source == output:
+        raise ContractError(
+            "Migration output must be separate from the legacy Plan"
+        )
+    if output.exists() or output.is_symlink():
+        raise ContractError(f"{output.name} already exists; choose a new output path")
+
+    try:
+        source_bytes = source.read_bytes()
+        source_text = source_bytes.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ContractError(f"{source.name} is not valid UTF-8") from exc
+    except OSError as exc:
+        raise ContractError(f"{source.name} cannot be read: {exc}") from exc
+
+    migrated, summary = migrate_plan_text(source_text)
+    parsed = parse_plan_tasks_text(migrated)
+    if not parsed or any(task["plan_version"] != "v2" for task in parsed):
+        raise ContractError("Migrated Plan v2 draft failed its schema check")
+
+    output.parent.mkdir(parents=True, exist_ok=True)
+    temp_name: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=output.parent,
+            prefix=f".{output.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temp_name = handle.name
+            handle.write(migrated)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_name, output)
+    except OSError as exc:
+        raise ContractError(f"Could not write {output}: {exc}") from exc
+    finally:
+        if temp_name:
+            try:
+                Path(temp_name).unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    try:
+        source_unchanged = source.read_bytes() == source_bytes
+    except OSError:
+        source_unchanged = False
+    if not source_unchanged:
+        try:
+            output.unlink()
+        except OSError:
+            pass
+        raise ContractError("Legacy Plan changed during migration; draft removed")
+
+    return {
+        "schema": PLAN_MIGRATION_SCHEMA,
+        "source": str(source),
+        "output": str(output),
+        "source_sha256": hashlib.sha256(source_bytes).hexdigest(),
+        "output_sha256": hashlib.sha256(migrated.encode("utf-8")).hexdigest(),
+        "source_preserved": True,
+        "review_required": True,
+        **summary,
+    }
 
 
 def _now_utc() -> str:

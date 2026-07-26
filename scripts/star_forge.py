@@ -1193,12 +1193,7 @@ def finding_problem(finding: dict[str, Any]) -> dict[str, Any]:
 
 
 def split_row(line: str) -> list[str]:
-    stripped = line.strip()
-    if stripped.startswith("|"):
-        stripped = stripped[1:]
-    if stripped.endswith("|"):
-        stripped = stripped[:-1]
-    return [cell.strip() for cell in stripped.split("|")]
+    return project_contracts.split_plan_row(line)
 
 
 def is_separator_row(line: str) -> bool:
@@ -1223,38 +1218,7 @@ def task_tables(lines: list[str]) -> Iterable[tuple[int, list[str], int, int]]:
 
 
 def parse_tasks_from_text(text: str) -> list[dict[str, Any]]:
-    lines = text.splitlines()
-    tasks: list[dict[str, Any]] = []
-    for header_idx, headers, start, end in task_tables(lines):
-        index = {name.lower(): i for i, name in enumerate(headers)}
-        for line_idx in range(start, end):
-            cells = split_row(lines[line_idx])
-            if len(cells) < len(headers):
-                cells.extend([""] * (len(headers) - len(cells)))
-            task_id = cells[index["task"]].strip()
-            if not task_id:
-                continue
-
-            def cell(name: str, fallback: str = "") -> str:
-                raw_idx = index.get(name.lower())
-                return fallback if raw_idx is None else cells[raw_idx].strip()
-
-            tasks.append(
-                {
-                    "id": task_id,
-                    "status": cell("status"),
-                    "mode": cell("mode").lower() or "delegate",
-                    "files": cell("files"),
-                    "depends": cell("depends"),
-                    "verify": cell("verify"),
-                    "evidence": cell("evidence"),
-                    "description": cell("description", cell("task", task_id)),
-                    "line": line_idx + 1,
-                    "headers": headers,
-                    "header_line": header_idx + 1,
-                }
-            )
-    return tasks
+    return project_contracts.parse_plan_tasks_text(text)
 
 
 def parse_tasks(plan_path: Path) -> list[dict[str, Any]]:
@@ -6178,6 +6142,29 @@ def cmd_validate_plan(args: argparse.Namespace) -> int:
     return 0 if payload["verdict"] == "PASS" or not args.strict else 1
 
 
+def cmd_migrate_plan(args: argparse.Namespace) -> int:
+    """Create a separate Plan v2 draft from an eight-column legacy Plan."""
+    project = resolve_project(args.project)
+    source_raw = Path(args.file)
+    output_raw = Path(args.output)
+    source = (
+        source_raw.resolve()
+        if source_raw.is_absolute()
+        else (project / source_raw).resolve()
+    )
+    output = (
+        output_raw.resolve()
+        if output_raw.is_absolute()
+        else (project / output_raw).resolve()
+    )
+    try:
+        payload = project_contracts.write_plan_v2_migration(source, output)
+    except project_contracts.ContractError as exc:
+        raise ForgeError(str(exc)) from exc
+    print(json.dumps(payload | {"project": str(project)}, indent=2))
+    return 0
+
+
 # ---------------------------------------------------------------------- hooks
 
 
@@ -6570,6 +6557,19 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--project", default=".")
     p.add_argument("--strict", action="store_true")
     p.set_defaults(func=cmd_validate_plan)
+
+    p = sub.add_parser(
+        "migrate-plan",
+        help="Create a separate reviewable Plan v2 draft from a legacy Plan",
+    )
+    p.add_argument("--project", default=".")
+    p.add_argument("--file", default=PLAN_FILE)
+    p.add_argument(
+        "--output",
+        required=True,
+        help="New draft path; the legacy Plan is never overwritten",
+    )
+    p.set_defaults(func=cmd_migrate_plan)
 
     p = sub.add_parser("status", help="Read-only Star Forge state (no mutation)")
     p.add_argument("--project", default=".")

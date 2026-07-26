@@ -13,7 +13,97 @@ The Blueprint is the contract the review wave checks the build against.
 
 - Ask the minimum questions needed, draft the Blueprint in complete form, and ask for approval ONCE. Do not re-interview when an approved Blueprint already covers the request.
 - Give every acceptance criterion a stable `AC-n` id (`AC-1`, `AC-2`, ...). Reviewers cite these ids; vague criteria produce vague reviews.
-- Approval sentinel: the Blueprint counts as approved only when it contains a line reading exactly `Status: approved` (or a `Last approved:` line starting with an ISO date). Set it after the user approves — never before.
+
+### Adaptive Interview
+
+First inspect the objective, repository, supplied context, and existing Blueprint.
+Classify each intake topic as `confirmed`, `material unanswered`, `safe assumption`,
+or `not applicable`. A question is material only when its answer could change
+scope, architecture, design, security, or delivery.
+
+Cover these topics without turning them into a fixed questionnaire:
+
+- users and the outcome they need
+- core flows and observable success
+- project class and target platforms
+- data ownership, storage, retention, and sharing
+- authentication and authorization
+- payments or financial behavior
+- external integrations and network access
+- design applicability, brand constraints, and supplied references
+- delivery target, environment, repository intent, and release intent
+- time, budget, compliance, compatibility, performance, and operational constraints
+
+Ask one concise batch containing only the material unanswered decisions. Skip
+confirmed and inapplicable topics. For lower-impact gaps, choose a conservative
+default and record it under `Explicit Assumptions` with its basis and impact if
+wrong. Never hide an assumption in prose or repeat a question already answered.
+Follow up only when an answer reveals a new material branch.
+
+### Toolchain and Risk Contract
+
+Record the project class, target platforms, required capabilities, preferred routes,
+and accepted fallbacks in `Toolchain`. Routes are preferences rather than implicit
+plugin requirements. Record unavailable required capabilities as explicit blockers.
+
+Set every `Risk Flags` entry to `yes`, `no`, or `not applicable` with a reason.
+Include auth, payments, secrets, network or external input, user or regulated data,
+privacy, dependency exposure, service coupling, persistence or migrations,
+performance or reliability, UI, and destructive operations. Do not approve a
+Blueprint with an unresolved material decision or risk flag.
+
+### Design Directions
+
+Determine whether user-facing design applies before doing design research. For UI
+pattern discovery, follow the capability router's preferred route before its
+accepted fallbacks. Keep the Blueprint provider-neutral by recording source type,
+reference, findings, and constraints instead of provider-specific commands,
+credentials, or schemas. The router may prefer Mobbin for real-world interaction
+patterns, so do not bypass that route when it is available. Valid source classes
+include Mobbin, Figma, ImageGen, user-supplied references, other capable sources,
+and a documented unavailable state.
+
+When capable sources or supplied references are available, present two or three
+materially distinct, grounded directions. Each direction must connect research
+findings to an original visual system, layout and interaction model, accessibility
+constraints, and responsive constraints. Do not present clone instructions or an
+ungrounded style label.
+
+When no capable source is available, record which capabilities were checked, why
+they were unavailable, the written constraints used instead, and the resulting
+verification limitation. Never imply that unavailable research ran.
+
+Record the user's selected direction and distilled constraints in the Blueprint.
+Design selection is part of the single complete Blueprint approval, never a second
+approval gate.
+
+### Delivery Contract
+
+New projects must explicitly choose `source-only`, `private-repo`, `preview`,
+`production`, `package`, or a named platform-specific delivery target. Record the
+environment, release intent, required artifact or live result, smoke expectation,
+and any provider or destination the product contract truly requires. Record GitHub
+owner, repository, visibility, adoption intent, default branch, and CI expectation
+when repository delivery is requested.
+
+Treat approval as authority only for the non-destructive external writes stated in
+the contract. Visibility changes, destructive replacement, paid resource creation,
+billing, signing, notarization, production migrations, and public publication need
+specific authority or one explicit blocker.
+
+### One Complete Approval
+
+Resolve every material placeholder, include the selected design direction when UI
+applies, and show the user the complete Blueprint once. After explicit approval,
+create the tracked content lock:
+
+```bash
+python3 <plugin-root>/scripts/star_forge.py approve-blueprint --project .
+```
+
+Do not create the lock before approval and do not use design selection as a
+separate approval checkpoint. Legacy status sentinels remain readable for existing
+projects, but new v0.4 contracts use `Blueprint.lock.json`.
 
 ## Plan.md
 

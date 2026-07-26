@@ -304,5 +304,116 @@ class BlueprintLockTests(unittest.TestCase):
         )
 
 
+class PlanV2ContractTests(unittest.TestCase):
+    LEGACY = (
+        "# Plan\n\n"
+        "Keep this note unchanged.\n\n"
+        "| Task | Description | Status | Mode | Files | Depends | Verify | Evidence |\n"
+        "|---|---|---|---|---|---|---|---|\n"
+        "| SF-1 | Parse a legacy plan | ready | solo | src/a.py | - | "
+        "python3 -c \"print('ok')\" | - |\n"
+    )
+
+    def test_dual_reader_exposes_v2_fields_without_breaking_legacy(self) -> None:
+        legacy = contracts.parse_plan_tasks_text(self.LEGACY)
+        self.assertEqual(len(legacy), 1)
+        self.assertEqual(legacy[0]["plan_version"], "legacy")
+        self.assertEqual(legacy[0]["acs"], "")
+        self.assertEqual(legacy[0]["proof"], "")
+        self.assertEqual(star_forge.parse_tasks_from_text(self.LEGACY)[0]["id"], "SF-1")
+
+        v2 = contracts.serialize_plan_tasks(
+            [
+                {
+                    **legacy[0],
+                    "acs": "AC-14, AC-18",
+                    "proof": "unit, integration",
+                    "description": "Round trip an escaped | character",
+                }
+            ]
+        )
+        self.assertEqual(
+            v2.splitlines()[0],
+            "| Task | Description | Status | Mode | Files | Depends | ACs | Proof | Verify | Evidence |",
+        )
+        parsed = contracts.parse_plan_tasks_text(v2)
+        self.assertEqual(parsed[0]["plan_version"], "v2")
+        self.assertEqual(parsed[0]["acs"], "AC-14, AC-18")
+        self.assertEqual(parsed[0]["proof"], "unit, integration")
+        self.assertEqual(
+            parsed[0]["description"],
+            "Round trip an escaped | character",
+        )
+        self.assertEqual(
+            contracts.split_plan_row(r"| SF-2 | C:\tmp\plan.py |"),
+            ["SF-2", r"C:\tmp\plan.py"],
+        )
+
+    def test_migration_creates_reviewable_v2_draft_and_preserves_source(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp)
+            source = project / "Plan.md"
+            output = project / "Plan.v2.md"
+            source.write_text(self.LEGACY, encoding="utf-8")
+            original = source.read_bytes()
+
+            result = contracts.write_plan_v2_migration(source, output)
+
+            self.assertEqual(result["schema"], "star-forge.plan-migration.v1")
+            self.assertTrue(result["source_preserved"])
+            self.assertTrue(result["review_required"])
+            self.assertEqual(result["legacy_tables_migrated"], 1)
+            self.assertEqual(result["task_rows_migrated"], 1)
+            self.assertEqual(source.read_bytes(), original)
+            migrated = output.read_text(encoding="utf-8")
+            self.assertIn("Keep this note unchanged.", migrated)
+            task = contracts.parse_plan_tasks_text(migrated)[0]
+            self.assertEqual(task["plan_version"], "v2")
+            self.assertEqual(task["acs"], contracts.PLAN_REVIEW_REQUIRED)
+            self.assertEqual(task["proof"], contracts.PLAN_REVIEW_REQUIRED)
+            self.assertEqual(task["verify"], "python3 -c \"print('ok')\"")
+
+    def test_migration_refuses_source_overwrite_and_existing_output(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp)
+            source = project / "Plan.md"
+            output = project / "Plan.v2.md"
+            source.write_text(self.LEGACY, encoding="utf-8")
+            output.write_text("do not overwrite\n", encoding="utf-8")
+
+            with self.assertRaises(contracts.ContractError):
+                contracts.write_plan_v2_migration(source, source)
+            with self.assertRaises(contracts.ContractError):
+                contracts.write_plan_v2_migration(source, output)
+            self.assertEqual(output.read_text(encoding="utf-8"), "do not overwrite\n")
+
+    def test_cli_requires_explicit_output_and_reports_separate_draft(self) -> None:
+        parser = star_forge.build_parser()
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                parser.parse_args(["migrate-plan"])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp)
+            source = project / "Plan.md"
+            source.write_text(self.LEGACY, encoding="utf-8")
+            stdout = io.StringIO()
+
+            with contextlib.redirect_stdout(stdout):
+                code = star_forge.cmd_migrate_plan(
+                    argparse.Namespace(
+                        project=str(project),
+                        file="Plan.md",
+                        output="drafts/Plan.v2.md",
+                    )
+                )
+
+            self.assertEqual(code, 0)
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual(payload["schema"], "star-forge.plan-migration.v1")
+            self.assertTrue((project / "drafts" / "Plan.v2.md").exists())
+            self.assertEqual(source.read_text(encoding="utf-8"), self.LEGACY)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -6,15 +6,17 @@ This rolling task ledger is derived from Blueprint.md. Blueprint.md wins when th
 
 ## Task Ledger
 
-| Task | Description | Status | Mode | Files | Depends | Verify | Evidence |
-|------|-------------|--------|------|-------|---------|--------|----------|
-| SF-001 | Define the first build task. | queued | delegate | - | - | replace-with-real-tasks | - |
+| Task | Description | Status | Mode | Files | Depends | ACs | Proof | Verify | Evidence |
+|------|-------------|--------|------|-------|---------|-----|-------|--------|----------|
+| SF-001 | Define the first build task. | queued | delegate | - | - | AC-1 | unit | replace-with-real-tasks | - |
 
 ## Columns
 
 - **Status**: queued, ready, in_progress, blocked, reviewing, complete.
 - **Mode**: `delegate` (spawn `starforge-builder` — required for real code), `solo` (coordinator may implement trivial glue), `docs` (no code; no-op verify allowed).
 - **Files**: the files this task owns (used for parallel-safety and the builder prompt).
+- **ACs**: comma-separated `AC-n` criteria covered by the task.
+- **Proof**: comma-separated proof kinds required for the task.
 - **Verify**: the exact verification command, or `noop` for docs tasks.
 - **Evidence**: filled by `complete-task`; do not hand-edit.
 
