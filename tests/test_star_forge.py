@@ -798,6 +798,39 @@ def test_complete_task_visual_requires_passing_browser_run() -> None:
         assert code == 0, payload
 
 
+def test_complete_task_python_control_plane_does_not_require_browser_run() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        init_project(project)
+        write_plan(
+            project,
+            [
+                (
+                    "| SF-3 | Enforce UX and browser review-policy floors | "
+                    "ready | solo | scripts/starforge/review_policy.py, "
+                    "scripts/star_forge.py, tests/test_v04_review_policy.py | "
+                    f"- | {REAL_VERIFY} | - |"
+                )
+            ],
+        )
+        policy = project / "scripts" / "starforge" / "review_policy.py"
+        policy.parent.mkdir(parents=True)
+        policy.write_text("REVIEW_FLOOR = True\n", encoding="utf-8")
+        cli = project / "scripts" / "star_forge.py"
+        cli.write_text("from starforge import review_policy\n", encoding="utf-8")
+        test = project / "tests" / "test_v04_review_policy.py"
+        test.parent.mkdir(parents=True)
+        test.write_text("def test_floor(): pass\n", encoding="utf-8")
+        record_verify(project, "SF-3")
+        code, payload = complete_task(
+            project,
+            "SF-3",
+            changed="scripts/starforge/review_policy.py",
+        )
+        assert code == 0, payload
+        assert payload["verdict"] == "COMPLETE"
+
+
 def test_task_visual_classifier_exempts_browser_collector_infrastructure() -> None:
     task = {
         "description": "Adapt browser and preview proof with viewport tests",
@@ -813,6 +846,54 @@ def test_task_visual_classifier_exempts_browser_collector_infrastructure() -> No
     }
     assert star_forge.task_files_are_infrastructure(task)
     assert not star_forge.task_is_visual(task)
+
+
+def test_task_visual_classifier_ignores_ux_prose_for_python_control_plane() -> None:
+    task = {
+        "description": (
+            "Enforce review floors so Fast MVP cannot omit UX or browser review"
+        ),
+        "files": (
+            "scripts/starforge/review_policy.py, scripts/star_forge.py, "
+            "tests/test_v04_review_policy.py"
+        ),
+        "verify": "python3 tests/test_v04_review_policy.py",
+        "evidence": "scripts/starforge/review_policy.py",
+        "plan_version": "legacy",
+        "proof": "",
+    }
+    assert not star_forge.task_files_are_infrastructure(task)
+    assert not star_forge.task_owns_visual_source(task)
+    assert star_forge.task_files_are_python_control_plane(task)
+    assert not star_forge.task_is_visual(task)
+
+
+def test_task_visual_classifier_keeps_python_ui_source_visual() -> None:
+    task = {
+        "description": "Build a Python UI view",
+        "files": "scripts/ui/dashboard.py, tests/test_dashboard.py",
+        "verify": "python3 tests/test_dashboard.py",
+        "evidence": "-",
+        "plan_version": "legacy",
+        "proof": "",
+    }
+    assert star_forge.task_owns_visual_source(task)
+    assert not star_forge.task_files_are_python_control_plane(task)
+    assert star_forge.task_is_visual(task)
+
+
+def test_task_visual_classifier_keeps_legacy_app_prose_fallback() -> None:
+    task = {
+        "description": "Build the dashboard UX",
+        "files": "src/app.py, tests/test_app.py",
+        "verify": "python3 tests/test_app.py",
+        "evidence": "-",
+        "plan_version": "legacy",
+        "proof": "",
+    }
+    assert not star_forge.task_owns_visual_source(task)
+    assert not star_forge.task_files_are_python_control_plane(task)
+    assert star_forge.task_is_visual(task)
 
 
 def test_task_visual_classifier_keeps_mixed_app_ui_ownership_visual() -> None:

@@ -30,6 +30,7 @@ def blueprint(
     *,
     project_class: str = "cli",
     target_platforms: str = "linux",
+    delivery_target: str = "source-only",
     summary: str = "A local utility.",
     rows: list[tuple[str, str, str]] | None = None,
 ) -> str:
@@ -61,7 +62,7 @@ Status: approved
 
 ## Delivery Contract
 
-- Delivery target: source-only
+- Delivery target: {delivery_target}
 
 ## Risk Flags
 
@@ -257,6 +258,49 @@ A legacy project with no structured risk table.
     assert review_policy.select_review_policy(legacy).legacy is True
 
 
+def test_legacy_fast_mvp_adds_only_structured_surface_floors() -> None:
+    legacy_with_surfaces = """# Blueprint
+
+Status: approved
+
+## Toolchain
+
+- Project class: web-app
+- Target platforms: web
+
+## Delivery Contract
+
+- Delivery target: package
+"""
+    result = review_policy.select_review_policy(
+        legacy_with_surfaces,
+        profile="fast-mvp",
+    )
+    assert result.legacy is True
+    assert result.roles == (
+        "correctness",
+        "ux-accessibility",
+        "performance-reliability",
+    )
+    assert result.selections[-1].lenses == (
+        "delivery",
+        "performance",
+        "reliability",
+    )
+    standard = review_policy.select_review_policy(
+        legacy_with_surfaces,
+        profile="standard",
+    )
+    assert standard.roles == (
+        "correctness",
+        "ux-accessibility",
+        "security",
+        "architecture-performance-reliability",
+    )
+    assert standard.combined is True
+    assert len(standard.roles) == review_policy.MAX_REVIEW_AGENTS
+
+
 def test_modern_fast_mvp_still_selects_applicable_roles() -> None:
     text = blueprint(
         {
@@ -271,6 +315,113 @@ def test_modern_fast_mvp_still_selects_applicable_roles() -> None:
         "security",
         "architecture",
     ]
+
+
+def test_fast_mvp_preserves_ui_floor_from_structured_surfaces() -> None:
+    text = blueprint(
+        project_class="web-app",
+        target_platforms="web",
+    )
+    result = review_policy.select_review_policy(
+        text,
+        profile="fast-mvp",
+    )
+    assert result.roles == ("correctness", "ux-accessibility")
+    assert result.reasons_for("ux-accessibility") == (
+        "Structured project class establishes a user-facing interface: web-app",
+    )
+
+
+def test_fast_mvp_preserves_every_security_and_privacy_floor() -> None:
+    for flag in review_policy.SECURITY_PRIVACY_FLAGS:
+        result = review_policy.select_review_policy(
+            blueprint({flag}),
+            profile="fast-mvp",
+        )
+        assert result.roles == ("correctness", "security"), flag
+        assert result.selections[-1].lenses == ("security", "privacy")
+
+
+def test_fast_mvp_preserves_delivery_review_floors() -> None:
+    expected_reasons = {
+        "private-repo": (
+            "Structured delivery contract requires delivery review: private-repo",
+        ),
+        "preview": (
+            "Structured delivery contract requires delivery review: preview",
+        ),
+        "production": (
+            "Structured delivery contract establishes operational reliability risk: production",
+        ),
+        "package": (
+            "Structured delivery contract requires delivery review: package",
+        ),
+        "ios-release": (
+            "Structured delivery contract requires delivery review: ios-release",
+        ),
+    }
+    for target, expected in expected_reasons.items():
+        result = review_policy.select_review_policy(
+            blueprint(delivery_target=target),
+            profile="fast-mvp",
+        )
+        assert result.roles == (
+            "correctness",
+            "performance-reliability",
+        ), target
+        assert "delivery" in result.selections[-1].lenses
+        assert result.reasons_for("performance-reliability") == expected
+
+    source_only = review_policy.select_review_policy(
+        blueprint(delivery_target="source-only"),
+        profile="fast-mvp",
+    )
+    assert source_only.roles == ("correctness",)
+
+
+def test_delivery_plan_proof_establishes_review_floor() -> None:
+    result = review_policy.select_review_policy(
+        blueprint(),
+        [{"proof": "unit, delivery, package"}],
+        profile="fast-mvp",
+    )
+    assert result.roles == ("correctness", "performance-reliability")
+    assert result.reasons_for("performance-reliability") == (
+        "Plan proof contract requires delivery review: delivery, package",
+    )
+
+
+def test_lifecycle_delivery_contract_establishes_review_floor() -> None:
+    contract = {
+        "schema": "star-forge.delivery-contract.v1",
+        "target": {
+            "kind": "platform-specific",
+            "platform": "ios",
+        },
+    }
+    result = review_policy.select_review_policy(
+        blueprint(),
+        profile="fast-mvp",
+        delivery_contract=contract,
+    )
+    assert result.project_surfaces.delivery_targets == (
+        "source-only",
+        "platform-specific",
+    )
+    assert result.project_surfaces.target_platforms == ("linux", "ios")
+    assert result.roles == (
+        "correctness",
+        "ux-accessibility",
+        "performance-reliability",
+    )
+    assert (
+        "Structured target platform establishes a user-facing interface: ios"
+        in result.reasons_for("ux-accessibility")
+    )
+    assert (
+        "Structured delivery contract requires delivery review: platform-specific"
+        in result.reasons_for("performance-reliability")
+    )
 
 
 def test_duplicate_flag_rows_cannot_duplicate_roles_or_reasons() -> None:
@@ -324,6 +475,39 @@ def test_cli_policy_is_source_bound_and_spawn_plan_carries_reasons() -> None:
         assert [item["role"] for item in spawned] == list(policy.roles)
         assert all(item["reasons"] for item in spawned)
         assert all(policy.source_hash in item["spawn"] for item in spawned)
+
+
+def test_cli_policy_reads_structured_delivery_lifecycle_state() -> None:
+    star_forge = load_star_forge()
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        (project / "Blueprint.md").write_text(
+            blueprint(),
+            encoding="utf-8",
+        )
+        delivery_path = (
+            project / star_forge.project_lifecycle.DELIVERY_CONTRACT_PATH
+        )
+        delivery_path.parent.mkdir(parents=True)
+        delivery_path.write_text(
+            json.dumps(
+                star_forge.project_lifecycle.make_delivery_contract(
+                    delivery_target="package",
+                )
+            ),
+            encoding="utf-8",
+        )
+        policy = star_forge.required_review_policy(
+            project,
+            bind_source_hash=False,
+        )
+        assert policy.roles == (
+            "correctness",
+            "performance-reliability",
+        )
+        assert policy.reasons_for("performance-reliability") == (
+            "Structured delivery contract requires delivery review: package",
+        )
 
 
 def test_new_roles_are_accepted_by_findings_loader() -> None:

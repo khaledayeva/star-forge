@@ -441,25 +441,101 @@
       "id": "react-native",
       "purpose": "React Native implementation",
       "selectors": {
-        "project_classes": ["react-native", "expo"]
+        "project_classes": ["react-native"]
       },
       "options": [
         {
           "id": "expo-plugin",
-          "label": "Expo plugin",
+          "label": "Official Expo plugin",
           "kind": "plugin",
-          "aliases": ["expo", "expo plugin"]
+          "aliases": [
+            "expo",
+            "expo plugin",
+            "official expo",
+            "official expo plugin"
+          ]
         },
         {
           "id": "expo-cli",
-          "label": "Repository-native Expo CLI workflow",
+          "label": "Repository-native React Native or Expo CLI workflow",
           "kind": "shell",
-          "aliases": ["expo cli"],
+          "aliases": [
+            "expo cli",
+            "react native cli",
+            "repository-native expo cli",
+            "repository-native react native"
+          ],
           "safe": true
         },
         {
           "id": "react-native-unavailable",
           "label": "React Native workflow unavailable blocker",
+          "kind": "blocker",
+          "always_available": true
+        }
+      ]
+    },
+    {
+      "id": "expo",
+      "purpose": "Expo implementation",
+      "selectors": {
+        "project_classes": ["expo"]
+      },
+      "options": [
+        {
+          "id": "expo-plugin",
+          "label": "Official Expo plugin",
+          "kind": "plugin",
+          "aliases": [
+            "expo",
+            "expo plugin",
+            "official expo",
+            "official expo plugin"
+          ]
+        },
+        {
+          "id": "expo-cli",
+          "label": "Repository-native Expo CLI workflow",
+          "kind": "shell",
+          "aliases": ["expo cli", "repository-native expo cli"],
+          "safe": true
+        },
+        {
+          "id": "expo-unavailable",
+          "label": "Expo workflow unavailable blocker",
+          "kind": "blocker",
+          "always_available": true
+        }
+      ]
+    },
+    {
+      "id": "expo-platform-delivery",
+      "purpose": "React Native and Expo platform delivery",
+      "selectors": {
+        "delivery_targets": ["expo", "react-native"]
+      },
+      "options": [
+        {
+          "id": "expo-plugin",
+          "label": "Official Expo plugin",
+          "kind": "plugin",
+          "aliases": [
+            "expo",
+            "expo plugin",
+            "official expo",
+            "official expo plugin"
+          ]
+        },
+        {
+          "id": "expo-cli",
+          "label": "Repository-native Expo CLI workflow",
+          "kind": "shell",
+          "aliases": ["expo cli", "repository-native expo cli"],
+          "safe": true
+        },
+        {
+          "id": "expo-platform-delivery-unavailable",
+          "label": "React Native and Expo platform delivery unavailable blocker",
           "kind": "blocker",
           "always_available": true
         }

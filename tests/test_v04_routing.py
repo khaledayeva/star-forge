@@ -51,6 +51,8 @@ def test_catalog_is_versioned_complete_and_policy_only() -> None:
         "iOS verification",
         "macOS implementation and verification",
         "React Native implementation",
+        "Expo implementation",
+        "React Native and Expo platform delivery",
         "Security review",
         "GitHub lifecycle",
         "Simple or internal hosting",
@@ -143,6 +145,110 @@ def test_missing_preferred_capability_reports_selected_fallback() -> None:
     assert qa.status == "degraded"
     assert qa.selected["id"] == "playwright-collector"
     assert [item["id"] for item in qa.unavailable] == ["in-app-browser"]
+
+
+def test_react_native_and_expo_routes_prefer_the_official_plugin() -> None:
+    react_native = routing.resolve_routes(
+        project_class="react-native",
+        available_capabilities=["official expo plugin", "expo cli"],
+    )
+    react_native_decisions = decisions_by_need(react_native)
+    assert tuple(react_native_decisions) == ("react-native",)
+    selected = react_native_decisions["react-native"]
+    assert selected.status == "available"
+    assert selected.fallback_used is False
+    assert selected.selected == {
+        "id": "expo-plugin",
+        "label": "Official Expo plugin",
+        "kind": "plugin",
+    }
+
+    expo = routing.resolve_routes(
+        project_class="expo",
+        available_capabilities=["expo cli", "expo plugin"],
+    )
+    expo_decisions = decisions_by_need(expo)
+    assert tuple(expo_decisions) == ("expo",)
+    assert expo_decisions["expo"].selected["id"] == "expo-plugin"
+    assert expo_decisions["expo"].status == "available"
+
+
+def test_react_native_and_expo_fallbacks_are_degraded_or_blocked_honestly() -> None:
+    fallback = routing.resolve_route(
+        "react-native",
+        available_capabilities=["repository-native react native"],
+    )
+    assert fallback.status == "degraded"
+    assert fallback.fallback_used
+    assert fallback.selected == {
+        "id": "expo-cli",
+        "label": "Repository-native React Native or Expo CLI workflow",
+        "kind": "shell",
+        "safe": True,
+    }
+    assert [item["id"] for item in fallback.unavailable] == ["expo-plugin"]
+
+    blocked = routing.resolve_route("expo", available_capabilities=[])
+    assert blocked.status == "blocked"
+    assert blocked.fallback_used
+    assert blocked.selected["id"] == "expo-unavailable"
+    assert [item["id"] for item in blocked.unavailable] == [
+        "expo-plugin",
+        "expo-cli",
+    ]
+
+
+def test_named_expo_platform_delivery_has_its_own_deterministic_route() -> None:
+    preferred = routing.resolve_routes(
+        project_class="expo",
+        delivery_target=["platform-specific", "expo"],
+        available_capabilities=["expo plugin", "expo cli"],
+    )
+    decisions = decisions_by_need(preferred)
+    assert tuple(decisions) == ("expo", "expo-platform-delivery")
+    delivery = decisions["expo-platform-delivery"]
+    assert delivery.required_by == ("delivery:expo",)
+    assert delivery.selected["id"] == "expo-plugin"
+    assert delivery.status == "available"
+
+    fallback = routing.resolve_route(
+        "expo-platform-delivery",
+        available_capabilities=["repository-native expo cli"],
+    )
+    assert fallback.status == "degraded"
+    assert fallback.selected["id"] == "expo-cli"
+    assert [item["id"] for item in fallback.unavailable] == ["expo-plugin"]
+
+    blocked = routing.resolve_route(
+        "expo-platform-delivery",
+        available_capabilities=[],
+    )
+    assert blocked.status == "blocked"
+    assert blocked.selected["id"] == "expo-platform-delivery-unavailable"
+    assert [item["id"] for item in blocked.unavailable] == [
+        "expo-plugin",
+        "expo-cli",
+    ]
+
+
+def test_expo_aliases_and_installation_policy_remain_data_only() -> None:
+    catalog = routing.load_catalog()
+    changed = copy.deepcopy(catalog)
+    route = next(item for item in changed["routes"] if item["id"] == "expo")
+    route["options"][0]["aliases"] = ["renamed official expo capability"]
+
+    result = routing.resolve_routes(
+        catalog=changed,
+        project_class="expo",
+        available_capabilities=["renamed official expo capability"],
+    )
+    assert decisions_by_need(result)["expo"].selected["id"] == "expo-plugin"
+
+    for route_id in ("react-native", "expo", "expo-platform-delivery"):
+        route = next(item for item in catalog["routes"] if item["id"] == route_id)
+        assert "install" not in route["options"][0]
+        assert route["options"][1]["safe"] is True
+        assert route["options"][1].get("always_available") is not True
 
 
 def test_unavailable_required_capability_is_an_explicit_blocker() -> None:

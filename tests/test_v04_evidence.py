@@ -212,6 +212,98 @@ def test_v1_adapter_rejects_unsafe_paths_and_secret_bearing_provenance() -> None
     raises("secret material", evidence.adapt_v1_manifest, legacy)
 
 
+def test_expo_uses_standard_task_evidence_plus_v2_delivery_proof() -> None:
+    task = fixture()
+    task.update(
+        kind="task",
+        task="SF-EXPO-001",
+        capability="expo",
+        provider="expo-plugin",
+        provenance={
+            "evidence_source": "coordinator-recorded-plan-verify",
+            "route": "expo",
+            "selected": "expo-plugin",
+            "status": "available",
+        },
+        artifacts=[],
+    )
+    evidence.validate_envelope(task)
+
+    delivery = copy.deepcopy(task)
+    delivery.update(
+        kind="delivery",
+        capability="expo-platform-delivery",
+        provenance={
+            "evidence_source": "coordinator-recorded-delivery",
+            "route": "expo-platform-delivery",
+            "selected": "expo-plugin",
+            "status": "available",
+            "delivery_contract": "expo",
+        },
+    )
+    evidence.validate_envelope(delivery)
+    assert delivery["schema"] == evidence.EVIDENCE_SCHEMA
+    assert delivery["source_hash"] == task["source_hash"]
+    assert delivery["runtime_asset_hash"] == task["runtime_asset_hash"]
+    assert delivery["kind"] == "delivery"
+    assert delivery["capability"] == "expo-platform-delivery"
+
+
+def test_expo_fallback_and_unavailable_delivery_proof_are_not_misrepresented() -> None:
+    fallback = fixture()
+    fallback.update(
+        kind="delivery",
+        task="SF-EXPO-002",
+        capability="expo-platform-delivery",
+        provider="expo-cli",
+        provenance={
+            "evidence_source": "coordinator-recorded-delivery",
+            "route": "expo-platform-delivery",
+            "selected": "expo-cli",
+            "status": "degraded",
+            "fallback_used": True,
+            "unavailable": ["expo-plugin"],
+        },
+        artifacts=[],
+    )
+    evidence.validate_envelope(fallback)
+    assert fallback["provider"] == "expo-cli"
+    assert fallback["provenance"]["fallback_used"] is True
+
+    unavailable = copy.deepcopy(fallback)
+    unavailable.update(
+        provider="expo-platform-delivery-unavailable",
+        verdict="FAIL",
+        blockers=[
+            {
+                "message": "official Expo plugin and repository-native Expo CLI are unavailable",
+                "blocking": True,
+            }
+        ],
+    )
+    unavailable["provenance"].update(
+        selected="expo-platform-delivery-unavailable",
+        status="blocked",
+    )
+    evidence.validate_envelope(unavailable)
+    assert unavailable["verdict"] == "FAIL"
+    assert unavailable["blockers"][0]["blocking"] is True
+
+
+def test_expo_contract_does_not_add_a_live_collector() -> None:
+    collectors = ROOT / "scripts" / "live_collectors"
+    assert not list(collectors.glob("*expo*"))
+    assert not list(collectors.glob("*react_native*"))
+
+    reference = (
+        ROOT / "skills" / "forge" / "references" / "capability-routing.md"
+    ).read_text(encoding="utf-8")
+    assert "There is no Expo-specific live collector." in reference
+    assert "normal coordinator-recorded Plan Verify evidence" in reference
+    assert "`star-forge.evidence-envelope.v2`" in reference
+    assert "`capability` set to `expo-platform-delivery`" in reference
+
+
 if __name__ == "__main__":
     tests = [
         value

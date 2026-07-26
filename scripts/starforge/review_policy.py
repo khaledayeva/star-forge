@@ -1,9 +1,9 @@
 """Deterministic adaptive review-role selection for Star Forge.
 
-The policy consumes only structured Blueprint fields and Plan proof kinds. It
-does not scan product prose or file names for suggestive keywords. This keeps
-the review wave reproducible while preserving the v0.3 profile mapping for
-Blueprints that predate the structured Risk Flags contract.
+The policy consumes only structured Blueprint fields, Plan proof kinds, and the
+validated delivery contract. It does not scan product prose or file names for
+suggestive keywords. This keeps the review wave reproducible while preserving
+the v0.3 profile mapping for Blueprints that predate structured risk facts.
 """
 
 from __future__ import annotations
@@ -38,12 +38,12 @@ ROLE_LENSES: dict[str, str] = {
         "maintainability, coupling, data flow, boundaries, and future change safety"
     ),
     "performance-reliability": (
-        "latency, resource use, responsiveness, resilience, failure recovery, "
-        "and operational reliability"
+        "delivery contract fulfillment, latency, resource use, responsiveness, "
+        "resilience, failure recovery, and operational reliability"
     ),
     "architecture-performance-reliability": (
-        "architecture, coupling, data flow, performance, resource use, "
-        "resilience, and operational reliability"
+        "architecture, coupling, data flow, delivery contract fulfillment, "
+        "performance, resource use, resilience, and operational reliability"
     ),
 }
 
@@ -158,6 +158,9 @@ _PLATFORM_PERFORMANCE_SURFACES = frozenset(
     {"native-desktop", "native-mobile", "embedded", "realtime"}
 )
 _RELIABILITY_DELIVERY_TARGETS = frozenset({"production"})
+_DELIVERY_PROOF_KINDS = frozenset({"delivery", "package", "preview"})
+_NO_DELIVERY_REVIEW_TARGETS = frozenset({"source-only"})
+_DELIVERY_CONTRACT_SCHEMA = "star-forge.delivery-contract.v1"
 
 
 @dataclass(frozen=True)
@@ -416,15 +419,49 @@ def _surface_values(
     return tuple(sorted(surfaces))
 
 
+def _delivery_contract_values(
+    contract: Mapping[str, Any] | None,
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Return canonical target and platform facts from a lifecycle contract."""
+
+    if not isinstance(contract, Mapping):
+        return (), ()
+    if contract.get("schema") != _DELIVERY_CONTRACT_SCHEMA:
+        return (), ()
+    target = contract.get("target")
+    if not isinstance(target, Mapping):
+        return (), ()
+    kind = _normalized(target.get("kind"))
+    platform = _normalized(target.get("platform"))
+    delivery_targets = (kind,) if kind else ()
+    target_platforms = (platform,) if platform else ()
+    return delivery_targets, target_platforms
+
+
 def parse_project_surfaces(
     blueprint_text: str,
     tasks: Sequence[Mapping[str, Any]] = (),
+    *,
+    delivery_contract: Mapping[str, Any] | None = None,
 ) -> ProjectSurfaces:
     """Parse only canonical Blueprint fields and Plan proof cells."""
 
     project_classes = _field_values(blueprint_text, "Project class")
-    target_platforms = _field_values(blueprint_text, "Target platforms")
-    delivery_targets = _field_values(blueprint_text, "Delivery target")
+    contract_targets, contract_platforms = _delivery_contract_values(
+        delivery_contract
+    )
+    target_platforms = _deduplicated(
+        (
+            *_field_values(blueprint_text, "Target platforms"),
+            *contract_platforms,
+        )
+    )
+    delivery_targets = _deduplicated(
+        (
+            *_field_values(blueprint_text, "Delivery target"),
+            *contract_targets,
+        )
+    )
     proof_kinds = _proof_kinds(tasks)
     return ProjectSurfaces(
         project_classes=project_classes,
@@ -507,7 +544,36 @@ def _surface_reasons(
                 "reliability risk: "
                 + ", ".join(reliability_targets)
             )
+        delivery_targets = sorted(
+            target
+            for target in surfaces.delivery_targets
+            if target not in _NO_DELIVERY_REVIEW_TARGETS
+            and target not in _RELIABILITY_DELIVERY_TARGETS
+        )
+        if delivery_targets:
+            reasons.append(
+                "Structured delivery contract requires delivery review: "
+                + ", ".join(delivery_targets)
+            )
+        delivery_proofs = sorted(
+            _DELIVERY_PROOF_KINDS.intersection(surfaces.proof_kinds)
+        )
+        if delivery_proofs:
+            reasons.append(
+                "Plan proof contract requires delivery review: "
+                + ", ".join(delivery_proofs)
+            )
     return tuple(reasons)
+
+
+def _performance_lenses(surfaces: ProjectSurfaces) -> tuple[str, ...]:
+    delivery_required = any(
+        target not in _NO_DELIVERY_REVIEW_TARGETS
+        for target in surfaces.delivery_targets
+    ) or bool(_DELIVERY_PROOF_KINDS.intersection(surfaces.proof_kinds))
+    if delivery_required:
+        return ("delivery", "performance", "reliability")
+    return ("performance", "reliability")
 
 
 def _selection(
@@ -522,6 +588,53 @@ def _selection(
     )
 
 
+def _apply_agent_cap(
+    logical: Sequence[ReviewRoleSelection],
+) -> tuple[tuple[ReviewRoleSelection, ...], bool]:
+    """Combine adjacent lenses when required to preserve the four-agent cap."""
+
+    selections = list(logical)
+    combined = False
+    if len(selections) > MAX_REVIEW_AGENTS:
+        architecture = next(
+            (
+                item
+                for item in selections
+                if item.role == "architecture"
+            ),
+            None,
+        )
+        performance = next(
+            (
+                item
+                for item in selections
+                if item.role == "performance-reliability"
+            ),
+            None,
+        )
+        if architecture is not None and performance is not None:
+            selections = [
+                item
+                for item in selections
+                if item.role
+                not in {"architecture", "performance-reliability"}
+            ]
+            selections.append(
+                _selection(
+                    "architecture-performance-reliability",
+                    _deduplicated(
+                        ("architecture", *performance.lenses)
+                    ),
+                    (*architecture.reasons, *performance.reasons),
+                )
+            )
+            combined = True
+
+    if len(selections) > MAX_REVIEW_AGENTS:
+        raise AssertionError("adaptive review policy exceeded the four-agent cap")
+    return tuple(selections), combined
+
+
 def legacy_roles_for_profile(profile: str) -> list[str]:
     """Return the exact v0.3 role list for compatibility Blueprints."""
 
@@ -532,30 +645,72 @@ def legacy_roles_for_profile(profile: str) -> list[str]:
     )
 
 
+def _legacy_selections_with_surface_floors(
+    profile: str,
+    surfaces: ProjectSurfaces,
+) -> tuple[tuple[ReviewRoleSelection, ...], bool]:
+    """Preserve legacy defaults while adding any structured surface floors."""
+
+    legacy_reason = (
+        f"Legacy Blueprint uses the `{profile}` compatibility review profile",
+    )
+    legacy = {
+        role: _selection(role, (role,), legacy_reason)
+        for role in legacy_roles_for_profile(profile)
+    }
+    ux_reasons = _surface_reasons(surfaces, lens="ux-accessibility")
+    performance_reasons = _surface_reasons(
+        surfaces,
+        lens="performance-reliability",
+    )
+    if not ux_reasons and not performance_reasons:
+        return tuple(legacy.values()), False
+
+    logical: list[ReviewRoleSelection] = [legacy["correctness"]]
+    if ux_reasons:
+        logical.append(
+            _selection(
+                "ux-accessibility",
+                ("ux", "accessibility"),
+                ux_reasons,
+            )
+        )
+    if "security" in legacy:
+        logical.append(legacy["security"])
+    if "architecture" in legacy:
+        logical.append(legacy["architecture"])
+    if performance_reasons:
+        logical.append(
+            _selection(
+                "performance-reliability",
+                _performance_lenses(surfaces),
+                performance_reasons,
+            )
+        )
+    return _apply_agent_cap(logical)
+
+
 def select_review_policy(
     blueprint_text: str,
     tasks: Sequence[Mapping[str, Any]] = (),
     *,
     profile: str = "standard",
     source_hash: str | None = None,
+    delivery_contract: Mapping[str, Any] | None = None,
 ) -> ReviewPolicySelection:
     """Select applicable review roles in canonical order with a hard cap of four."""
 
     normalized_profile = str(profile or "standard").strip().casefold()
     flags = _risk_flags(blueprint_text)
-    surfaces = parse_project_surfaces(blueprint_text, tasks)
+    surfaces = parse_project_surfaces(
+        blueprint_text,
+        tasks,
+        delivery_contract=delivery_contract,
+    )
     if not flags:
-        legacy_roles = legacy_roles_for_profile(normalized_profile)
-        selections = tuple(
-            _selection(
-                role,
-                (role,),
-                (
-                    f"Legacy Blueprint uses the `{normalized_profile}` "
-                    "compatibility review profile",
-                ),
-            )
-            for role in legacy_roles
+        selections, combined = _legacy_selections_with_surface_floors(
+            normalized_profile,
+            surfaces,
         )
         return ReviewPolicySelection(
             legacy=True,
@@ -564,9 +719,12 @@ def select_review_policy(
             project_surfaces=surfaces,
             risk_flags=(),
             selections=selections,
-            combined=False,
+            combined=combined,
         )
 
+    # Every modern selection below is a required applicability floor. Profiles
+    # may reduce legacy defaults, but cannot remove a role selected by these
+    # structured risk, surface, proof, or delivery facts.
     flag_map = {flag.name: flag for flag in flags}
     logical: list[ReviewRoleSelection] = [
         _selection(
@@ -620,35 +778,12 @@ def select_review_policy(
         logical.append(
             _selection(
                 "performance-reliability",
-                ("performance", "reliability"),
+                _performance_lenses(surfaces),
                 performance_reasons,
             )
         )
 
-    combined = False
-    if len(logical) > MAX_REVIEW_AGENTS:
-        architecture = next(
-            item for item in logical if item.role == "architecture"
-        )
-        performance = next(
-            item for item in logical if item.role == "performance-reliability"
-        )
-        logical = [
-            item
-            for item in logical
-            if item.role not in {"architecture", "performance-reliability"}
-        ]
-        logical.append(
-            _selection(
-                "architecture-performance-reliability",
-                ("architecture", "performance", "reliability"),
-                (*architecture.reasons, *performance.reasons),
-            )
-        )
-        combined = True
-
-    if len(logical) > MAX_REVIEW_AGENTS:
-        raise AssertionError("adaptive review policy exceeded the four-agent cap")
+    selections, combined = _apply_agent_cap(logical)
 
     return ReviewPolicySelection(
         legacy=False,
@@ -656,7 +791,7 @@ def select_review_policy(
         source_hash=source_hash,
         project_surfaces=surfaces,
         risk_flags=flags,
-        selections=tuple(logical),
+        selections=selections,
         combined=combined,
     )
 
@@ -667,6 +802,7 @@ def select_review_roles(
     *,
     profile: str = "standard",
     source_hash: str | None = None,
+    delivery_contract: Mapping[str, Any] | None = None,
 ) -> list[str]:
     """Convenience API for callers that need only stable role identifiers."""
 
@@ -676,5 +812,6 @@ def select_review_roles(
             tasks,
             profile=profile,
             source_hash=source_hash,
+            delivery_contract=delivery_contract,
         ).roles
     )

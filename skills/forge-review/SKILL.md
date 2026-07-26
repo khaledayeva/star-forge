@@ -33,6 +33,30 @@ writes only its assigned
 `.starforge/reviews/<scope>/<role>.findings.json` and never edits source. Do not
 write a reviewer's findings file on its behalf.
 
+### UI originality and accessibility review
+
+For the `ux-accessibility` role, include the paths to any available current
+source-bound screenshots, recordings, browser evidence, native UI snapshots, and
+interaction results in the spawn prompt. Do not create substitute evidence for the
+reviewer or imply that unavailable evidence exists.
+
+Require this lens to review all of the following:
+
+- originality against the selected Design Direction and its `Borrow` and `Avoid`
+  constraints, including whether the interface copies any single reference;
+- accessibility across keyboard, focus, semantics, labels, assistive technology,
+  contrast, non-color cues, text reflow, target size, and reduced motion;
+- responsive visual quality across the supported viewports and platforms;
+- relevant default, hover, focus, pressed, selected, disabled, loading, empty,
+  error, success, and validation states; and
+- the available live visual and interaction evidence, including its source binding
+  and represented viewport or platform.
+
+The reviewer remains read-only and evidence-bound. It must distinguish an observed
+defect from missing, stale, or insufficient evidence, cite a repository file and
+line for every finding, and never infer a visual pass or defect from code
+inspection alone.
+
 ## 2. Merge and Clear the Queue
 
 ```bash

@@ -165,6 +165,7 @@ VISUAL_SOURCE_PARTS = frozenset(
         "views",
     }
 )
+PYTHON_CONTROL_PLANE_PARTS = frozenset({"scripts", "tooling", "tools"})
 TEXT_SUFFIXES = {
     "." + "env", ".astro", ".c", ".cc", ".cfg", ".conf", ".cpp", ".cs", ".css",
     ".go", ".h", ".html", ".java", ".js", ".json", ".jsx", ".kt", ".mjs", ".md",
@@ -1057,6 +1058,15 @@ def required_review_policy(
             tasks = parse_tasks(plan_path)
         except ForgeError:
             tasks = []
+    delivery_contract: dict[str, Any] = {}
+    delivery_contract_path = (
+        project / project_lifecycle.DELIVERY_CONTRACT_PATH
+    )
+    if delivery_contract_path.exists():
+        try:
+            delivery_contract = read_json(delivery_contract_path)
+        except (ForgeError, OSError, UnicodeError, json.JSONDecodeError):
+            delivery_contract = {}
     if source_hash_value is None and bind_source_hash:
         source_hash_value, _problem = try_source_hash(project)
     return adaptive_review_policy.select_review_policy(
@@ -1064,6 +1074,7 @@ def required_review_policy(
         tasks,
         profile=review_profile(project),
         source_hash=source_hash_value,
+        delivery_contract=delivery_contract,
     )
 
 
@@ -1538,6 +1549,34 @@ def task_owns_visual_source(task: Mapping[str, Any]) -> bool:
     return False
 
 
+def task_files_are_python_control_plane(task: Mapping[str, Any]) -> bool:
+    """Identify nonvisual Python tooling without consulting task prose."""
+
+    owned = [
+        Path(raw_path.replace("\\", "/"))
+        for raw_path in task_files(dict(task))
+        if not task_file_is_infrastructure(raw_path)
+    ]
+    return bool(owned) and all(
+        path.suffix.casefold() == ".py"
+        and bool(
+            {
+                part.casefold()
+                for part in path.parts[:-1]
+            }
+            & PYTHON_CONTROL_PLANE_PARTS
+        )
+        and not bool(
+            {
+                part.casefold()
+                for part in path.parts[:-1]
+            }
+            & VISUAL_SOURCE_PARTS
+        )
+        for path in owned
+    )
+
+
 def task_is_visual(task: dict[str, Any]) -> bool:
     proof_kinds = task_proof_kinds(task)
     if "browser" in proof_kinds:
@@ -1547,6 +1586,8 @@ def task_is_visual(task: dict[str, Any]) -> bool:
     if task_files_are_infrastructure(task):
         return False
     if str(task.get("plan_version") or "").casefold() == "v2" and proof_kinds:
+        return False
+    if task_files_are_python_control_plane(task):
         return False
     text = " ".join(str(task.get(key, "")) for key in ("description", "verify", "files", "evidence"))
     return bool(VISUAL_TASK_RE.search(text))

@@ -41,8 +41,9 @@ An empty `findings` array is a valid, honest result for clean code. Do not inven
   and a source hash. Use that exact role in the findings file.
 - Concentrate on the named lens while still reporting a concrete critical issue
   that crosses lens boundaries.
-- `ux-accessibility` covers user experience, keyboard and assistive access,
-  responsive behavior, and visual regressions.
+- `ux-accessibility` uses the dedicated UI originality, accessibility, and
+  visual-quality procedure below. Complete every part of that procedure rather
+  than treating visual polish or accessibility as optional.
 - `security` includes privacy, sensitive data handling, trust boundaries, auth,
   unsafe input and output, secrets, and dependency exposure.
 - `architecture` covers coupling, boundaries, persistence, migrations, and future
@@ -124,6 +125,41 @@ Work through every lens below against the diff and the Blueprint acceptance crit
 - Trace the implementation to the Blueprint's selected Design Direction and its `Borrow`, `Avoid`, accessibility, and responsive constraints. A named reference alone is not a design contract.
 - Flag copied source branding, trade dress, assets, copy, proprietary content, distinctive composition, or screen-level layout. Research should contribute reusable behavior and constraints, not clone instructions.
 - If design research was unavailable or rate-limited, confirm the Blueprint states what was checked, what fallback or written constraints were used, and the resulting verification limitation. Do not accept claims that unavailable research ran.
+
+### UX and accessibility role (`ux-accessibility`)
+
+When assigned `ux-accessibility`, review every item below. Stay read-only and
+evidence-bound: inspect implementation, contracts, and available current
+source-bound live visual evidence, but do not edit the product, generate substitute
+screenshots, or claim behavior that the evidence does not demonstrate.
+
+- **Originality:** Trace the implemented interface to the selected Design
+  Direction and its `Borrow`, `Avoid`, and product-specific constraints. Confirm
+  the result combines principles into an original product expression and does not
+  copy any single reference. Flag reproduced branding, trade dress, assets, copy,
+  proprietary content, distinctive composition, or screen-level layout.
+- **Accessibility:** Check complete keyboard paths, logical focus order, visible
+  focus, semantic structure, control names and labels, assistive-technology
+  behavior, contrast, non-color cues, text scaling or reflow, target size, and
+  reduced-motion behavior wherever each requirement applies.
+- **Responsive visual quality:** Check the supported viewport and platform sizes
+  for readable hierarchy, typography, spacing, alignment, density, overflow,
+  clipping, and stable navigation. A polished desktop screenshot does not prove a
+  narrow or enlarged-text layout.
+- **Interaction states:** Check relevant default, hover, focus, pressed, selected,
+  disabled, loading, empty, error, success, and validation states, including
+  pointer, keyboard, touch, and assistive interaction paths where supported.
+- **Live visual evidence:** Use available current source-bound screenshots,
+  recordings, browser evidence, native UI snapshots, and interaction results.
+  Cross-check their source hash and represented viewport or platform. When the
+  approved contract requires live visual or interaction proof but it is absent,
+  stale, or too narrow to support a conclusion, report that evidence gap as a
+  finding. Never infer a visual pass or defect from code inspection alone.
+
+Every finding still needs a concrete repository file and line. Cite the
+implementation, contract, or proof record that demonstrates the defect or missing
+required evidence, distinguish an observed defect from an evidence gap, and
+recommend the smallest verifiable fix.
 
 ## Anti-Patterns
 

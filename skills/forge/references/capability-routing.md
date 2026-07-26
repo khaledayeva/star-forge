@@ -88,9 +88,37 @@ public repository, overwrite a remote, or change visibility implicitly.
   and Simulator proof when selected.
 - macOS uses `macos-implementation` and the most specific required native UI,
   signing, packaging, and test capabilities.
-- React Native uses `react-native`, preferring the official Expo plugin.
+- React Native uses `react-native`, and Expo projects use `expo`. Both prefer
+  the host-discovered official Expo plugin.
 - Security-sensitive work uses `security`, preferring Codex Security and
   preserving normalized source-bound security proof.
+
+#### React Native and Expo
+
+Treat React Native and Expo as separate project-class contracts so an alias
+change stays catalog-only and does not alter lifecycle code. For either route,
+select `expo-plugin` only when the host exposes one of its configured aliases.
+The `expo-cli` fallback means an existing repository-native React Native or Expo
+CLI workflow was actually discovered. It does not authorize adding Expo, changing
+the application stack, or installing a dependency. Record that fallback as
+`degraded`. If neither route is available, preserve the checked preferred and
+fallback options and use the route's explicit unavailable blocker.
+
+For an approved named `expo` or `react-native` platform delivery target, also
+resolve `expo-platform-delivery`. When the Delivery Contract uses the generic
+`platform-specific` target plus a named platform, include the normalized platform
+name in the route request's delivery-target values. Do not infer a platform from
+an installed tool or choose a second delivery target.
+
+There is no Expo-specific live collector. A React Native or Expo task therefore
+requires the normal coordinator-recorded Plan Verify evidence. A platform result
+also requires separate, current-source delivery proof in a
+`star-forge.evidence-envelope.v2` envelope with `kind` set to `delivery`,
+`capability` set to `expo-platform-delivery`, and `provider` set to the capability
+that actually ran. Its provenance must preserve the route decision and approved
+Delivery Contract, including any fallback. Artifact hashes, timestamps, verdict,
+degradation, and blockers remain mandatory. Task verification alone never proves
+delivery, and an unavailable route cannot produce passing delivery proof.
 
 ### Delivery
 

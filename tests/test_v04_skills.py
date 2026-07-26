@@ -16,6 +16,7 @@ FORGE_PLAN_SKILL = ROOT / "skills" / "forge-plan" / "SKILL.md"
 FORGE_SKILL = ROOT / "skills" / "forge" / "SKILL.md"
 FORGE_WORK_SKILL = ROOT / "skills" / "forge-work" / "SKILL.md"
 FORGE_REVIEW_SKILL = ROOT / "skills" / "forge-review" / "SKILL.md"
+REVIEWER_AGENT = ROOT / "agents" / "reviewer" / "agent.md"
 CAPABILITY_ROUTING = (
     ROOT / "skills" / "forge" / "references" / "capability-routing.md"
 )
@@ -332,6 +333,53 @@ def test_coordinator_owns_evidence_and_completion() -> None:
         "run and report `done --strict`",
     ):
         assert token in reference, token
+
+
+def test_ux_accessibility_review_is_original_accessible_and_evidence_bound() -> None:
+    skill = read(FORGE_REVIEW_SKILL)
+    reviewer = read(REVIEWER_AGENT)
+    normalized_skill = " ".join(skill.split())
+    normalized_reviewer = " ".join(reviewer.split())
+
+    assert "### UI originality and accessibility review" in skill
+    assert "### UX and accessibility role (`ux-accessibility`)" in reviewer
+    for token in (
+        "current source-bound screenshots",
+        "browser evidence",
+        "native UI snapshots",
+        "interaction results",
+        "copies any single reference",
+        "responsive visual quality",
+        "assistive technology",
+        "reduced motion",
+        "loading",
+        "empty",
+        "error",
+        "success",
+        "source binding",
+        "represented viewport or platform",
+    ):
+        assert token in normalized_skill, token
+    for token in (
+        "`Borrow`",
+        "`Avoid`",
+        "does not copy any single reference",
+        "complete keyboard paths",
+        "assistive-technology behavior",
+        "Responsive visual quality",
+        "Interaction states",
+        "Live visual evidence",
+        "absent, stale, or too narrow",
+        "Every finding still needs a concrete repository file and line",
+        "distinguish an observed defect from an evidence gap",
+    ):
+        assert token in normalized_reviewer, token
+    for text in (normalized_skill, normalized_reviewer):
+        assert "read-only and evidence-bound" in text
+        assert (
+            "never infer a visual pass or defect from code inspection alone"
+            in text.casefold()
+        )
 
 
 def test_skill_sources_do_not_use_em_dashes() -> None:
