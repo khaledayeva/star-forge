@@ -1,11 +1,16 @@
 ---
 name: forge-plan
-description: Star Forge planning — write or revise Blueprint.md and Plan.md. Use when the user asks to blueprint, plan, define requirements or acceptance criteria, break work into tasks, split or parallelize work, set task modes or dependencies, or validate the plan before building.
+description: "Star Forge planning: resolve intake and design, approve Blueprint.md once, and create a routed Plan v2."
 ---
 
 # Forge Plan
 
-Resolve `<plugin-root>` as two directories up from this skill file (`skills/forge-plan/`). Start the turn with `run`; phase `plan` means Blueprint or Plan work is next.
+Resolve `<plugin-root>` as two directories up from this skill file
+(`skills/forge-plan/`). Start with `run` and read the complete
+`.starforge/state.json`. This playbook handles `intake`, `design`, and `plan`
+inside one `$forge` invocation. Rerun `run` after each resolved phase and return
+control to `$forge`; do not stop merely because state advanced. In other words,
+always return control to `$forge` after this phase playbook.
 
 ## Blueprint.md
 
@@ -45,6 +50,20 @@ Follow up only when an answer reveals a new material branch.
 Record the project class, target platforms, required capabilities, preferred routes,
 and accepted fallbacks in `Toolchain`. Routes are preferences rather than implicit
 plugin requirements. Record unavailable required capabilities as explicit blockers.
+
+Discover the capabilities exposed by the current host and invoke
+`starforge.routing.resolve_routes` with project class, enabled Blueprint flags,
+the draft Plan v2 proof kinds, and delivery target. Use
+`config/capability-routing.json` and follow
+`skills/forge/references/capability-routing.md`. Preserve the resolver's catalog
+order, selected route, missing preferred options, fallback status, and blocker.
+Never hardcode an alias into lifecycle logic or claim that an unavailable
+capability ran.
+
+Optional installation is suggestion-only. Present an installation suggestion
+only when the router marks the missing capability as materially required, and
+require the user to take the installation action. If an accepted fallback
+satisfies the contract, disclose it and continue.
 
 Set every `Risk Flags` entry to `yes`, `no`, or `not applicable` with a reason.
 Include auth, payments, secrets, network or external input, user or regulated data,
@@ -149,10 +168,23 @@ and any provider or destination the product contract truly requires. Record GitH
 owner, repository, visibility, adoption intent, default branch, and CI expectation
 when repository delivery is requested.
 
+For web preview or production delivery, choose exactly one provider by fit. Sites
+fits suitable simple or internal apps. Vercel fits applications that require its
+production web workflow. Do not select both by default. A provider selected in the
+contract is the only provider the delivery phase may satisfy unless the Blueprint
+is revised and approved again.
+
+The Foundation Contract must distinguish local-only, new private GitHub
+repository, and existing repository adoption. A requested new GitHub foundation
+includes private visibility, `origin`, default branch, initial commit, and CI
+before feature work. Existing repository adoption requires identity and visibility
+checks and never authorizes an implicit overwrite or visibility change.
+
 Treat approval as authority only for the non-destructive external writes stated in
 the contract. Visibility changes, destructive replacement, paid resource creation,
 billing, signing, notarization, production migrations, and public publication need
-specific authority or one explicit blocker.
+specific authority. Consolidate any unresolved credentials, signing, billing, or
+production authority into one explicit blocker.
 
 ### One Complete Approval
 
@@ -173,20 +205,35 @@ projects, but new v0.4 contracts use `Blueprint.lock.json`.
 Derive tasks from the approved Blueprint into one table with EXACTLY these columns:
 
 ```
-| Task | Description | Status | Mode | Files | Depends | Verify | Evidence |
+| Task | Description | Status | Mode | Files | Depends | ACs | Proof | Verify | Evidence |
 ```
 
-- **Status** — `queued`, `ready`, `in_progress`, `blocked`, `reviewing`, `complete`. Never hand-edit a row to `complete`; only `complete-task` does that.
-- **Mode** — the only delegation signal:
-  - `solo` — trivial glue the coordinator may implement inline.
-  - `delegate` — real code; MUST be implemented by a spawned `starforge-builder`.
-  - `docs` — no code; a no-op verify is allowed.
-- **Files** — the files this task owns. Drives parallel-safety (tasks with disjoint Files can run in the same wave) and is injected into the builder spawn prompt. Be precise.
-- **Depends** — comma-separated task ids, or `-`.
-- **Verify** — the exact command that proves the task (e.g. `npm test -- --run`), or `noop` for docs tasks. `verify` executes this literally; a vague entry proves nothing.
-- **Evidence** — leave `-`; `complete-task` fills it.
+- **Status**: `queued`, `ready`, `in_progress`, `blocked`, `reviewing`,
+  `complete`. Never hand-edit a row to `complete`; only `complete-task` does that.
+- **Mode**: the only delegation signal:
+  - `solo`: trivial glue the coordinator may implement inline.
+  - `delegate`: real code; MUST be implemented by a spawned
+    `starforge-builder`.
+  - `docs`: no code; a no-op verify is allowed.
+- **Files**: the files this task owns. Tasks with disjoint Files may run in the
+  same wave. Be precise.
+- **Depends**: comma-separated task ids, or `-`.
+- **ACs**: comma-separated approved `AC-n` ids. Every task needs at least one,
+  unless its description declares the permitted maintenance exemption. Every Blueprint criterion must be covered by at least one task.
+- **Proof**: comma-separated validated proof kinds such as `unit`,
+  `integration`, `browser`, `preview`, `native-ios`, `native-macos`, `security`,
+  `github`, `package`, and `delivery`. Select proof from observable contract
+  outcomes, not from builder preference.
+- **Verify**: the exact command that proves the task, or `noop` for docs tasks.
+  Vague commands and no-op commands do not prove code.
+- **Evidence**: leave `-`. Evidence is coordinator-owned and `complete-task`
+  fills it only after current-source verification and every required live proof.
 
-Size each task so one builder can own the entire edit scope of its Files. Split anything two builders would collide on.
+Size each task so one builder can own the entire edit scope of its Files. Split
+anything two builders would collide on. Put foundation work before feature tasks,
+and include delivery tasks and proof whenever the Delivery Contract requires
+them. Builders do not own evidence files and never backfill a verification,
+foundation, review, or delivery claim.
 
 ## Validate
 
@@ -194,8 +241,13 @@ Size each task so one builder can own the entire edit scope of its Files. Split 
 python3 <plugin-root>/scripts/star_forge.py validate-plan --file Plan.md --project . --strict
 ```
 
-Fix every finding — invalid status or mode, missing verify command, unknown dependency, missing evidence on complete/blocked rows — before building.
+Fix every finding: invalid status or mode, unknown AC, uncovered criterion,
+unknown or inconsistent proof kind, missing delivery task, missing verify command,
+unknown dependency, or invalid evidence state. Then rerun `run` and continue into
+foundation in the same `$forge` invocation.
 
 ## Apply Learnings
 
-`run` prints a `learnings_digest`: durable lessons mined from past projects on this machine, matched to this stack. Read them while planning and encode the relevant ones into task descriptions and Verify commands — they exist because a previous project paid for them.
+`run` prints a `learnings_digest`: durable lessons mined from past projects on
+this machine, matched to this stack. Read them while planning and encode relevant
+ones into task descriptions, risk flags, proof kinds, and Verify commands.

@@ -32,6 +32,26 @@ The `source_hash` field is required. It must be a top-level field, and its value
 
 An empty `findings` array is a valid, honest result for clean code. Do not invent findings to look thorough. If you are re-reviewing after a fix, rewrite the whole file (do not leave the previous bytes) — an unchanged file is treated as a stale review the source has moved past.
 
+## Adaptive role contract
+
+- The spawn prompt gives you one deterministic role, its applicability reasons,
+  and a source hash. Use that exact role in the findings file.
+- Concentrate on the named lens while still reporting a concrete critical issue
+  that crosses lens boundaries.
+- `ux-accessibility` covers user experience, keyboard and assistive access,
+  responsive behavior, and visual regressions.
+- `security` includes privacy, sensitive data handling, trust boundaries, auth,
+  unsafe input and output, secrets, and dependency exposure.
+- `architecture` covers coupling, boundaries, persistence, migrations, and future
+  change safety.
+- `performance-reliability` covers responsiveness, resource use, resilience,
+  failure recovery, and operational reliability.
+- `architecture-performance-reliability` is an intentional combined lens. Review
+  every architecture, performance, and reliability concern named above without
+  dropping one to save time.
+- Correctness is always assigned to one reviewer. Do not assume another role can
+  waive acceptance-criteria or regression defects.
+
 ## Severity calibration
 
 - Report only findings you can point to concrete evidence for: a file and line that demonstrates the issue, a reachable code path, a reproducible behavior.

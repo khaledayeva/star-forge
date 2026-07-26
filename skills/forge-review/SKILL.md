@@ -1,53 +1,107 @@
 ---
 name: forge-review
-description: Star Forge review and completion — the review wave, fix queue, and final verdict. Use when the user asks to review the build, run code or security review, handle findings, fix or waive review findings, check completion, finish, ship, declare done, or produce the final proof.
+description: "Star Forge review and delivery phase: clear adaptive review, satisfy the approved Delivery Contract, and run the final predicate."
 ---
 
 # Forge Review
 
-Resolve `<plugin-root>` as two directories up from this skill file (`skills/forge-review/`). Start the turn with `run`; phase `review` means all tasks are complete and the project-level review wave is next.
+Resolve `<plugin-root>` as two directories up from this skill file
+(`skills/forge-review/`). Start with `run` and read the complete
+`.starforge/state.json`. This is the review, delivery, and completion playbook
+inside one `$forge` invocation. Rerun `run` after each review, fix, proof,
+delivery, or completion action and return control to `$forge` whenever state
+changes.
 
-## 1. Spawn the Review Wave
+## 1. Route and Spawn the Review Wave
 
-Spawn `starforge-reviewer` agents with the role-specific prompts from `spawn_plan` in `.starforge/state.json` (the operating card prints them ready to paste). The `standard` profile requires correctness, security, and architecture reviewers. The `fast-mvp` profile requires one correctness reviewer. Each entry names its `role` and `findings_file`; paste it as-is so each reviewer writes only `.starforge/reviews/<scope>/<role>.findings.json` and never edits source. Do not write findings files on a reviewer's behalf: an unperformed review cannot be back-filled.
+Resolve review capabilities from project class, Blueprint risk flags, Plan v2
+`Proof` values, and delivery target through
+`starforge.routing.resolve_routes` and
+`config/capability-routing.json`. Follow
+`skills/forge/references/capability-routing.md`. Correctness review is always
+required. Follow the role-specific `spawn_plan` from state for every additional
+required lens.
 
-## 2. Merge
+Security-sensitive projects prefer Codex Security when available. Feed actual
+results into the normalized security proof path. If it is unavailable, disclose
+the selected safe fallback. Never claim it ran. Fast MVP may reduce optional
+review breadth, but cannot remove risk-required security, privacy, UX,
+accessibility, reliability, or delivery review.
+
+Spawn each exact `starforge-reviewer` entry from `spawn_plan`. Every reviewer
+writes only its assigned
+`.starforge/reviews/<scope>/<role>.findings.json` and never edits source. Do not
+write a reviewer's findings file on its behalf.
+
+## 2. Merge and Clear the Queue
 
 ```bash
 python3 <plugin-root>/scripts/star_forge.py review --project . --strict
 ```
 
-This merges and dedups all reviewer findings, scans the tree itself (secrets, residual placeholders, architecture debt), and writes the fix queue into state. Exit 1 under `--strict` means blocking findings remain, reviewer files are malformed or stale, no reviewer files existed, or the project profile's required reviewer roles are missing.
+This merges and deduplicates reviewer findings, runs coordinator-owned tree scans,
+and writes the fix queue. A strict failure means the review is missing, malformed,
+stale, incomplete, or still blocking.
 
-## 3. Clear the Queue
-
-For each blocking finding:
-
-- **Fix it**, then re-record verification for every affected task (`verify ... --strict`) — a verify only counts against the current source tree.
-- **Or waive it** when it is a confirmed false positive:
+For each blocking finding, fix it in the owning task scope and rerecord every
+affected verification and live proof. A source edit makes the prior review stale,
+so respawn the required review wave and merge again. Waive only a confirmed false
+positive:
 
 ```bash
 python3 <plugin-root>/scripts/star_forge.py waive --project . --finding <id> --reason "<why this is not a real blocker>"
 ```
 
-Never waive to save time; waives are recorded as incidents and mined for learnings.
+Never waive to save time.
 
-Fixes change the source, which makes the recorded review stale. After fixing, re-spawn the reviewer wave and re-run `review` until the queue is empty against the current tree.
+## 3. Deliver the Approved Result
+
+After review passes, rerun `run` and continue directly into `deliver`. Deliver only
+the target and environment in the approved Delivery Contract:
+`source-only`, `private-repo`, `preview`, `production`, `package`, or its named
+platform-specific target.
+
+For web delivery, select exactly one routed provider by fit:
+
+- Sites fits suitable simple sites, prototypes, and internal apps.
+- Vercel fits applications that require its production web workflow.
+
+Do not configure, deploy to, or collect proof from both Sites and Vercel by
+default. Do not switch providers after approval without revising and reapproving
+the contract.
+
+External delivery writes must be explicitly authorized by the Delivery Contract.
+Public release, production deployment, credentials, signing, notarization,
+billing, paid resources, or destructive replacement need their own authority.
+Continue any safe local work, then collapse unresolved authority or credential
+requirements into one honest delivery blocker. Never substitute a source-only
+handoff for a required preview, production result, package, or private repository
+and call it complete.
+
+The coordinator, not a delivery helper or reviewer, records fresh delivery proof.
+It must be bound to the current source hash and contract, identify the repository commit and delivered deployment, package, repository, or source handoff, include
+the live URL when required, and include a passing smoke result for the exact
+approved result. A stale, degraded, or different provider result does not satisfy
+delivery.
 
 ## 4. Done
+
+After delivery proof passes, rerun `run` and execute:
 
 ```bash
 python3 <plugin-root>/scripts/star_forge.py done --project . --strict
 ```
 
-`done` computes completion from git facts: Blueprint approved, every task complete with fresh passing verifies (and browser-runs for UI), a fresh review with an empty fix queue, and a clean working tree. On pass it writes `.starforge/final/proof.json`. If it refuses, the `problems` array says exactly why — fix those; never argue with the predicate.
+`done` computes completion from the approved Blueprint, complete Plan v2 tasks,
+fresh task and live proofs, fresh empty review, the exact approved Delivery Contract result, and clean Git facts. If it refuses, repair the `problems`, rerun
+the affected gates, and continue the same `$forge` invocation.
 
-After a pass, write the human summary:
+On pass, write the human summary:
 
 ```bash
 python3 <plugin-root>/scripts/star_forge.py done --project . --strict --write-summary
 ```
 
-## Report the Verdict
-
-QUOTE THE VERDICT LINE VERBATIM in your final message: `COMPLETE (advisory: ...)`, `NEEDS_CHANGES`, or a future unqualified `COMPLETE` only if the CLI itself reports one. The advisory reasons and any `[N waived finding(s)]` suffix are part of the verdict. Do not paraphrase an advisory verdict into an unqualified "complete". In this version there is no supported host-controlled witness source, so `/hooks` and local reviewer `agent_id` values do not produce unqualified `COMPLETE`. Remember any post-done edit reopens the project as `amend` on the next `run`.
+Quote the verdict line verbatim, including any advisory and waived-finding suffix.
+Never paraphrase an advisory verdict as unqualified `COMPLETE`. Any later source
+edit enters `amend` on the next `run`.

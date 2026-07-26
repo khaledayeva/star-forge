@@ -38,6 +38,7 @@ from live_collectors import native_macos as native_macos_collector
 from starforge import contracts as project_contracts
 from starforge import doctor as installation_doctor
 from starforge import lifecycle as project_lifecycle
+from starforge import review_policy as adaptive_review_policy
 
 
 SF_VERSION = "0.3.0"
@@ -71,16 +72,9 @@ HOOK_TRUST_NOTICE_FILE = STATE_SUBDIR / "hook-trust-notice.json"
 SERVER_LEASE = RUNTIME_DIR / "server.json"
 SCREENSHOT_MANIFEST = SCREENSHOTS_DIR / "manifest.json"
 AGENT_NAME_PREFIX = "starforge-"
-REVIEW_PROFILE_ROLES: dict[str, tuple[str, ...]] = {
-    "standard": ("correctness", "security", "architecture"),
-    "fast-mvp": ("correctness",),
-}
-KNOWN_REVIEW_ROLES = frozenset(role for roles in REVIEW_PROFILE_ROLES.values() for role in roles)
-REVIEW_ROLE_LENSES: dict[str, str] = {
-    "correctness": "functional correctness, regressions, edge cases, and acceptance-criteria coverage",
-    "security": "security, privacy, secrets, injection, auth, unsafe IO, and dependency exposure",
-    "architecture": "maintainability, coupling, data flow, boundaries, performance risks, and future change safety",
-}
+REVIEW_PROFILE_ROLES = adaptive_review_policy.LEGACY_PROFILE_ROLES
+KNOWN_REVIEW_ROLES = adaptive_review_policy.ALL_REVIEW_ROLES
+REVIEW_ROLE_LENSES = adaptive_review_policy.ROLE_LENSES
 MAX_AUTO_CONTINUES = 3
 STAR_FORGE_STATE_VERSION = "3.0"
 LEARNINGS_HOME = Path.home() / ".star-forge" / "learnings"
@@ -1040,11 +1034,41 @@ def project_profile(project: Path) -> str:
 
 
 def review_roles_for_profile(profile: str) -> list[str]:
-    return list(REVIEW_PROFILE_ROLES.get(profile or "standard") or REVIEW_PROFILE_ROLES["standard"])
+    return adaptive_review_policy.legacy_roles_for_profile(profile)
+
+
+def required_review_policy(
+    project: Path,
+    *,
+    source_hash_value: str | None = None,
+    bind_source_hash: bool = True,
+) -> adaptive_review_policy.ReviewPolicySelection:
+    blueprint_text = ""
+    blueprint_path = project / BLUEPRINT_FILE
+    if blueprint_path.exists():
+        try:
+            blueprint_text = read_text(blueprint_path)
+        except OSError:
+            blueprint_text = ""
+    tasks: list[dict[str, Any]] = []
+    plan_path = project / PLAN_FILE
+    if plan_path.exists():
+        try:
+            tasks = parse_tasks(plan_path)
+        except ForgeError:
+            tasks = []
+    if source_hash_value is None and bind_source_hash:
+        source_hash_value, _problem = try_source_hash(project)
+    return adaptive_review_policy.select_review_policy(
+        blueprint_text,
+        tasks,
+        profile=review_profile(project),
+        source_hash=source_hash_value,
+    )
 
 
 def required_review_roles(project: Path) -> list[str]:
-    return review_roles_for_profile(review_profile(project))
+    return list(required_review_policy(project).roles)
 
 
 # -------------------------------------------------------------- file scanning
@@ -5107,7 +5131,8 @@ def merge_review(project: Path, scope: str) -> dict[str, Any]:
         if finding["severity"] in BLOCKING_SEVERITIES and not finding["waived"]:
             open_blocking.append(finding)
     reviewer_roles = sorted(set(fresh_roles))
-    required_roles = required_review_roles(project)
+    policy = required_review_policy(project, source_hash_value=current)
+    required_roles = list(policy.roles)
     missing_roles = [role for role in required_roles if role not in reviewer_roles]
     manifest_profile = project_profile(project)
     effective_profile = review_profile(project)
@@ -5125,6 +5150,7 @@ def merge_review(project: Path, scope: str) -> dict[str, Any]:
         "reviewer_count": len(reviewer_roles),
         "required_review_roles": required_roles,
         "required_reviewer_count": len(required_roles),
+        "review_policy": policy.to_dict(),
         "missing_review_roles": missing_roles,
         "stale_roles": sorted(set(stale_roles)),
         "reviewers_witnessed": reviewers_witnessed,
@@ -5905,7 +5931,14 @@ def cmd_init(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------- state engine
 
 
-def reviewer_spawn_prompt(project: Path, scope: str, role: str = "correctness", *, source_hash_value: str | None = None) -> str:
+def reviewer_spawn_prompt(
+    project: Path,
+    scope: str,
+    role: str = "correctness",
+    *,
+    source_hash_value: str | None = None,
+    selection_reason: str = "",
+) -> str:
     rel = relative_to_project(reviews_scope_dir(project, scope) / f"{role}.findings.json", project)
     if source_hash_value is None:
         source_hash_value, hash_problem = try_source_hash(project)
@@ -5914,6 +5947,14 @@ def reviewer_spawn_prompt(project: Path, scope: str, role: str = "correctness", 
             raise ForgeError(str(message))
     sh = source_hash_value
     lens = REVIEW_ROLE_LENSES.get(role, "project quality risks, regressions, and release blockers")
+    safe_reason = re.sub(
+        r"[^A-Za-z0-9 .,/_():;-]+",
+        " ",
+        str(selection_reason or ""),
+    ).strip()
+    reason_instruction = (
+        f"Applicability: {safe_reason}. " if safe_reason else ""
+    )
     sample = json.dumps(
         {
             "role": role,
@@ -5933,6 +5974,7 @@ def reviewer_spawn_prompt(project: Path, scope: str, role: str = "correctness", 
     ).replace('"', '\\"')
     return (
         f"spawn_agent {AGENT_NAME_PREFIX}reviewer \"[SF:review:{role}] Review the diff against the approved Blueprint with the {role} lens: {lens}. "
+        f"{reason_instruction}"
         f"Write findings ONLY to {rel} as {sample}. "
         f'The role MUST be exactly {role}. '
         f'The source_hash MUST be exactly {sh} (it attests you reviewed the current tree). '
@@ -5962,15 +6004,28 @@ def spawn_plan(project: Path, tasks: Sequence[dict[str, Any]], phase: str) -> li
         current_source_hash, hash_problem = try_source_hash(project)
         if hash_problem or current_source_hash is None:
             return plan
-        for role in required_review_roles(project):
+        policy = required_review_policy(
+            project,
+            source_hash_value=current_source_hash,
+        )
+        for selection in policy.selections:
+            role = selection.role
+            reasons = "; ".join(selection.reasons)
             findings_file = relative_to_project(reviews_scope_dir(project, scope) / f"{role}.findings.json", project)
             plan.append({
                 "task": "review-wave",
                 "role": role,
+                "reasons": list(selection.reasons),
                 "findings_file": findings_file,
                 "agent": f"{AGENT_NAME_PREFIX}reviewer",
                 "tag": f"SF:review:{role}",
-                "spawn": reviewer_spawn_prompt(project, scope, role, source_hash_value=current_source_hash),
+                "spawn": reviewer_spawn_prompt(
+                    project,
+                    scope,
+                    role,
+                    source_hash_value=current_source_hash,
+                    selection_reason=reasons,
+                ),
             })
     return plan
 
@@ -6004,7 +6059,12 @@ def operating_card(project: Path, state: dict[str, Any]) -> str:
     spawn = state.get("spawn_plan") or []
     if spawn:
         lines.append("SPAWN (paste as-is):")
-        for entry in spawn[:3]:
+        spawn_limit = (
+            adaptive_review_policy.MAX_REVIEW_AGENTS
+            if state.get("phase") == "review"
+            else 3
+        )
+        for entry in spawn[:spawn_limit]:
             lines.append(f"  {entry.get('spawn')}")
     lines.extend(
         [
@@ -6029,6 +6089,11 @@ def canonical_state_payload(project: Path, *, objective: str = "", mode: str = "
     source_hash_blocked = hash_problem is not None
     plan_path = project / PLAN_FILE
     tasks = parse_tasks(plan_path) if plan_path.exists() else []
+    adaptive_policy = required_review_policy(
+        project,
+        source_hash_value=current_source_hash,
+        bind_source_hash=not source_hash_blocked,
+    )
     parse_problem = plan_parse_problem(plan_path, tasks)
     proof = load_proof(project)
     drift = source_hash_unavailable_state(profile_lock, problems=[hash_problem] if hash_problem else None) if source_hash_blocked else detect_drift(project, proof)
@@ -6159,6 +6224,7 @@ def canonical_state_payload(project: Path, *, objective: str = "", mode: str = "
         "drift": drift,
         "foundation": foundation_gate,
         "delivery": delivery_gate,
+        "review_policy": adaptive_policy.to_dict(),
         "review": review_summary_source_hash_unavailable(project, scope, profile_lock, problems=[hash_problem] if hash_problem else None) if source_hash_blocked else review_summary(project, scope),
         "spawn_plan": spawn_plan(project, tasks, phase),
         "source_hash_unavailable": source_hash_blocked,

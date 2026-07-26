@@ -1,73 +1,156 @@
 ---
 name: forge
-description: Star Forge entry point — the Forge Loop. Use when the user asks to set up Star Forge, build a project end-to-end, run cruise control, resume or continue work, check status or where the project is, recover after compaction or a new session, start a hackathon MVP or prototype, or keep going from plan to build to review to done.
+description: "Star Forge entry point: run or resume the complete Forge lifecycle from intake through proven delivery and done."
 ---
 
 # Forge
 
-Star Forge moves a repo through one loop: plan → build → review → done, with automatic re-entry as `amend` when source changes after a passing `done`. Gates rest on evidence that is expensive to fake — captured command output bound to each task's declared verify command, screenshot bytes, git tree state, reviewer source-hash attestations, and a clean git tree. Local hook and sub-agent ledgers are diagnostics only in this version. Narrative claims are display-only.
+Star Forge is one coordinator-owned lifecycle:
 
-## The One Habit
+`intake -> design -> plan -> foundation -> build -> review -> deliver -> done`
 
-Resolve `<plugin-root>` as two directories up from this skill file (`skills/forge/`). Start EVERY turn — first turn, resume, status check, post-compaction recovery — with:
+One `$forge` invocation owns that whole lifecycle. Do not make the user invoke
+`$forge-plan`, `$forge-work`, or `$forge-review` separately. Those skills are phase
+playbooks used by this coordinator. A phase transition is a reason to continue,
+not a reason to hand control back.
+
+After a passing `done`, a source change enters `amend` and repeats only the
+affected build, proof, review, and delivery gates.
+
+## Resume Before Reasoning
+
+Resolve `<plugin-root>` as two directories up from this skill file
+(`skills/forge/`). Start every turn, including the first turn, a status request,
+post-compaction recovery, or resumed work, with:
 
 ```bash
 python3 <plugin-root>/scripts/star_forge.py run --project . --objective "<objective>"
 ```
 
-Its first lines are the operating card: version, hooks LIVE/ABSENT, phase, next action, and paste-ready spawn commands. Then read `.starforge/state.json` and obey `required_next_action` and `spawn_plan`. Never navigate from memory: the card survives compaction, your context does not.
+Add `--fast-mvp` when the user asks for an MVP, hackathon build, prototype, demo,
+or proof of concept. Fast MVP reduces optional breadth, but never removes an
+authority, security, privacy, proof, review, or delivery requirement.
 
-## First-Time Setup
+Read the complete `.starforge/state.json`, especially `phase`,
+`required_next_action`, `spawn_plan`, lifecycle gates, Blueprint lock, Plan state,
+review state, and delivery state. The operating card and state are authoritative.
+Never resume from memory.
 
-`run` auto-initializes everything missing — git repo, Blueprint.md, Plan.md, ledger, `.gitignore` guardrails, and the `starforge-builder`/`starforge-reviewer` roles under `.codex/agents/`. There is no separate setup step (`agents-install --project .` re-installs the roles if they were removed).
+## Continuous Coordinator Loop
 
-One thing the CLI cannot do: Codex silently skips untrusted plugin hooks. On first use (and after any plugin upgrade), tell the user once to run `/hooks` in Codex if they want the bundled observer diagnostics and compaction re-anchors. Do not promise a witnessed completion upgrade from `/hooks`: bundled hooks write project-local ledgers only, and no supported host-controlled witness source exists in this version. Hooks are observers only — nothing blocks at edit time — and a passing `done` should be quoted with its advisory suffix.
+Keep working in the same invocation until `done --strict` passes or one honest
+user-controlled blocker prevents safe progress:
 
-## Fast MVP
+1. Run `run` and read `.starforge/state.json`.
+2. Derive capability needs from the approved or draft project class, enabled
+   Blueprint flags, Plan v2 `Proof` values, and Delivery Contract target. Resolve
+   them through `starforge.routing.resolve_routes` and
+   `config/capability-routing.json` using the host-discovered capabilities. Follow
+   [capability-routing.md](references/capability-routing.md).
+3. Execute the current phase with the matching playbook below. The coordinator
+   retains lifecycle, mutation, and evidence ownership even when builders or
+   reviewers are delegated.
+4. After every material change, gate completion, recorded proof, or returned
+   sub-agent wave, rerun `run`, reread state, and immediately continue with the
+   newly reported phase.
+5. Stop only for a material intake answer, explicit Blueprint approval, a
+   router-approved optional installation that requires user action, missing
+   external authority or credentials, an unsafe destructive choice, or the exact
+   final verdict.
 
-When the user says MVP, hackathon, prototype, demo, proof of concept, or quick build, add `--fast-mvp`:
+Do not silently skip a failed route or gate. Do not claim that an unavailable
+capability ran. Report the selected fallback or consolidate unresolved authority,
+credentials, signing, billing, or production access into one explicit blocker.
+
+## Phase Playbooks
+
+| Phase | Coordinator action |
+|---|---|
+| `setup` | Let `run` initialize local Git and Star Forge artifacts, resolve isolation if needed, then rerun. |
+| `intake` | Use `$forge-plan` to ask only material unanswered decisions and record explicit assumptions. |
+| `design` | Use `$forge-plan`; when UI research applies, route Mobbin first, then accepted fallbacks, and record an original selected direction or an honest unavailable state. |
+| `plan` | Use `$forge-plan` to obtain one complete Blueprint approval, write the content lock, create and validate Plan v2, then rerun. |
+| `foundation` | Establish the approved local or GitHub foundation and coordinator-owned source-bound foundation evidence before feature work. |
+| `build` | Use `$forge-work` for routed task waves, verification, and required live proof. |
+| `review` | Use `$forge-review` for the adaptive review wave and a fresh empty fix queue. |
+| `deliver` | Use `$forge-review` to produce exactly the approved source handoff, private repository, preview, production result, package, or platform-specific result and its fresh delivery proof. |
+| `done` | Run the strict completion predicate and report its exact verdict. |
+| `amend` | Follow state into the approved change packet, then repeat affected build, review, deliver, and done gates. |
+| `blocked` | Read the named blockers, make every safe unblocked repair, then request only the user-controlled decision or authority that remains. |
+
+## Foundation Policy
+
+`run` automatically initializes local Git, Blueprint.md, Plan.md, the ledger,
+guardrails, and the `starforge-builder` and `starforge-reviewer` roles.
+`agents-install --project .` restores those roles if they were removed.
+
+When the approved Repository Contract
+requests a new GitHub repository, create a private repository before feature work,
+configure `origin`, establish the approved default branch and initial commit, and
+install CI. Prefer the routed GitHub connector. Use
+`gh repo create --private` only as the narrow repository-creation fallback and
+only with approved write authority.
+
+For an existing repository, verify owner, name, remote identity, visibility, and
+default branch before adoption. Do not overwrite it, change visibility, replace a
+remote, or otherwise mutate it implicitly.
+
+The coordinator, not a builder, records foundation evidence. It must prove the
+current source binding, remote identity and private visibility when requested,
+default branch, initial or adopted commit, CI path, and every other requested
+Foundation Contract check.
+
+## External Authority
+
+Blueprint approval authorizes only the non-destructive external writes explicitly
+listed in the Repository and Delivery contracts. Plugin installation always
+requires user action. Public repositories, public deployment, visibility changes,
+destructive replacement, paid resources, billing changes, signing identities,
+notarization, production data changes, and production release require specific
+authority. Preserve safe local progress, then surface one precise blocker if that
+authority is absent.
+
+## Isolation and Hooks
+
+If `run` reports `blocked:isolation-required`, use the operating card to either
+create the recommended isolated `work/<name>/` project or adopt the root only when
+the user has deliberately chosen that scope.
 
 ```bash
-python3 <plugin-root>/scripts/star_forge.py run --project . --fast-mvp --objective "<objective>"
-```
-
-This records the `fast-mvp` profile on the project: same gates, lighter review wave (one correctness reviewer instead of the standard correctness, security, and architecture reviewers).
-
-## Isolation
-
-If `run` returns phase `blocked:isolation-required`, the directory already holds a non-Star-Forge project. Rerun with one of:
-
-```bash
-# recommended: build under work/<name>/ with its own git repo; a root redirect
-# makes every later command resolve there, and Blueprint/Plan are carried over
 python3 <plugin-root>/scripts/star_forge.py run --project . --product-slug <name> --objective "<objective>"
-
-# or deliberately build in place (recorded in the project manifest)
 python3 <plugin-root>/scripts/star_forge.py run --project . --adopt-root --objective "<objective>"
 ```
 
-## Phases
+On first use or after a plugin upgrade, mention once that `/hooks` enables bundled
+observer diagnostics and compaction re-anchors. Hooks are optional observers and
+do not upgrade the completion verdict.
 
-| Phase | What to do |
-|---|---|
-| `setup` | `run` auto-initializes; `/hooks` only enables bundled observer diagnostics. |
-| `plan` | Draft Blueprint.md with `AC-n` criteria, get one approval, write Plan.md. Use $forge-plan. |
-| `build` | Implement ready tasks: spawn `starforge-builder` for delegate tasks, `verify` everything, `browser-run` for UI, `complete-task`. Use $forge-work. |
-| `review` | Spawn the role-specific `starforge-reviewer` agents from `spawn_plan`, run `review`, clear the fix queue, then `done --strict`. Use $forge-review. |
-| `done` | Project complete. Stop; publish or push only on explicit request. |
-| `amend` | Post-done source changes were detected and an `AMEND-n` task was auto-scaffolded from the changed files. Build, verify, review it, re-run `done`. |
-| `blocked` | Read `required_next_action`; repair the named problem (usually a Plan.md parse issue) and rerun `run`. |
+## Delegation and Evidence Ownership
 
-## Sub-Agents
+Codex never auto-spawns sub-agents. Use the exact entries in `spawn_plan`. Delegate
+real implementation to `starforge-builder` and review-only work to
+`starforge-reviewer`. Respect owned files, dependencies, and the current thread
+cap. When the host cap is 6, schedule waves of at most 5 sub-agents, wait between
+waves, and close finished agents before dispatching more.
 
-Codex never auto-spawns sub-agents — you must call `spawn_agent` explicitly. Paste the spawn commands the operating card prints; build entries carry the task row and owned files, and review entries carry the required role plus findings file. Thread cap is 6: schedule in waves of at most 5, `wait_agent` between waves, and close finished agents so threads free up.
+Builders and reviewers may return source changes or findings, but their narrative
+claims are not proof. The coordinator alone runs and records task verification,
+live proof, foundation proof, merged review state, delivery proof, and final
+completion against the current source hash. Never backfill evidence for work that
+did not run.
 
 ## Completion Honesty
 
-`done` is a predicate computed from git facts — fresh passing verifies, a fresh review with an empty fix queue, a clean tree — not a recorded claim. Any edit after a passing `done` reopens the project as `amend` on the next `run`. So never tell the user the project is complete without a fresh pass of:
+Run:
 
 ```bash
 python3 <plugin-root>/scripts/star_forge.py done --project . --strict
 ```
 
-Quote its verdict line verbatim in your final message, including the `(advisory ...)` suffix. In this version, local hook and sub-agent ledgers do not create unqualified `COMPLETE`. If `done` refuses, its `problems` array says exactly what to fix.
+Only that predicate can declare completion. It requires the approved Blueprint,
+complete Plan tasks with fresh proofs, an empty fresh review queue, the exact
+approved Delivery Contract result, and a clean tree. A pass writes
+`.starforge/final/proof.json`. Quote the verdict line
+verbatim, including any advisory or waived-finding suffix. If it refuses, repair
+its `problems` and continue the loop. Never paraphrase an advisory result as
+unqualified completion.
