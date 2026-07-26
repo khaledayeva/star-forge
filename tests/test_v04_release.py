@@ -6,26 +6,50 @@ Run with: python3 tests/test_v04_release.py
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import traceback
 from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
+SCRIPTS = ROOT / "scripts"
 MANIFEST_PATH = ROOT / ".codex-plugin" / "plugin.json"
 MARKETPLACE_PATH = ROOT / ".agents" / "plugins" / "marketplace.json"
 RELEASE_CHECK = ROOT / "scripts" / "release-check.sh"
 MOBBIN_APP_ID = "asdk_app_69fdb9081018819193707354f21b366e"
+RC_TMP_PARENT = os.environ.get("STAR_FORGE_RC_TMPDIR")
+if str(SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS))
+
+from starforge import contracts, doctor, lifecycle, migration, routing
 
 
 def load_json(path: Path) -> dict[str, Any]:
     payload = json.loads(path.read_text(encoding="utf-8"))
     assert isinstance(payload, dict), path
     return payload
+
+
+def isolated_temp_directory(prefix: str) -> tempfile.TemporaryDirectory[str]:
+    return tempfile.TemporaryDirectory(prefix=prefix, dir=RC_TMP_PARENT)
+
+
+def write_json(path: Path, payload: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+
+def snapshot_tree(root: Path) -> dict[str, bytes]:
+    return {
+        str(path.relative_to(root)): path.read_bytes()
+        for path in sorted(item for item in root.rglob("*") if item.is_file())
+    }
 
 
 def run(
@@ -121,6 +145,179 @@ def test_manifest_visual_assets_are_safe_and_present() -> None:
         assert resolved.is_file(), relative
 
 
+def test_isolated_clean_install_and_mobbin_duplicate_doctor_are_read_only() -> None:
+    with isolated_temp_directory("star-forge-rc-install-") as tmp:
+        codex_home = Path(tmp) / ".codex"
+        codex_home.mkdir()
+        version = str(load_json(MANIFEST_PATH)["version"])
+        active = (
+            codex_home
+            / "plugins"
+            / "cache"
+            / "star-forge"
+            / "star-forge"
+            / version
+        )
+        write_json(
+            active / ".codex-plugin" / "plugin.json",
+            {"name": "star-forge", "version": version},
+        )
+        active_runtime = active / "scripts" / "star_forge.py"
+        active_runtime.parent.mkdir(parents=True)
+        shutil.copyfile(ROOT / "scripts" / "star_forge.py", active_runtime)
+        active_hooks = active / "hooks" / "hooks.json"
+        active_hooks.parent.mkdir(parents=True)
+        shutil.copyfile(ROOT / "hooks" / "hooks.json", active_hooks)
+        (codex_home / "config.toml").write_text(
+            """
+[marketplaces.star-forge]
+source_type = "git"
+source = "https://github.com/khaledayeva/star-forge"
+""".lstrip(),
+            encoding="utf-8",
+        )
+
+        app_manifest = load_json(ROOT / ".app.json")
+        assert app_manifest == {"apps": {"mobbin": {"id": MOBBIN_APP_ID}}}
+        serialized_app = json.dumps(app_manifest).casefold()
+        assert all(
+            credential not in serialized_app
+            for credential in ("access_token", "api_key", "password", "secret")
+        )
+        clean = doctor.diagnose_installation(
+            codex_home=codex_home,
+            source_root=ROOT,
+            runtime_version=version.split("+", 1)[0],
+            active_plugin_root=active,
+        )
+        assert clean["verdict"] == "PASS", clean
+
+        write_json(
+            codex_home
+            / "plugins"
+            / "cache"
+            / "legacy-design"
+            / "design-tools"
+            / "1.0.0"
+            / ".app.json",
+            {"name": "mobbin", "oauth": {"provider": "mobbin"}},
+        )
+        before = snapshot_tree(codex_home)
+        duplicate = doctor.diagnose_installation(
+            codex_home=codex_home,
+            source_root=ROOT,
+            runtime_version=version.split("+", 1)[0],
+            active_plugin_root=active,
+        )
+        assert snapshot_tree(codex_home) == before
+        matching = [
+            item
+            for item in duplicate["findings"]
+            if item["rule"] == doctor.RULE_DUPLICATE_MOBBIN
+        ]
+        assert len(matching) == 1
+        assert len(matching[0]["paths"]) == 2
+
+
+def test_legacy_v03_migration_is_separate_and_non_destructive() -> None:
+    fixture_root = ROOT / "fixtures" / "legacy-v03" / "completed-amended"
+    with isolated_temp_directory("star-forge-rc-legacy-") as tmp:
+        project = Path(tmp) / "legacy"
+        shutil.copytree(fixture_root, project)
+        if not (project / ".starforge").is_dir():
+            (project / "dot-starforge").rename(project / ".starforge")
+        before = snapshot_tree(project)
+
+        inspection = migration.inspect_legacy_project(project)
+        assert inspection["schema"] == migration.LEGACY_PROJECT_INSPECTION_SCHEMA
+        assert inspection["problems"] == []
+        assert snapshot_tree(project) == before
+
+        draft = project / "Plan.v2.draft.md"
+        result = contracts.write_plan_v2_migration(project / "Plan.md", draft)
+        assert result["source_preserved"] is True
+        assert result["review_required"] is True
+        after = snapshot_tree(project)
+        assert {path: after[path] for path in before} == before
+        assert "REVIEW_REQUIRED" in draft.read_text(encoding="utf-8")
+
+
+def test_private_foundation_fixture_is_source_bound_and_fails_closed() -> None:
+    contract_path = ROOT / "fixtures" / "foundation" / "private-new-contract.json"
+    evidence_path = ROOT / "fixtures" / "foundation" / "private-new-evidence.json"
+    before = (contract_path.read_bytes(), evidence_path.read_bytes())
+    contract = load_json(contract_path)
+    fixture_evidence = load_json(evidence_path)
+    source_hash = str(fixture_evidence["source_hash"])
+
+    passing = lifecycle.evaluate_foundation(
+        contract,
+        fixture_evidence,
+        current_source_hash=source_hash,
+    )
+    assert passing.status == "PASS", passing.blockers
+
+    stale = lifecycle.evaluate_foundation(
+        contract,
+        fixture_evidence,
+        current_source_hash="0" * 64,
+    )
+    assert stale.status == "BLOCKED"
+    assert any("stale" in blocker for blocker in stale.blockers)
+
+    unsafe_contract = copy.deepcopy(contract)
+    unsafe_contract["repository"]["write_authorized"] = False
+    unsafe = lifecycle.evaluate_foundation(
+        unsafe_contract,
+        fixture_evidence,
+        current_source_hash=source_hash,
+    )
+    assert unsafe.status == "BLOCKED"
+    assert unsafe.ready_for_feature_work is False
+    assert (contract_path.read_bytes(), evidence_path.read_bytes()) == before
+
+
+def test_platform_release_routes_and_plan_proofs_are_complete() -> None:
+    fixtures = ROOT / "fixtures" / "v04-projects"
+    required_proofs = {
+        "web": {"browser", "preview", "github", "delivery"},
+        "ios": {"native-ios", "delivery"},
+        "macos": {"native-macos", "package", "delivery"},
+        "expo": {"native-ios", "delivery"},
+        "cli": {"unit", "delivery"},
+    }
+    for name, proofs in required_proofs.items():
+        project = fixtures / name
+        scenario = load_json(project / "scenario.json")
+        tasks = contracts.parse_plan_tasks_text(
+            (project / "Plan.md").read_text(encoding="utf-8")
+        )
+        problems = contracts.validate_plan_v2_contract(
+            (project / "Blueprint.md").read_text(encoding="utf-8"),
+            tasks,
+        )
+        assert problems == [], (name, problems)
+        assert proofs.issubset(set(scenario["proofs"])), name
+        assert (project / scenario["source_file"]).is_file(), name
+
+        result = routing.resolve_routes(
+            project_class=scenario["routing_project_class"],
+            proof_kinds=scenario["proofs"],
+            delivery_target=[
+                scenario["delivery_target"],
+                scenario["platform_target"],
+            ],
+            available_capabilities=scenario["available_capabilities"],
+        )
+        assert result.blocked is False, name
+        selected = {
+            decision.need: str(decision.selected["id"])
+            for decision in result.decisions
+        }
+        for need, provider in scenario["expected_routes"].items():
+            assert selected.get(need) == provider, (name, selected)
+
+
 def init_agent_fixture(root: Path) -> None:
     shutil.copytree(
         ROOT / "scripts",
@@ -140,7 +337,7 @@ def test_generated_agents_exactly_match_canonical_prompts() -> None:
 
 
 def test_release_gate_rejects_generated_agent_prompt_drift() -> None:
-    with tempfile.TemporaryDirectory() as tmp:
+    with isolated_temp_directory("star-forge-rc-agents-") as tmp:
         fixture = Path(tmp).resolve()
         init_agent_fixture(fixture)
         prompt = fixture / "agents" / "builder" / "agent.md"
@@ -176,7 +373,7 @@ def init_release_fixture(root: Path) -> str:
 
 
 def test_release_gate_rejects_unchanged_version_for_publishable_diff() -> None:
-    with tempfile.TemporaryDirectory() as tmp:
+    with isolated_temp_directory("star-forge-rc-version-") as tmp:
         fixture = Path(tmp).resolve()
         base = init_release_fixture(fixture)
         (fixture / "package.txt").write_text("changed\n", encoding="utf-8")
@@ -190,7 +387,7 @@ def test_release_gate_rejects_unchanged_version_for_publishable_diff() -> None:
 
 
 def test_release_gate_accepts_new_cachebuster_for_publishable_diff() -> None:
-    with tempfile.TemporaryDirectory() as tmp:
+    with isolated_temp_directory("star-forge-rc-cachebuster-") as tmp:
         fixture = Path(tmp).resolve()
         base = init_release_fixture(fixture)
         (fixture / "package.txt").write_text("changed\n", encoding="utf-8")
@@ -210,7 +407,7 @@ def test_release_gate_accepts_new_cachebuster_for_publishable_diff() -> None:
 
 
 def test_release_gate_counts_untracked_package_files() -> None:
-    with tempfile.TemporaryDirectory() as tmp:
+    with isolated_temp_directory("star-forge-rc-untracked-") as tmp:
         fixture = Path(tmp).resolve()
         base = init_release_fixture(fixture)
         (fixture / "new-package-file.txt").write_text("new\n", encoding="utf-8")

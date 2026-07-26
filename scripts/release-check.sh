@@ -178,7 +178,13 @@ if [ "$mode" = "--version-only" ]; then
 fi
 
 python3 -m json.tool .agents/plugins/marketplace.json >/dev/null
-python3 tests/test_v04_release.py
+release_candidate_tmp=$(mktemp -d "${TMPDIR:-/tmp}/star-forge-release-candidate.XXXXXX")
+trap 'rmdir "$release_candidate_tmp" 2>/dev/null || true' EXIT HUP INT TERM
+STAR_FORGE_RC_TMPDIR="$release_candidate_tmp" \
+    PYTHONDONTWRITEBYTECODE=1 \
+    python3 tests/test_v04_release.py
+rmdir "$release_candidate_tmp"
+trap - EXIT HUP INT TERM
 
 if [ "$mode" = "--metadata-only" ]; then
     exit 0
