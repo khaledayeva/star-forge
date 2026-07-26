@@ -1,75 +1,165 @@
 # Blueprint.md
 
 Status: approved
-Owner: project team
-Last approved: 2026-06-18
-
-<!-- Approval sentinel: Star Forge treats this blueprint as approved only when the
-     Status line reads exactly `Status: approved` or the Last approved line starts
-     with an ISO date, e.g. `Last approved: 2026-06-10`. Keep both lines intact. -->
+Owner: Khaled Ayeva
+Last approved: 2026-07-25
 
 ## Product Summary
 
-Star Forge is a Codex-native software factory plugin. This build adds live tool artifact suppliers that collect real external evidence and hand it to existing Star Forge proof commands without changing the deterministic core.
+Star Forge v0.4 is a lean Codex-native software-factory control plane. One `$forge`
+invocation interviews the user, proposes design directions when UI applies, locks
+one approved contract, establishes Git and the requested private GitHub repository,
+routes work through the best available official capabilities, builds and verifies
+the software, performs adaptive review, satisfies the Delivery Contract, and proves
+completion from current source-bound evidence.
+
+## Authoritative Contract
+
+The complete normative contract, architecture, migration policy, routing catalog,
+task ledger, risks, and release gates are defined in:
+
+`docs/star-forge-v0.4-implementation-plan.md`
+
+If this summary and that document conflict, the detailed v0.4 implementation plan
+wins.
 
 ## Product Goal
 
-Make live browser, preview, native, security, and GitHub evidence available as local artifacts while keeping Star Forge authoritative for planning, verification, proof records, reviewer findings, fix queues, and final completion predicates.
+Expand the current evidence-focused Forge Loop into the full software factory
+described by the user without turning Star Forge into a large collection of
+stack-specific agents, skills, or duplicated tool implementations.
 
-## Target Users
+## Target Lifecycle
 
-Codex users who use Star Forge to plan, delegate, review, and prove software work through the Forge Loop.
+`intake -> design -> plan -> foundation -> build -> review -> deliver -> done`
 
-## User-Facing Behavior
+Post-completion source changes enter a scoped `amend` change packet and repeat the
+affected gates.
 
-Users can run collector commands to write task-scoped artifacts under `.starforge/live/<task-id>/<collector>/`. Collectors print exact strict proof commands by default and invoke proof recording only with an explicit `--record` flag. Existing commands remain the only proof gates.
+## Architecture
 
-## Tech Stack
+- Star Forge owns contracts, lifecycle state, capability routing, proof envelopes,
+  review policy, migration, and final completion.
+- Dedicated Codex plugins, MCP servers, connectors, and native tools own their
+  specialist operations.
+- Four skills and two agent roles remain the public orchestration surface.
+- A data-driven routing catalog selects capabilities without installing optional
+  plugins automatically.
+- Existing live collectors remain proof adapters and CI fallbacks.
+- New evidence uses one versioned envelope with v0.3 compatibility.
+- GitHub is the canonical plugin distribution source.
 
-Python standard library first, with optional local tool integrations. Tests remain plain Python and run through `python3 tests/test_star_forge.py` plus focused live collector test modules.
+## Delivery Contract
 
-## Architecture Expectations
+- Star Forge plugin delivery: GitHub-backed Codex plugin release.
+- Repository: `khaledayeva/star-forge`.
+- Repository visibility: public for Star Forge itself.
+- Implementation branch: `codex/star-forge-v0.4`.
+- Publish or push: not authorized by this Blueprint; local implementation and local
+  commits are authorized.
+- Release target: `0.4.0`.
 
-Live code must be outside completion logic. Shared helpers belong under `scripts/live_collectors/`. Star Forge proof command additions belong in `scripts/star_forge.py`. Collectors write only local artifacts and manifests, fail closed on degraded evidence, and never mutate `Plan.md`, waive findings, approve work, replace reviewers, or decide completion.
+## Design Applicability
 
-## Security Expectations
+The Star Forge plugin has no product UI in this increment. Mobbin, Figma, and
+ImageGen are capabilities Star Forge must route for downstream UI projects, but no
+new Star Forge interface design is required.
 
-Collectors must sanitize paths, redact secrets, avoid cookies and auth state, reject unsafe URLs, forbid remote writes except explicit read-only evidence collection, and record provenance, hashes, degraded state, and blocking problems for strict proof.
+## Security and Privacy
 
-## Performance Expectations
+- No credentials, OAuth tokens, screenshots containing private material, or project
+  content may enter tracked fixtures or global learnings.
+- External writes must be authorized by the approved Repository and Delivery
+  contracts.
+- Plugin and MCP connections use official authentication paths.
+- Security-sensitive downstream projects use Codex Security when available and
+  preserve normalized source-bound proof.
 
-Collectors should be bounded, deterministic, timeout-aware, and testable with fixtures. Optional expensive live tools must degrade clearly when unavailable.
+## Performance and Leanness
 
-## UI Design Direction
-
-No new UI is required. Plugin metadata and docs should remain clear enough for Codex to surface Star Forge as a plugin and for users to understand the live tool boundaries.
-
-## UX Quality Bar
-
-Browser evidence must include desktop and mobile screenshots, console evidence, and falsifiable visual observations. Preview and native evidence must not pretend reachability or logs alone prove UI quality.
-
-## UX Standards
-
-Live tools should feel like proof suppliers in the Forge Loop, not a second workflow. Commands should explain degraded states and print the next strict proof command clearly.
+- Keep four skills and two agent roles.
+- Keep production Python at or below 18,000 lines unless a documented deletion or
+  consolidation plan is approved.
+- Reduce `scripts/star_forge.py` below 2,500 lines.
+- Keep extracted runtime modules below 1,200 lines unless generated-code exemption
+  applies.
+- Do not add one collector, skill, or agent per external plugin.
 
 ## Non-Goals
 
-No Slack intake, task packet intake, bug triage, Sentry, Linear, support tickets, scheduled sweeps, OpenAI API upgrade packets, deployment creators, signing pipelines, notarization pipelines, waiver systems, provider lock-in, or new completion predicate.
+- Reimplementing official plugins, MCP clients, deployment providers, or Xcode
+  automation.
+- Making workplace connectors default dependencies.
+- Automatically creating public repositories or deployments.
+- Changing billing, signing identities, production data, or repository visibility.
+- Reintroducing the former attestation factory.
+- Claiming unsupported host-controlled witness guarantees.
 
 ## Acceptance Criteria
 
-Give each criterion a stable `AC-n` id so the review wave can check the build against it.
+The detailed text for each criterion is normative in the authoritative contract.
 
-- AC-1: Shared live artifact helpers create task-scoped manifests with required fields, source and runtime hashes, raw artifact hashes, degraded state, unavailable capabilities, redaction reports, and blocking problems.
-- AC-2: Existing proof commands are extended or added for live evidence handoff, and strict proof fails closed on missing, stale, malformed, degraded, source-mismatched, or runtime-mismatched artifacts.
-- AC-3: The local Playwright browser supplier captures or validates browser artifacts through a declarative scenario contract and feeds only `browser-run --strict`.
-- AC-4: The provider-neutral preview URL collector performs read-only URL evidence collection, URL safety checks, redaction, source-bound deployment identity validation, and preview proof handoff.
-- AC-5: The XcodeBuildMCP iOS adapter treats MCP as agent-mediated evidence, validates transcript ordering and runtime artifacts, and never uses shell fallback for strict iOS proof.
-- AC-6: The macOS baseline collector uses explicit structured local commands, bounded runtime observation, app identity, metadata-only signing and packaging notes, and strict native macOS proof handoff.
-- AC-7: The security scanner adapter normalizes trusted scanner reports or the documented Star Forge schema with provenance, scope, staleness checks, redaction, deterministic fingerprints, and strict security handoff.
-- AC-8: The GitHub PR evidence adapter performs only allowlisted read operations, binds PR evidence to fresh base and head SHAs, redacts bounded logs, and feeds source packet proof commands without remote mutation.
-- AC-9: Verification and dogfood coverage proves collectors are artifact suppliers only, uses task-scoped paths, limits fixtures to schema and failure tests, and documents exact release gates.
+- AC-1: GitHub is the canonical clean-install marketplace source.
+- AC-2: Release validation enforces a new plugin version or cachebuster.
+- AC-3: Published manifest metadata and package surfaces are complete.
+- AC-4: Generated agent configurations cannot drift from canonical prompts.
+- AC-5: A read-only doctor diagnoses stale and duplicate installations.
+- AC-6: New projects receive an adaptive material-decision interview.
+- AC-7: Explicit assumptions replace unnecessary interview questions.
+- AC-8: UI projects receive grounded design directions when tools are available.
+- AC-9: Design research is provider-neutral.
+- AC-10: Mobbin uses supported OAuth rather than stored API keys.
+- AC-11: Design references become original Borrow and Avoid constraints.
+- AC-12: Design selection remains inside the one Blueprint approval.
+- AC-13: Blueprint approval is content-hash locked.
+- AC-14: Plan v2 adds ACs and Proof columns.
+- AC-15: Every criterion and task is mechanically traceable.
+- AC-16: Proof kinds use a validated vocabulary.
+- AC-17: Plan validation rejects inconsistent contracts and proofs.
+- AC-18: Legacy plans migrate without invented mappings.
+- AC-19: Capability routing is data-driven.
+- AC-20: Routing prefers dedicated capabilities over generic fallbacks.
+- AC-21: Missing capabilities and fallbacks are explicit.
+- AC-22: Plugin alias changes normally update data rather than lifecycle code.
+- AC-23: Optional plugin installation always requires user action.
+- AC-24: Local Git initialization remains automatic.
+- AC-25: Approved GitHub foundations create private repositories and CI.
+- AC-26: GitHub connector is preferred with a narrow repository-creation fallback.
+- AC-27: Foundation evidence proves remote identity and visibility.
+- AC-28: Existing repositories are adopted without implicit mutation.
+- AC-29: Web builds use official guidance and in-app Browser QA.
+- AC-30: iOS proof uses XcodeBuildMCP and Simulator evidence.
+- AC-31: macOS proof uses appropriate native build and UI capabilities.
+- AC-32: React Native routes to the official Expo plugin when available.
+- AC-33: Chrome is reserved for authenticated or extension-dependent state.
+- AC-34: Security-sensitive projects use Codex Security when available.
+- AC-35: Live proof adapts to evidence envelope v2.
+- AC-36: Evidence v1 remains readable during migration.
+- AC-37: Correctness review is always required.
+- AC-38: UI work requires UX and accessibility review.
+- AC-39: Security and privacy review follows deterministic risk flags.
+- AC-40: Architecture review follows complexity flags.
+- AC-41: Performance and reliability review follows contract risk.
+- AC-42: Adaptive review uses no more than four agents.
+- AC-43: Fast MVP cannot remove risk-required review.
+- AC-44: Delivery targets are explicit and validated.
+- AC-45: Sites and Vercel are selected by fit, never both by default.
+- AC-46: Delivery proof is source-hash bound.
+- AC-47: Strict completion requires the approved delivery result.
+- AC-48: Missing authority or credentials becomes one honest blocker.
+- AC-49: New amendments use isolated change packets.
+- AC-50: Amendment delegation and verification derive from affected scope.
+- AC-51: Historical v0.3 amendment rows remain readable.
+- AC-52: Quality scanning recognizes common source layouts.
+- AC-53: Star Forge scans its own runtime for large-file debt.
+- AC-54: The CLI runtime is split within explicit module-size budgets.
+- AC-55: Production Python remains within the v0.4 size budget.
+- AC-56: Global learnings are opt-in, provenance-labeled, and redacted.
+- AC-57: `--no-hooks` and `--no-agents` have distinct meanings.
+- AC-58: Existing and new tests pass on macOS and Linux.
 
-## Definition Of Done
+## Definition of Done
 
-A change is done only when every acceptance criterion is met, each task carries a fresh passing `verify` (and `browser-run` for UI), the review wave's fix queue is empty or waived, the tree is clean, and `done --strict` returns COMPLETE.
+Every task in Plan.md must be complete with fresh evidence, every AC must be covered,
+the adaptive review queue must be empty, the required delivery proof must pass, the
+tree must be clean, and `done --strict` must report its exact completion verdict.
