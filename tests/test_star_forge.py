@@ -29,6 +29,7 @@ SPEC.loader.exec_module(star_forge)
 
 from live_collectors import browser_playwright
 from live_collectors import common as live_common
+from starforge import runtime_review
 
 # Isolate learnings from the real home for the whole suite (item: setup detail).
 os.environ["STAR_FORGE_LEARNINGS_HOME"] = tempfile.mkdtemp(prefix="star-forge-test-learnings-")
@@ -750,6 +751,33 @@ def test_fresh_passing_verify_flips_when_source_changes() -> None:
         assert star_forge.fresh_passing_verify(project, task)
         (project / "src" / "extra.py").write_text("print('drift')\n", encoding="utf-8")
         assert not star_forge.fresh_passing_verify(project, task)
+
+
+def test_verify_command_matching_preserves_case_and_quoted_whitespace() -> None:
+    variants = (
+        (
+            "python3 -c \"assert 'A' == 'a'\"",
+            "python3 -c \"assert 'a' == 'a'\"",
+        ),
+        (
+            "python3 -c \"assert 'two  spaces' == 'two spaces'\"",
+            "python3 -c \"assert 'two spaces' == 'two spaces'\"",
+        ),
+    )
+    for declared, executed in variants:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp).resolve()
+            init_project(project)
+            write_plan(project, [f"| SF-1 | Build greeter | ready | solo | src/hello.py | - | {declared} | - |"])
+            source = project / "src" / "hello.py"
+            source.parent.mkdir(parents=True, exist_ok=True)
+            source.write_text("print('hello forge')\n", encoding="utf-8")
+            record_verify(project, "SF-1", executed)
+            task = star_forge.parse_tasks(project / "Plan.md")[0]
+            assert not star_forge.fresh_passing_verify(project, task)
+            code, payload = complete_task(project, "SF-1")
+            assert code == 1
+            assert any(item["rule"] == "verify-stale" for item in payload["findings"])
 
 
 # ----------------------------------------------------------- 5. complete-task
@@ -1849,6 +1877,43 @@ def test_waiver_cannot_follow_positional_id_to_unrelated_finding() -> None:
         assert replacement in merged["fix_queue"]
 
 
+def test_waiver_identity_cannot_collide_across_exact_locations_and_details() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        reviewable_project(project)
+        original = {
+            "severity": "high",
+            "file": "src/hello.py",
+            "line": 1,
+            "title": "Hardcoded secret material",
+            "detail": "A token is embedded in the source",
+        }
+        replacement = {
+            "severity": "high",
+            "file": "src/hello.py",
+            "line": 2,
+            "title": "Hardcoded credential material",
+            "detail": "A password is embedded in the source",
+        }
+        write_reviewer_findings(project, "correctness", [original])
+        write_reviewer_findings(project, "security", [])
+        write_reviewer_findings(project, "architecture", [])
+        code, out, err = run_cli(["review", "--project", str(project)])
+        assert code == 0, err or out
+        first = json.loads(out)["fix_queue"][0]
+        code, out, err = run_cli([
+            "waive", "--project", str(project), "--finding", first["id"],
+            "--reason", "accepted exact occurrence",
+        ])
+        assert code == 0, err or out
+        write_reviewer_findings(project, "correctness", [replacement])
+        merged = star_forge.merge_review(project, star_forge.scope_hash(project) or "noscope")
+        second = next(item for item in merged["findings"] if item["title"] == replacement["title"])
+        assert first["fingerprint"] != second["fingerprint"]
+        assert second["waived"] is False
+        assert second in merged["fix_queue"]
+
+
 def test_review_goes_stale_after_source_change() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         project = Path(tmp).resolve()
@@ -2120,6 +2185,50 @@ def test_review_dedupe_preserves_max_severity_for_later_blocking_duplicate() -> 
 
 
 # ----------------------------------------------- 7. done + proof + amend loop
+
+
+def test_plan_v2_cannot_cover_drift_with_new_completed_amend_row() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        init_project(project)
+        plan = project / "Plan.md"
+        header = (
+            "# Plan.md\n\n"
+            "| Task | Description | Status | Mode | Files | Depends | ACs | Proof | Verify | Evidence |\n"
+            "|------|-------------|--------|------|-------|---------|-----|-------|--------|----------|\n"
+        )
+        root = f"| SF-1 | Build greeter | complete | solo | src/hello.py | - | AC-1 | automated-test | {REAL_VERIFY} | verified |\n"
+        plan.write_text(header + root, encoding="utf-8")
+        source = project / "src" / "hello.py"
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_text("print('hello forge')\n", encoding="utf-8")
+        commit_all(project, "complete modern plan before drift")
+        proof_head = star_forge.git_head(project)
+        star_forge.write_json(project / star_forge.PROOF_FILE, {
+            "schema": "star-forge.proof.v1",
+            "created_at": "2026-07-26T00:00:00+00:00",
+            "head": proof_head,
+            "source_hash": star_forge.source_hash(project),
+            "scope_hash": "noscope",
+            "verdict": "COMPLETE",
+        })
+        amend = f"| AMEND-1 | Cover drift | complete | solo | src/hello.py | SF-1 | AC-1 | automated-test | {REAL_VERIFY} | verified |\n"
+        plan.write_text(header + root + amend, encoding="utf-8")
+        tasks = star_forge.parse_tasks(plan)
+        assert all(task["plan_version"] == "v2" for task in tasks)
+        current = star_forge.source_hash(project)
+        star_forge.write_json(
+            project / ".starforge" / "state" / "complete-task-amend-1.json",
+            {
+                "verdict": "COMPLETE",
+                "task": "AMEND-1",
+                "source_snapshot": {"source_hash": current},
+            },
+        )
+        covered = runtime_review.completed_amendment_covering_drift(
+            project, tasks, {"detected": True}
+        )
+        assert covered is None
 
 
 def test_done_happy_path_writes_complete_proof() -> None:

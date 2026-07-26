@@ -583,7 +583,7 @@ def add_result_stream_artifacts(project: Path, artifacts: dict[str, Path], prefi
 
 
 def collect(args: argparse.Namespace, command_argv: Sequence[str]) -> tuple[int, MappingLike]:
-    project = Path(args.project).resolve()
+    project = common.assert_collector_project_safe(Path(args.project))
     out_dir = common.live_collector_dir(project, args.task, NATIVE_FINALIZE["collector"])
     source_hash_before = common.compute_source_hash(project)
     problems: list[MappingLike] = []

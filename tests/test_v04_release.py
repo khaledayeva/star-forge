@@ -29,6 +29,7 @@ if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
 from starforge import contracts, doctor, lifecycle, migration, routing
+import star_forge
 
 
 def load_json(path: Path) -> dict[str, Any]:
@@ -483,6 +484,34 @@ def test_runtime_modules_have_explicit_acyclic_dependencies() -> None:
             env={"PYTHONPATH": str(SCRIPTS)},
         )
         assert process.returncode == 0, process.stderr
+
+
+def test_runtime_compatibility_exports_are_keyed_and_resolvable() -> None:
+    facade = (SCRIPTS / "star_forge.py").read_text(encoding="utf-8")
+    support = (SCRIPTS / "starforge" / "runtime_support.py").read_text(
+        encoding="utf-8"
+    )
+    assert "_COMPATIBILITY_EXPORT_GROUPS" in facade
+    assert "_COMPATIBILITY_EXPORTS" in facade
+    assert "_POLICY_EXPORT_GROUPS" in support
+    assert "globals().update" not in facade
+    assert "globals().update" not in support
+
+    support_tree = ast.parse(support)
+    positional_targets = [
+        target
+        for node in support_tree.body
+        if isinstance(node, (ast.Assign, ast.AnnAssign))
+        for target in (
+            node.targets if isinstance(node, ast.Assign) else [node.target]
+        )
+        if isinstance(target, (ast.Tuple, ast.List))
+    ]
+    assert positional_targets == []
+
+    assert len(star_forge.__all__) == len(set(star_forge.__all__))
+    for name in star_forge.__all__:
+        assert getattr(star_forge, name) is not None, name
 
 
 def main() -> int:

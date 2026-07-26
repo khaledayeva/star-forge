@@ -848,6 +848,57 @@ def test_local_build_artifact_alone_cannot_prove_preview() -> None:
         assert "local build artifact alone" in messages
 
 
+def test_preview_entrypoint_rejects_symlinked_live_root_without_external_writes() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp).resolve()
+        project = root / "project"
+        outside = root / "outside"
+        outside.mkdir()
+        init_project(project)
+        live_root = project / ".starforge" / "live"
+        live_root.parent.mkdir(parents=True, exist_ok=True)
+        live_root.symlink_to(outside, target_is_directory=True)
+
+        proc = subprocess.run(
+            [
+                sys.executable,
+                str(PREVIEW_SCRIPT),
+                *collector_args(project, "https://preview.example.invalid/"),
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        assert proc.returncode != 0, proc.stdout
+        assert not any(outside.iterdir())
+
+
+def test_preview_entrypoint_rejects_symlinked_project_root_without_target_writes() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp).resolve()
+        project = root / "project"
+        project_alias = root / "project-alias"
+        init_project(project)
+        project_alias.symlink_to(project, target_is_directory=True)
+        collector_output = project / ".starforge" / "live" / TASK / "preview"
+        assert not collector_output.exists()
+
+        proc = subprocess.run(
+            [
+                sys.executable,
+                str(PREVIEW_SCRIPT),
+                *collector_args(project_alias, "https://preview.example.invalid/"),
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        assert proc.returncode != 0, proc.stdout
+        assert not collector_output.exists()
+
+
 def main() -> int:
     tests = [(name, func) for name, func in list(globals().items()) if name.startswith("test_") and callable(func)]
     passed = 0

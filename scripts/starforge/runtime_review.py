@@ -2,6 +2,7 @@
 from __future__ import annotations
 from .policy_data import mapping as policy_mapping, project as project_record, record as policy_record, value as _policy_value
 import argparse
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -10,7 +11,7 @@ from starforge import changes as project_changes
 from starforge import contracts as project_contracts
 from .runtime_support import BLOCKING_SEVERITIES, FINAL_SUMMARY, FINDING_SEVERITIES, FINDING_SEVERITY_RANK, INCIDENTS_FILE, KNOWN_REVIEW_ROLES, LEDGER_FILE, PLAN_FILE, PROOF_FILE, REVIEWS_DIR, REVIEW_PROFILE_ROLES, STATE_SUBDIR, SUBAGENT_EVENTS, WAIVES_FILE, ForgeError, append_jsonl, architecture_debt_findings, blocking_items, finding_problem, git_head, git_status, is_git_repo, iter_project_files, jsonl_payloads, now_utc, read_json, read_text, relative_to_project, run_git, scan_paths, slugify, source_dirty_entries, source_hash, write_json, write_text
 from .runtime_project import enforcement_mode, ensure_state_dirs, fast_mvp_profile_lock_state, hooks_liveness, project_profile, read_source_profile, required_review_policy, required_review_roles, resolve_project, review_profile, safe_release_snapshot, source_hash_exception_problem, source_hash_unavailable_problem, source_hash_unavailable_state, try_source_hash
-from .runtime_plan import all_tasks_complete, blueprint_is_approved, blueprint_lifecycle_contract, lifecycle_gate_state, parse_depends, parse_tasks, plan_is_placeholder, plan_parse_problem, scope_hash, task_allows_noop_verification, task_counts, task_is_visual, task_plan, task_requires_real_workers, update_plan_task_row, validate_project_plan_contract, validate_tasks
+from .runtime_plan import all_tasks_complete, blueprint_is_approved, blueprint_lifecycle_contract, lifecycle_gate_state, parse_depends, parse_tasks, parse_tasks_from_text, plan_is_placeholder, plan_parse_problem, scope_hash, task_allows_noop_verification, task_counts, task_is_visual, task_plan, task_requires_real_workers, update_plan_task_row, validate_project_plan_contract, validate_tasks
 from .runtime_records import browser_findings, fresh_passing_verify, has_noop_verify, passing_browser_runs, verify_findings
 REVIEW_POLICY = _policy_value("runtime_review.POLICY")
 def reviews_scope_dir(project: Path, scope: str) -> Path:
@@ -54,22 +55,28 @@ def load_review_findings(project: Path, scope: str) -> tuple[list[dict[str, Any]
         try:
             payload = json.loads(path.read_bytes().decode("utf-8"))
         except Exception as exc:
-            problems.append(review_file_problem(rel, "unreadable", rule="review-findings-invalid", error=exc)); continue
+            problems.append(review_file_problem(rel, "unreadable", rule="review-findings-invalid", error=exc))
+            continue
         header, problem = review_file_header(path, rel, payload)
         if problem:
-            problems.append(problem); continue
+            problems.append(problem)
+            continue
         assert header is not None
         role, source_attestation, raw = header
         normalized: list[dict[str, Any]] = []
         for item in raw:
             if not isinstance(item, dict):
-                problems.append(review_file_problem(rel, "finding_object")); continue
+                problems.append(review_file_problem(rel, "finding_object"))
+                continue
             normalized.append(normalize_review_finding(item, role, payload.get("agent_id")))
         files.append(policy_mapping("review_file", path=rel, role=role, agent_id=payload.get("agent_id"), declared_source_hash=source_attestation, findings=normalized))
     return files, problems
 def finding_fingerprint(finding: dict[str, Any]) -> str:
-    file, bucket, _tokens = finding_match_parts(finding)
-    return f"{file}:{bucket}:{finding_issue_signature(finding)}"
+    exact = {"file": str(finding.get("file") or "").strip(), "line": finding.get("line")}
+    exact.update({key: re.sub(r"\s+", " ", str(finding.get(key) or "").strip())
+                  for key in ("title", "detail")})
+    encoded = json.dumps(exact, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
 FINDING_DUPLICATE_STOPWORDS = _policy_value('runtime_review.FINDING_DUPLICATE_STOPWORDS')
 FINDING_MARKERS = _policy_value('runtime_review.FINDING_MARKERS')
 def finding_text(finding: dict[str, Any]) -> str:
@@ -467,13 +474,30 @@ def completed_task_matches_source(project: Path, task_id: str, current: str, *, 
 def completed_amendment_covering_drift(project: Path, tasks: Sequence[dict[str, Any]], drift: dict[str, Any]) -> str | None:
     if not drift.get("detected"):
         return None
+    if not tasks or any(task.get("plan_version") != "legacy" for task in tasks):
+        return None
     if any(task.get("id", "").startswith("AMEND-") and task.get("status") != "complete" for task in tasks):
         return None
+    proof = load_proof(project)
+    head = str((proof or {}).get("head") or "")
+    if not head or not is_git_repo(project):
+        return None
+    code, historical_plan, _ = run_git(["show", f"{head}:{PLAN_FILE}"], project)
+    if code:
+        return None
+    historical_tasks = parse_tasks_from_text(historical_plan)
+    if not historical_tasks or any(task.get("plan_version") != "legacy" for task in historical_tasks):
+        return None
+    historical_amends = {
+        str(task.get("id") or "") for task in historical_tasks
+        if task.get("plan_version") == "legacy" and task.get("status") == "complete"
+        and str(task.get("id") or "").startswith("AMEND-")
+    }
     current = source_hash(project)
     completed_amends = (task for task in tasks if str(task.get("id", "")).startswith("AMEND-") and task.get("status") == "complete")
     for task in sorted(completed_amends, key=lambda item: str(item.get("id") or ""), reverse=True):
         task_id = str(task.get("id") or "")
-        if completed_task_matches_source(project, task_id, current, attest_task=True):
+        if task_id in historical_amends and completed_task_matches_source(project, task_id, current, attest_task=True):
             return task_id
     return None
 def change_scope_files(drift: Mapping[str, Any]) -> list[str]:

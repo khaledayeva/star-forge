@@ -578,7 +578,7 @@ def validate_session_defaults(session: Any, *, scheme: str, simulator: str, runt
 
 
 def collect(args: argparse.Namespace, command_argv: Sequence[str]) -> tuple[int, MappingLike]:
-    project = Path(args.project).resolve()
+    project = common.assert_collector_project_safe(Path(args.project))
     out_dir = common.live_collector_dir(project, args.task, NATIVE_FINALIZE["collector"])
     source_before = common.compute_source_hash(project)
     runtime_hash = common.compute_runtime_asset_hash(project)

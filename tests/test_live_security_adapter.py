@@ -8,6 +8,7 @@ from __future__ import annotations
 import contextlib
 import copy
 import importlib.util
+import inspect
 import io
 import json
 import os
@@ -56,13 +57,7 @@ def run_star_forge(args: list[str]) -> tuple[int, dict[str, Any], str]:
     return code, payload, err
 
 
-def run_adapter(
-    args: list[str], *, provider_receipt: dict[str, Any] | None = None,
-) -> tuple[int, dict[str, Any]]:
-    if provider_receipt is not None:
-        parsed = security_adapter.build_parser().parse_args(args)
-        parsed._command_argv = args
-        return security_adapter.adapt(parsed, provider_receipt=provider_receipt)
+def run_adapter(args: list[str]) -> tuple[int, dict[str, Any]]:
     stdout = io.StringIO()
     with contextlib.redirect_stdout(stdout):
         code = security_adapter.main(args)
@@ -126,25 +121,16 @@ def adapter_args(project: Path, report: Path, *, profile: str = "security-diff",
     return args
 
 
-def direct_provider_receipt(project: Path, report: Path) -> dict[str, Any]:
-    return {
-        "source": "codex-security-direct",
-        "input_sha256": live_common.file_sha256(report),
-        "scanner": "codex-security",
-        "scanner_version": "1.2.3",
-        "ruleset": {"name": "codex-security-default", "version": "2026.06"},
-        "scan_scope": "full-project",
-        "source_binding": {"source_hash": live_common.compute_source_hash(project)},
-    }
-
-
 def problem_rules(payload: dict[str, Any]) -> set[str]:
     return {str(item.get("rule")) for item in payload.get("problems", []) if isinstance(item, dict)}
 
 
-def assert_adapter_pass(code: int, payload: dict[str, Any]) -> None:
-    assert code == 0, payload
-    assert payload["verdict"] == "PASS", payload
+def assert_adapter_degraded(code: int, payload: dict[str, Any]) -> None:
+    assert code == 1, payload
+    assert payload["verdict"] == "DEGRADED", payload
+    assert payload["trusted_provenance"] is False
+    assert payload["preferred_provider_available"] is False
+    assert "security-provider-provenance" in problem_rules(payload)
     assert "security_handoff_packet" in payload["commands"], payload
     assert "security_proof" in payload["commands"], payload
 
@@ -177,11 +163,8 @@ def test_codex_security_input_normalizes_and_hands_to_core() -> None:
         project = Path(tmp).resolve()
         init_project(project)
         report = write_report(project, read_fixture("codex-security-report.json"))
-        code, payload = run_adapter(
-            adapter_args(project, report),
-            provider_receipt=direct_provider_receipt(project, report),
-        )
-        assert_adapter_pass(code, payload)
+        code, payload = run_adapter(adapter_args(project, report))
+        assert_adapter_degraded(code, payload)
         envelope_path = project / payload["evidence"]
         envelope = evidence.read_envelope(
             envelope_path,
@@ -190,9 +173,9 @@ def test_codex_security_input_normalizes_and_hands_to_core() -> None:
         )
         assert envelope["schema"] == evidence.EVIDENCE_SCHEMA
         assert envelope["capability"] == security_adapter.CAPABILITY
-        assert envelope["provider"] == security_adapter.PREFERRED_PROVIDER
-        assert envelope["verdict"] == "PASS"
-        assert envelope["provenance"]["route"]["fallback"] is False
+        assert envelope["provider"] == security_adapter.FALLBACK_PROVIDER
+        assert envelope["verdict"] == "DEGRADED"
+        assert envelope["provenance"]["route"]["fallback"] is True
         assert envelope["provenance"]["source_binding"]["fresh"] is True
         assert (project / payload["artifacts"]["manifest"]).exists()
 
@@ -211,7 +194,7 @@ def test_codex_security_input_normalizes_and_hands_to_core() -> None:
             "security-handoff-packet", "--project", str(project), "--kind", "security-diff",
             "--input", str(handoff), "--strict",
         ])
-        assert_star_pass(code, handoff_payload)
+        assert_star_fail(code, handoff_payload, "security-provider-provenance")
 
         code, proof_payload, _ = run_star_forge([
             "security-proof", "--project", str(project), "--task", "SF-1",
@@ -257,6 +240,75 @@ def test_hand_authored_codex_security_shape_cannot_claim_provider_provenance() -
         assert envelope["verdict"] == "DEGRADED"
 
 
+def test_security_adapter_exposes_no_caller_authored_trust_receipt() -> None:
+    assert "provider_receipt" not in inspect.signature(security_adapter.adapt).parameters
+
+
+def test_security_entrypoint_rejects_symlinked_live_root_without_external_writes() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp).resolve()
+        project = root / "project"
+        outside = root / "outside"
+        outside.mkdir()
+        init_project(project)
+        report = write_report(project, read_fixture("codex-security-report.json"))
+        live_root = project / ".starforge" / "live"
+        live_root.parent.mkdir(parents=True, exist_ok=True)
+        live_root.symlink_to(outside, target_is_directory=True)
+
+        proc = subprocess.run(
+            [sys.executable, str(ADAPTER_SCRIPT), *adapter_args(project, report)],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        assert proc.returncode != 0, proc.stdout
+        assert not any(outside.iterdir())
+
+
+def test_source_snapshot_never_reads_tracked_symlink_target_outside_project() -> None:
+    for relative_target in (False, True):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            project = root / "project"
+            outside = root / "private.py"
+            init_project(project)
+            sentinel = "PRIVATE_SENTINEL_DO_NOT_DISCLOSE"
+            outside.write_text(f"{sentinel} = 'secret'\n", encoding="utf-8")
+            linked = project / "src" / "linked.py"
+            linked.symlink_to(Path("../../private.py") if relative_target else outside)
+            subprocess.run(
+                ["git", "add", "src/linked.py"],
+                cwd=str(project),
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+
+            for operation in (
+                lambda: live_common.snapshot_file_candidates(project),
+                lambda: live_common.compute_source_hash(project),
+            ):
+                try:
+                    operation()
+                except ValueError as exc:
+                    assert "source snapshot refuses symlink" in str(exc)
+                    assert sentinel not in str(exc)
+                else:
+                    raise AssertionError("tracked source symlink received a trusted snapshot")
+
+            proc = subprocess.run(
+                [sys.executable, str(STAR_FORGE_SCRIPT), "run", "--project", str(project)],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            assert proc.returncode != 0, proc.stdout
+            assert sentinel not in proc.stdout + proc.stderr
+
+
 def test_free_text_token_redaction_reaches_normalized_security_artifacts() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         project = Path(tmp).resolve()
@@ -269,11 +321,8 @@ def test_free_text_token_redaction_reaches_normalized_security_artifacts() -> No
         report_payload["findings"][0]["evidence"]["snippet"] = f"Authorization: Basic {basic}"
         report = write_report(project, report_payload, "free-text-secrets.json")
 
-        code, payload = run_adapter(
-            adapter_args(project, report),
-            provider_receipt=direct_provider_receipt(project, report),
-        )
-        assert_adapter_pass(code, payload)
+        code, payload = run_adapter(adapter_args(project, report))
+        assert_adapter_degraded(code, payload)
         findings = load_artifact(project, payload, "normalized_findings")
         blob = json.dumps(findings)
         assert jwt not in blob
@@ -324,11 +373,8 @@ def test_signed_url_and_hyphenated_api_key_redaction_reaches_security_artifacts(
         finding["evidence"]["x-api-key"] = x_api_key_value
         report = write_report(project, report_payload, "signed-url-secrets.json")
 
-        code, payload = run_adapter(
-            adapter_args(project, report),
-            provider_receipt=direct_provider_receipt(project, report),
-        )
-        assert_adapter_pass(code, payload)
+        code, payload = run_adapter(adapter_args(project, report))
+        assert_adapter_degraded(code, payload)
         findings = load_artifact(project, payload, "normalized_findings")
         blob = json.dumps(findings)
         assert "tok123" not in blob
@@ -460,11 +506,8 @@ def test_redacts_absolute_home_token_env_and_snippet_values() -> None:
             "token": github_token
         }
         report = write_report(project, report_payload)
-        code, payload = run_adapter(
-            adapter_args(project, report),
-            provider_receipt=direct_provider_receipt(project, report),
-        )
-        assert_adapter_pass(code, payload)
+        code, payload = run_adapter(adapter_args(project, report))
+        assert_adapter_degraded(code, payload)
 
         findings = load_artifact(project, payload, "normalized_findings")
         text = json.dumps(findings)
@@ -482,7 +525,7 @@ def test_redacts_absolute_home_token_env_and_snippet_values() -> None:
         assert counts["home_paths"] >= 1
 
 
-def test_clean_trusted_report_passes_security_handoff_and_proof() -> None:
+def test_clean_codex_security_file_import_is_explicitly_degraded() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         project = Path(tmp).resolve()
         init_project(project)
@@ -490,10 +533,9 @@ def test_clean_trusted_report_passes_security_handoff_and_proof() -> None:
         clean["findings"] = []
         report = write_report(project, clean, "clean.json")
         code, payload = run_adapter(
-            adapter_args(project, report, profile="security-deep"),
-            provider_receipt=direct_provider_receipt(project, report),
+            adapter_args(project, report, profile="security-deep")
         )
-        assert_adapter_pass(code, payload)
+        assert_adapter_degraded(code, payload)
 
         handoff = project / payload["artifacts"]["handoff_input"]
         normalized = project / payload["artifacts"]["normalized_findings"]
@@ -502,14 +544,14 @@ def test_clean_trusted_report_passes_security_handoff_and_proof() -> None:
             "security-handoff-packet", "--project", str(project), "--kind", "security-deep",
             "--input", str(handoff), "--strict",
         ])
-        assert_star_pass(code, handoff_payload)
+        assert_star_fail(code, handoff_payload, "security-provider-provenance")
         code, proof_payload, _ = run_star_forge([
             "security-proof", "--project", str(project), "--task", "SF-1",
             "--profile", "security-deep", "--scanner", "codex-security",
             "--scanner-version", "1.2.3", "--findings", str(normalized),
             "--artifact", str(manifest), "--strict",
         ])
-        assert_star_pass(code, proof_payload)
+        assert_star_fail(code, proof_payload, "security-provider-provenance")
 
 
 def test_untrusted_import_record_uses_trusted_star_forge_and_fails_proof() -> None:

@@ -22,11 +22,12 @@ Resolve review capabilities from project class, Blueprint risk flags, Plan v2
 required. Follow the role-specific `spawn_plan` from state for every additional
 required lens.
 
-Security-sensitive projects prefer Codex Security when available. Feed actual
-results into the normalized security proof path. If it is unavailable, disclose
-the selected safe fallback. Never claim it ran. Fast MVP may reduce optional
-review breadth, but cannot remove risk-required security, privacy, UX,
-accessibility, reliability, or delivery review.
+Security-sensitive projects prefer Codex Security when available. Use actual
+results as review context, but treat file exports as untrusted fallback evidence
+unless the host supplies independently verifiable provenance. If the capability
+is unavailable, disclose the selected safe fallback. Never claim it ran. Fast MVP
+may reduce optional review breadth, but cannot remove risk-required security,
+privacy, UX, accessibility, reliability, or delivery review.
 
 Spawn each exact `starforge-reviewer` entry from `spawn_plan`. Every reviewer
 writes only its assigned

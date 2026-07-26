@@ -81,8 +81,8 @@ approved Delivery Contract. A live URL by itself is not delivery proof.
 
 ## GitHub PR Packet
 
-The GitHub plugin is preferred. The collector converts live connector output or a
-live read-only `gh` export into a task-scoped source packet:
+The GitHub plugin is preferred. The collector converts a connector file export or
+a read-only `gh` export into a task-scoped diagnostic packet:
 
 ```sh
 python3 scripts/live_collectors/github_pr.py \
@@ -90,13 +90,13 @@ python3 scripts/live_collectors/github_pr.py \
   --task SF-123 \
   --repo owner/repo \
   --pr 42 \
-  --connector-input github-pr-live.json \
-  --record
+  --connector-input github-pr-live.json
 ```
 
 Use `--gh-readonly-dir` when the selected fallback is a live read-only `gh` export.
-Fixture inputs are test-only. Foundation creation authority is separate from this
-read-only PR recipe.
+Both public import modes remain untrusted and do not emit production proof
+commands. Fixture inputs are test-only. Foundation creation authority is separate
+from this read-only PR recipe.
 
 ## Native iOS
 
@@ -169,8 +169,8 @@ proves platform delivery.
 
 ## Security
 
-Security-sensitive projects prefer Codex Security. Normalize the trusted scanner
-report without storing credentials or raw private content:
+Security-sensitive projects prefer Codex Security. The public adapter normalizes
+file exports without storing credentials or raw private content:
 
 ```sh
 python3 scripts/live_collectors/security_adapter.py \
@@ -182,11 +182,17 @@ python3 scripts/live_collectors/security_adapter.py \
   --source-hash <current-source-hash> \
   --scanner codex-security \
   --scanner-version <version> \
-  --record \
-  --strict
+  --record
 ```
 
-Strict security proof requires scanner identity, version, scope, input hash,
+File imports are intentionally untrusted because the report author can also
+author its provenance fields. They may guide the security review and fallback
+scanner workflow, but they cannot satisfy strict proof by themselves. Strict
+security proof additionally requires an independently verifiable host-controlled
+provenance boundary. The current public adapter exposes no caller-supplied receipt
+escape hatch.
+
+Security evidence still records scanner identity, version, scope, input hash,
 normalized findings, redaction report, timestamps, and source or commit binding.
 Never place OAuth tokens, access tokens, private screenshots, or unredacted
 project secrets in tracked evidence.

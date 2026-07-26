@@ -241,6 +241,14 @@ def normalize_github_foundation(
         ).items()
     }
     state = SimpleNamespace(**extracted)
+    selected_provider = github_provider(raw)
+    if (
+        selected_provider == "github-unavailable"
+        and raw.source not in {"connector-fixture", "gh-fixture"}
+    ):
+        extracted["provider"] = selected_provider
+        state.provider = selected_provider
+        state.fallback = ""
     owner, _, name = repo.partition("/")
     state.visibility = state.visibility.lower()
     tree_hash = first_text(
@@ -276,16 +284,7 @@ def normalize_github_foundation(
 
 
 def github_provider(raw: Any) -> str:
-    gh = _github()
-    provider = first_text(
-        raw.foundation_provenance.get("provider"),
-        nested(raw.foundation_provenance, "github_repository", "provider"),
-    )
-    if provider in {gh.PREFERRED_PROVIDER, gh.GH_READONLY_PROVIDER, gh.GH_CREATE_PROVIDER}:
-        return provider
-    if raw.source.startswith("github-connector") or raw.source == "connector-fixture":
-        return gh.PREFERRED_PROVIDER
-    return gh.GH_READONLY_PROVIDER if raw.source.startswith("gh-") else "github-unavailable"
+    return "github-unavailable"
 
 
 def provider_route(provider: str) -> dict[str, Any]:

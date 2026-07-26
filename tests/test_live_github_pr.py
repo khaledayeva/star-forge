@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import contextlib
 import importlib.util
+import inspect
 import io
 import json
 import os
@@ -150,7 +151,7 @@ def gh_readonly_dir(project: Path, mutate: Callable[[Path], None] | None = None)
     write_json(
         target / "provenance.json",
         {
-            "source": "gh-readonly-live",
+            "source": "gh-readonly-import-live",
             "repo": REPO,
             "pr": PR,
             "github_host": "github.com",
@@ -306,6 +307,10 @@ def test_connector_fixture_writes_packet_without_production_proof_commands() -> 
         assert payload["collector"] == "github"
         assert payload["summary"]["source"] == "connector-fixture"
         assert payload["summary"]["captured_head_sha"] == "2222222222222222222222222222222222222222"
+        envelope = evidence.read_envelope(
+            evidence_path(project), project_root=project, verify_artifacts=True,
+        )
+        assert envelope["provider"] == "github-unavailable"
         assert_core_fails(project, manifest, "github-fixture-provenance")
         assert_production_proof_fails(project, manifest, "github-fixture-provenance")
 
@@ -334,8 +339,9 @@ def test_connector_input_writes_degraded_packet_without_provider_receipt() -> No
         input_path = connector_input(project)
         code, out, manifest = collect_connector_input(project, input_path)
         assert code == 1, out
-        assert "source-packet-github-pr-review" in out
-        assert "source-packet-proof" in out
+        assert "production proof commands were not emitted" in out
+        assert "source-packet-github-pr-review" not in out
+        assert "source-packet-proof" not in out
         payload = load_json(manifest)
         assert payload["summary"]["source"] == "github-import-live"
         assert payload["degraded"] is True
@@ -379,24 +385,65 @@ def test_self_authored_connector_json_cannot_claim_live_github_provenance() -> N
         assert_production_proof_fails(project, manifest, "github-provider-receipt")
 
 
-def test_direct_connector_receipt_binds_import_to_exact_payload() -> None:
+def test_connector_loader_exposes_no_caller_authored_trust_receipt() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         project = Path(tmp).resolve()
         init_project(project)
         input_path = connector_input(project)
-        receipt = {
-            "source": "github-connector-direct",
-            "input_sha256": github_pr.live_common.file_sha256(input_path),
-            "operation_id": "connector-read-42",
-            "collected_at": "2026-06-18T12:06:00Z",
-        }
-        assert github_pr.load_connector_input(
-            input_path, provider_receipt=receipt,
-        ).source == "github-connector-live"
-        receipt["input_sha256"] = "0" * 64
-        assert github_pr.load_connector_input(
-            input_path, provider_receipt=receipt,
-        ).source == "github-import-live"
+        assert "provider_receipt" not in inspect.signature(
+            github_pr.load_connector_input
+        ).parameters
+        assert github_pr.load_connector_input(input_path).source == "github-import-live"
+
+
+def test_unsigned_connector_foundation_cannot_claim_preferred_provider() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        init_project(project)
+
+        def mutate(payload: dict[str, Any]) -> None:
+            payload["foundation"] = {"provider": "github-connector"}
+
+        input_path = connector_input(project, mutate)
+        code, out, manifest = collect_connector_input(project, input_path)
+        assert code == 1, out
+        envelope = evidence.read_envelope(
+            evidence_path(project), project_root=project, verify_artifacts=True,
+        )
+        assert envelope["provider"] == "github-unavailable", envelope
+        assert envelope["provenance"]["route"]["fallback"] is True
+        assert load_json(manifest)["summary"]["foundation"].get("provider") != "github-connector"
+
+
+def test_github_entrypoint_rejects_symlinked_live_root_without_external_writes() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp).resolve()
+        project = root / "project"
+        outside = root / "outside"
+        outside.mkdir()
+        init_project(project)
+        input_path = connector_input(project)
+        live_root = project / ".starforge" / "live"
+        live_root.parent.mkdir(parents=True, exist_ok=True)
+        live_root.symlink_to(outside, target_is_directory=True)
+
+        proc = subprocess.run(
+            [
+                sys.executable,
+                str(GITHUB_PR_SCRIPT),
+                "--project", str(project),
+                "--task", TASK,
+                "--repo", REPO,
+                "--pr", PR,
+                "--connector-input", str(input_path),
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        assert proc.returncode != 0, proc.stdout
+        assert not any(outside.iterdir())
 
 
 def test_connector_input_records_source_bound_foundation_identity() -> None:
@@ -490,6 +537,7 @@ def test_foundation_gh_creation_requires_the_exact_private_fallback() -> None:
         source_hash = github_pr.live_common.compute_source_hash(project)
         head = "3" * 40
         raw = github_pr.load_connector_input(input_path)
+        raw.source = "connector-fixture"
         raw.foundation_provenance = {
             "schema": "star-forge.foundation-evidence.v1",
             "source_hash": source_hash,
@@ -577,18 +625,19 @@ def test_connector_input_requires_explicit_final_freshness_without_initial_ref_f
         assert_core_fails(project, manifest, "github-live-provenance")
 
 
-def test_connector_input_record_runs_both_strict_proof_commands() -> None:
+def test_connector_input_record_refuses_untrusted_import() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         project = Path(tmp).resolve()
         init_project(project)
         input_path = connector_input(project)
         code, out, _ = collect_connector_input(project, input_path, ["--record"])
         assert code == 1, out
-        assert "source-packet-github-pr-review" in out
-        assert "source-packet-proof" in out
+        assert "production proof commands were not emitted" in out
+        assert "source-packet-github-pr-review" not in out
+        assert "source-packet-proof" not in out
         github_records = star_forge.load_run_records(project, kind="source-packet-github-pr-review", task=TASK)
         production_records = star_forge.load_run_records(project, kind="source-packet-proof", task=TASK)
-        assert github_records and github_records[-1]["verdict"] == "FAIL"
+        assert github_records == []
         assert production_records == []
 
 
@@ -629,11 +678,12 @@ def test_connector_input_record_uses_bundled_star_forge_from_unrelated_cwd() -> 
 
         assert proc.returncode == 1, proc.stdout + proc.stderr
         assert not marker.exists()
-        assert "source-packet-github-pr-review" in proc.stdout
-        assert "source-packet-proof" in proc.stdout
+        assert "production proof commands were not emitted" in proc.stdout
+        assert "source-packet-github-pr-review" not in proc.stdout
+        assert "source-packet-proof" not in proc.stdout
         github_records = star_forge.load_run_records(project, kind="source-packet-github-pr-review", task=TASK)
         production_records = star_forge.load_run_records(project, kind="source-packet-proof", task=TASK)
-        assert github_records and github_records[-1]["verdict"] == "FAIL"
+        assert github_records == []
         assert production_records == []
 
 
@@ -912,22 +962,23 @@ def test_gh_readonly_accepts_pr_scoped_api_endpoints() -> None:
 
         fixture_dir = gh_readonly_dir(project, mutate)
         code, out, manifest = collect_gh_readonly(project, fixture_dir)
-        assert code == 0, out
-        assert "source-packet-github-pr-review" in out
+        assert code == 1, out
+        assert "production proof commands were not emitted" in out
+        assert rules_from_manifest(manifest) == {"github-provider-receipt"}
         envelope = evidence.read_envelope(
             evidence_path(project),
             project_root=project,
             verify_artifacts=True,
         )
-        assert envelope["provider"] == github_pr.GH_READONLY_PROVIDER
-        assert envelope["verdict"] == "DEGRADED"
+        assert envelope["provider"] == "github-unavailable"
+        assert envelope["verdict"] == "FAIL"
         assert envelope["provenance"]["route"]["create_fallback"] == github_pr.GH_CREATE_FALLBACK
         assert any(
             item.get("rule") == "github-capability-fallback"
             and item.get("blocking") is False
             for item in envelope["blockers"]
         )
-        assert_core_passes(project, manifest)
+        assert_core_fails(project, manifest, "github-provider-receipt")
 
 
 def test_gh_readonly_accepts_safe_path_style_api_query_params() -> None:
@@ -940,8 +991,9 @@ def test_gh_readonly_accepts_safe_path_style_api_query_params() -> None:
 
         fixture_dir = gh_readonly_dir(project, mutate)
         code, out, manifest = collect_gh_readonly(project, fixture_dir)
-        assert code == 0, out
-        assert_core_passes(project, manifest)
+        assert code == 1, out
+        assert rules_from_manifest(manifest) == {"github-provider-receipt"}
+        assert_core_fails(project, manifest, "github-provider-receipt")
 
 
 def test_collector_rejects_shell_substitution_in_allowed_gh_option_values() -> None:

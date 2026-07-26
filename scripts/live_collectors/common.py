@@ -15,6 +15,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 import subprocess
 import urllib.parse
 from dataclasses import dataclass
@@ -86,6 +87,9 @@ def write_json(
 def write_text(path: Path, text: str, *, redact: bool = True) -> tuple[Path, dict[str, Any]]:
     output, report = redact_sensitive_values(text) if redact else (text, {})
     path.parent.mkdir(parents=True, exist_ok=True)
+    for candidate in (path, *path.parents):
+        if candidate.is_symlink():
+            raise ValueError(f"refusing to write through symlink: {candidate}")
     path.write_text(str(output), encoding="utf-8")
     return path, report
 
@@ -124,13 +128,41 @@ def sanitize_segment(value: str, *, fallback: str = "artifact") -> str:
     return (fallback if not cleaned or cleaned in {".", ".."} else cleaned)[:90]
 
 
+def assert_collector_project_safe(project: Path) -> Path:
+    """Return the resolved project after rejecting unsafe Star Forge state."""
+
+    if project.is_symlink():
+        raise ValueError(f"refusing symlinked collector project root: {project}")
+    project_root = project.resolve()
+    if not project_root.is_dir():
+        raise ValueError(f"collector project is not a directory: {project}")
+    state_root = project_root / ".starforge"
+    if not state_root.exists() and not state_root.is_symlink():
+        return project_root
+    if state_root.is_symlink():
+        raise ValueError(f"refusing unsafe Star Forge state symlink: {state_root}")
+    if not state_root.is_dir():
+        raise ValueError(f"refusing non-directory Star Forge state root: {state_root}")
+    try:
+        for path in state_root.rglob("*"):
+            if path.is_symlink():
+                raise ValueError(f"refusing unsafe Star Forge state symlink: {path}")
+    except OSError as exc:
+        raise ValueError(f"cannot safely inspect Star Forge state: {exc}") from exc
+    return project_root
+
+
 def live_collector_dir(project: Path, task_id: str, collector: str, *, create: bool = True) -> Path:
-    live_root = (project.resolve() / LIVE_ROOT).resolve()
+    project_root = assert_collector_project_safe(project)
+    live_root = project_root / LIVE_ROOT
     root = live_root / sanitize_segment(task_id, fallback="task") / sanitize_segment(collector, fallback="collector")
-    if live_root not in root.resolve().parents:
+    if root.parent.parent != live_root:
         raise ValueError(f"live collector path escapes {LIVE_ROOT}")
     if create:
         root.mkdir(parents=True, exist_ok=True)
+        assert_collector_project_safe(project_root)
+    if live_root.is_symlink() or root.is_symlink():
+        raise ValueError(f"refusing unsafe live collector symlink: {root}")
     return root
 
 
@@ -151,9 +183,18 @@ def safe_project_path(project: Path, raw_path: str | Path, *, must_exist: bool =
     return resolved
 
 
+def _lexical_absolute(path: Path) -> Path:
+    return Path(os.path.abspath(os.fspath(path)))
+
+
 def project_relative(project: Path, path: Path) -> str:
+    project_root = project.resolve()
     try:
-        return str(path.resolve().relative_to(project.resolve()))
+        return str(_lexical_absolute(path).relative_to(project_root))
+    except ValueError:
+        pass
+    try:
+        return str(path.resolve().relative_to(project_root))
     except ValueError:
         return sanitize_external_path(path)
 
@@ -238,6 +279,41 @@ def dirty_paths_missing_from_source_snapshot(project: Path) -> list[str]:
     ]
 
 
+def _source_symlink_component(project: Path, path: Path) -> Path | None:
+    project_root = project.resolve()
+    candidate = _lexical_absolute(path)
+    try:
+        relative = candidate.relative_to(project_root)
+    except ValueError:
+        return None
+    current = project_root
+    for part in relative.parts:
+        current = current / part
+        if current.is_symlink():
+            return current
+    return None
+
+
+def _safe_regular_project_file(project: Path, path: Path) -> bool:
+    """Check a source path without following any symlink component."""
+
+    if _source_symlink_component(project, path) is not None:
+        return False
+    try:
+        return stat.S_ISREG(_lexical_absolute(path).lstat().st_mode)
+    except OSError:
+        return False
+
+
+def _validated_source_candidate(project: Path, path: Path) -> Path | None:
+    symlink = _source_symlink_component(project, path)
+    if symlink is not None:
+        raise ValueError(
+            f"source snapshot refuses symlink: {project_relative(project, symlink)}"
+        )
+    return path if _safe_regular_project_file(project, path) else None
+
+
 def snapshot_file_candidates(project: Path) -> list[Path]:
     git_repo = is_git_repo(project)
     if git_repo:
@@ -245,29 +321,55 @@ def snapshot_file_candidates(project: Path) -> list[Path]:
             run_git(["ls-files"], project),
             run_git(["ls-files", "--others", "--exclude-standard"], project),
         )
-        files = [
-            path for code, out, _ in listings if code == 0
-            for rel in out.splitlines()
-            if rel.strip() and not path_has_source_hash_excluded_part(rel.strip())
-            and (path := project / rel.strip()).exists() and path.is_file()
-        ]
+        files = []
+        for code, out, _ in listings:
+            if code != 0:
+                continue
+            for rel in out.splitlines():
+                if not rel.strip() or path_has_source_hash_excluded_part(rel.strip()):
+                    continue
+                candidate = _validated_source_candidate(project, project / rel.strip())
+                if candidate is not None:
+                    files.append(candidate)
     else:
         files = []
         for root, dirs, names in os.walk(project):
             root_path = Path(root)
-            dirs[:] = sorted(name for name in dirs if name not in FALLBACK_IGNORED_PARTS and not (root_path / name).is_symlink())
-            files.extend(path for name in sorted(names) if (path := root_path / name).is_file())
+            kept_dirs = []
+            for name in sorted(dirs):
+                candidate = root_path / name
+                if name in FALLBACK_IGNORED_PARTS:
+                    continue
+                if candidate.is_symlink():
+                    raise ValueError(
+                        f"source snapshot refuses symlink: {project_relative(project, candidate)}"
+                    )
+                kept_dirs.append(name)
+            dirs[:] = kept_dirs
+            for name in sorted(names):
+                candidate = _validated_source_candidate(project, root_path / name)
+                if candidate is not None:
+                    files.append(candidate)
     return sorted(files, key=lambda item: project_relative(project, item))
 
 
-source_snapshot_includes = Path.is_file
+def source_snapshot_includes(path: Path) -> bool:
+    try:
+        return not path.is_symlink() and stat.S_ISREG(path.lstat().st_mode)
+    except OSError:
+        return False
 
 
 def files_fingerprint(project: Path, paths: Sequence[Path]) -> str:
     digest = hashlib.sha256()
     for path in paths:
+        symlink = _source_symlink_component(project, path)
+        if symlink is not None:
+            raise ValueError(
+                f"source fingerprint refuses symlink: {project_relative(project, symlink)}"
+            )
         rel = project_relative(project, path)
-        content_hash = file_sha256(path) if path.exists() and path.is_file() else ""
+        content_hash = file_sha256(path) if _safe_regular_project_file(project, path) else ""
         digest.update(f"{rel}\0{content_hash}\0".encode("utf-8"))
     return digest.hexdigest()
 

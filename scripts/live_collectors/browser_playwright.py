@@ -107,7 +107,7 @@ read_json_file = live_common.read_json
 
 
 def resolve_project(raw: str) -> Path:
-    return Path(raw).expanduser().resolve()
+    return live_common.assert_collector_project_safe(Path(raw).expanduser())
 
 
 def maybe_call(value: Any) -> Any:

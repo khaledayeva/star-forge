@@ -18,6 +18,7 @@ PERFORMANCE_RELIABILITY_FLAGS = tuple(_POLICY["flag_groups"]["performance"])
 _RISK_FLAG_LOOKUP = {name.casefold(): name for name in RISK_FLAG_ORDER}
 _RESOLVED_FLAG_VALUES = _policy_value('review_policy._RESOLVED_FLAG_VALUES')
 _UNRESOLVED_VALUES = _policy_value('review_policy._UNRESOLVED_VALUES')
+_UNAVAILABLE_VALUES = _UNRESOLVED_VALUES | {"not applicable", "n/a", "na"}
 _PROJECT_CLASS_SURFACES: dict[str, tuple[str, ...]] = _policy_value('review_policy._PROJECT_CLASS_SURFACES')
 _PLATFORM_SURFACES: dict[str, tuple[str, ...]] = _policy_value('review_policy._PLATFORM_SURFACES')
 _PROOF_SURFACES: dict[str, tuple[str, ...]] = _policy_value('review_policy._PROOF_SURFACES')
@@ -29,34 +30,42 @@ _DELIVERY_CONTRACT_SCHEMA = _POLICY["delivery_contract_schema"]
 @dataclass(frozen=True)
 class RiskFlag:
     """One normalized Risk Flags table row."""
-    name: str; value: str; reasons: tuple[str, ...] = ()
+    name: str
+    value: str
+    reasons: tuple[str, ...] = ()
     def to_dict(self) -> dict[str, Any]:
         return _policy_mapping("risk_flag", value=self.value, reasons=list(self.reasons))
+
 @dataclass(frozen=True)
 class ProjectSurfaces:
     """Structured project facts that may establish review applicability."""
-    project_classes: tuple[str, ...] = (); target_platforms: tuple[str, ...] = ()
-    proof_kinds: tuple[str, ...] = (); delivery_targets: tuple[str, ...] = ()
+    project_classes: tuple[str, ...] = ()
+    target_platforms: tuple[str, ...] = ()
+    proof_kinds: tuple[str, ...] = ()
+    delivery_targets: tuple[str, ...] = ()
     surfaces: tuple[str, ...] = ()
     def to_dict(self) -> dict[str, Any]:
-        return _policy_mapping(
-            "project_surfaces", project_classes=list(self.project_classes),
-            target_platforms=list(self.target_platforms), proof_kinds=list(self.proof_kinds),
-            delivery_targets=list(self.delivery_targets), surfaces=list(self.surfaces))
+        return _policy_mapping("project_surfaces", project_classes=list(self.project_classes), target_platforms=list(self.target_platforms), proof_kinds=list(self.proof_kinds), delivery_targets=list(self.delivery_targets), surfaces=list(self.surfaces))
+
 @dataclass(frozen=True)
 class ReviewRoleSelection:
     """One agent role, its logical lenses, and explicit applicability reasons."""
-    role: str; lenses: tuple[str, ...]; reasons: tuple[str, ...]
+    role: str
+    lenses: tuple[str, ...]
+    reasons: tuple[str, ...]
     def to_dict(self) -> dict[str, Any]:
-        return _policy_mapping(
-            "review_role_selection", role=self.role,
-            lenses=list(self.lenses), reasons=list(self.reasons))
+        return _policy_mapping("review_role_selection", role=self.role, lenses=list(self.lenses), reasons=list(self.reasons))
+
 @dataclass(frozen=True)
 class ReviewPolicySelection:
     """The complete deterministic and optionally source-bound review decision."""
-    legacy: bool; profile: str; source_hash: str | None
-    project_surfaces: ProjectSurfaces; risk_flags: tuple[RiskFlag, ...]
-    selections: tuple[ReviewRoleSelection, ...]; combined: bool
+    legacy: bool
+    profile: str
+    source_hash: str | None
+    project_surfaces: ProjectSurfaces
+    risk_flags: tuple[RiskFlag, ...]
+    selections: tuple[ReviewRoleSelection, ...]
+    combined: bool
     @property
     def roles(self) -> tuple[str, ...]:
         return tuple(item.role for item in self.selections)
@@ -64,21 +73,13 @@ class ReviewPolicySelection:
         item = next((item for item in self.selections if item.role == role), None)
         return item.reasons if item else ()
     def to_dict(self) -> dict[str, Any]:
-        return _policy_mapping(
-            "review_policy_result", legacy=self.legacy, profile=self.profile,
-            source_hash=self.source_hash, combined=self.combined,
-            project_surfaces=self.project_surfaces.to_dict(),
-            risk_flags={flag.name: flag.to_dict() for flag in self.risk_flags},
-            roles=list(self.roles),
-            selections=[selection.to_dict() for selection in self.selections])
+        return _policy_mapping("review_policy_result", legacy=self.legacy, profile=self.profile, source_hash=self.source_hash, combined=self.combined, project_surfaces=self.project_surfaces.to_dict(), risk_flags={flag.name: flag.to_dict() for flag in self.risk_flags}, roles=list(self.roles), selections=[selection.to_dict() for selection in self.selections])
 def _normalized(value: object) -> str:
     return re.sub(r"[^a-z0-9]+", "-", str(value or "").strip().casefold()).strip("-")
 def _deduplicated(values: Sequence[str]) -> tuple[str, ...]:
-    return tuple(dict.fromkeys(
-        cleaned for value in values if (cleaned := str(value or "").strip())))
+    return tuple(dict.fromkeys(cleaned for value in values if (cleaned := str(value or "").strip())))
 def _markdown_section(text: str, title: str) -> str:
-    headings = list(re.finditer(
-        r"(?m)^\s*(?P<marks>#{1,6})\s+(?P<title>.+?)\s*#*\s*$", text))
+    headings = list(re.finditer(r"(?m)^\s*(?P<marks>#{1,6})\s+(?P<title>.+?)\s*#*\s*$", text))
     for index, heading in enumerate(headings):
         if heading.group("title").strip().casefold() != title.strip().casefold():
             continue
@@ -161,7 +162,7 @@ def _field_values(text: str, name: str) -> tuple[str, ...]:
             re.IGNORECASE | re.MULTILINE,
     ):
         raw = _clean_cell(match.group(1))
-        if (not raw or re.fullmatch(r"<[^>]+>", raw) or raw.casefold() in _UNRESOLVED_VALUES | {"not applicable", "n/a", "na"}):
+        if not raw or re.fullmatch(r"<[^>]+>", raw) or raw.casefold() in _UNAVAILABLE_VALUES:
             continue
         for item in re.split(r"[,;/]|\s+\band\b\s+", raw, flags=re.IGNORECASE):
             normalized = _normalized(item)

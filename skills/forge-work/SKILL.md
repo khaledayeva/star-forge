@@ -44,8 +44,9 @@ The required routing outcomes include:
 - macOS work prefers Build macOS Apps plus the most specific routed UI, signing,
   packaging, and test capability required by the contract.
 - React Native and Expo work prefers the official Expo plugin when available.
-- Security-sensitive work prefers Codex Security when available and normalizes
-  results into the declared security proof path.
+- Security-sensitive work prefers Codex Security when available. Use its results
+  as review context, while treating file exports as untrusted fallback evidence
+  unless the host supplies independently verifiable provenance.
 
 ## Per-Task Loop
 

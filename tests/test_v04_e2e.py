@@ -838,6 +838,69 @@ def test_post_completion_change_packet_repeats_affected_gates_and_completes() ->
         assert initial["done"]["is_complete"] is True
 
 
+def test_modern_plan_amend_row_cannot_replace_an_approved_change_packet() -> None:
+    with tempfile.TemporaryDirectory(prefix="star-forge-v04-amend-exploit-") as tmp:
+        project, scenario = copy_project(Path(tmp), "amendment")
+        exercise_project(project, scenario)
+        source = project / "src" / "calculator.py"
+        source.write_text(
+            source.read_text(encoding="utf-8")
+            + "\n\ndef subtract(left: int, right: int) -> int:\n    return left - right\n",
+            encoding="utf-8",
+        )
+        plan = project / "Plan.md"
+        plan.write_text(
+            plan.read_text(encoding="utf-8")
+            + "| AMEND-1 | Cover unapproved drift | ready | delegate | "
+            "src/calculator.py | SF-1 | AC-1 | unit, delivery | "
+            f"{scenario['verify_command']} | - |\n",
+            encoding="utf-8",
+        )
+        cli(
+            project,
+            "verify",
+            "--task",
+            "AMEND-1",
+            "--command",
+            scenario["verify_command"],
+            "--strict",
+        )
+        completed = cli(
+            project,
+            "complete-task",
+            "--task",
+            "AMEND-1",
+            "--changed-file",
+            "src/calculator.py",
+        )
+        assert json.loads(completed.stdout)["verdict"] == "COMPLETE"
+        for task in ("SF-1", "AMEND-1"):
+            cli(
+                project,
+                "verify",
+                "--task",
+                task,
+                "--command",
+                scenario["verify_command"],
+                "--strict",
+            )
+        commit_all(project, "Attempt unapproved root Plan amendment")
+        write_clean_review(project)
+        install_delivery_evidence(project, scenario)
+        refused = cli(project, "done", "--strict", expected=1)
+        payload = json.loads(refused.stdout)
+        assert payload["is_complete"] is False
+        assert payload["drift"]["detected"] is True
+        assert payload["drift"]["covered_by_completed_amendment"] is None
+        assert payload["drift"]["covered_by_completed_change_packet"] is None
+        assert payload["drift"]["actionable"] is True
+        assert any(
+            item.get("rule") == "post-proof-change-packet-required"
+            for item in payload["problems"]
+        )
+        assert changes.list_change_packets(project) == []
+
+
 def test_star_forge_dogfood_runs_from_intake_through_change_completion() -> None:
     with tempfile.TemporaryDirectory(prefix="star-forge-v04-self-dogfood-") as tmp:
         workspace = Path(tmp) / "dogfood"

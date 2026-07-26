@@ -9,9 +9,11 @@ from __future__ import annotations
 from .policy_data import mapping as _policy_mapping, value as _policy_value
 
 import ast
+import io
 import json
 import os
 import re
+import tokenize
 from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -28,6 +30,11 @@ LARGE_MODULE_WARNING_LINES = _POLICY["budgets"]["large_module_warning_lines"]
 MAX_CLI_MODULE_LINES = _POLICY["budgets"]["cli_module_lines"]
 MAX_PRODUCTION_PYTHON_LINES = _POLICY["budgets"]["production_python_lines"]
 MAX_LOCAL_IMPORTS = _POLICY["budgets"]["local_imports"]
+MAX_SOURCE_LINE_LENGTH = 600
+_LOCAL_FINDINGS = {
+    "packed_line": {"severity": "medium", "rule": "architecture-debt-packed-line", "evidence": "{count}-character source line exceeds the {limit}-character hard ceiling and can mask physical-line budget growth"},
+    "packed_statements": {"severity": "medium", "rule": "architecture-debt-packed-statements", "evidence": "multiple Python statements share one physical line; split them so the line budget reflects logical structure"},
+}
 SOURCE_SUFFIXES = _policy_value('quality.SOURCE_SUFFIXES')
 TEXT_SUFFIXES = SOURCE_SUFFIXES | frozenset(_POLICY["text_suffixes"])
 SOURCE_ROOT_NAMES = _policy_value('quality.SOURCE_ROOT_NAMES')
@@ -274,7 +281,7 @@ def _line_count(path: Path) -> tuple[int, str] | None:
     return len(text.splitlines()), text
 
 def _finding(kind: str, file: str, *, line: int = 1, **facts: Any) -> dict[str, Any]:
-    descriptor = _POLICY["findings"][kind]
+    descriptor = _LOCAL_FINDINGS.get(kind) or _POLICY["findings"][kind]
     values = {"severity": descriptor["severity"], "rule": descriptor["rule"],
               "file": file, "line": line, "evidence": descriptor["evidence"].format(**facts)}
     return {field: values[field] for field in _POLICY["finding_fields"]}
@@ -380,6 +387,14 @@ def _top_level_functions(text: str) -> set[str]:
         return set()
     return {node.name for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and CONTROL_PLANE_FUNCTION_RE.match(node.name)}
 
+def _packed_statement_lines(text: str) -> set[int]:
+    """Return Python lines containing a real semicolon token."""
+    try:
+        tokens = tokenize.generate_tokens(io.StringIO(text).readline)
+        return {token.start[0] for token in tokens if token.type == tokenize.OP and token.string == ";"}
+    except (IndentationError, tokenize.TokenError):
+        return set()
+
 def _module_findings(rel: str, path: Path, count: int, text: str) -> list[dict[str, Any]]:
     findings: list[dict[str, Any]] = []
     if count > MAX_RUNTIME_MODULE_LINES:
@@ -387,6 +402,11 @@ def _module_findings(rel: str, path: Path, count: int, text: str) -> list[dict[s
     elif count > LARGE_MODULE_WARNING_LINES:
         findings.append(_finding("large_file_warning", rel, count=count,
                                  limit=MAX_RUNTIME_MODULE_LINES))
+    for line_number, line in enumerate(text.splitlines(), start=1):
+        if len(line) > MAX_SOURCE_LINE_LENGTH:
+            findings.append(_finding("packed_line", rel, line=line_number, count=len(line), limit=MAX_SOURCE_LINE_LENGTH))
+    if path.suffix.lower() == ".py":
+        findings.extend(_finding("packed_statements", rel, line=line_number) for line_number in sorted(_packed_statement_lines(text)))
     if path.suffix.lower() in _POLICY["script_suffixes"]:
         ignores = len(re.findall(r"@ts-ignore", text))
         if ignores:

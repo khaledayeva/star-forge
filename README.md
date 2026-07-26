@@ -169,8 +169,9 @@ Platform routes use:
 - Build macOS Apps plus the most specific required build, UI, test, signing, and
   packaging capability for macOS.
 - Normal task verification plus separate delivery proof for React Native and Expo.
-- Codex Security when available, normalized through the existing security proof
-  path.
+- Codex Security when available for security review context. File exports are
+  normalized as fallback evidence, but they cannot satisfy strict security proof
+  without independently verifiable host provenance.
 
 Copy-ready examples are in [docs/proof-recipes.md](docs/proof-recipes.md).
 

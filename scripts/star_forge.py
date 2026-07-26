@@ -10,230 +10,151 @@ if str(SCRIPT_DIR) not in sys.path:
 
 import argparse
 import json
+from functools import partial
 from typing import Sequence
 from starforge import learnings as global_learnings
 from starforge import changes as project_changes
 from starforge import lifecycle as project_lifecycle
 from live_collectors import common as live_common
-from starforge.runtime_support import CANONICAL_STATE, HOOK_TRUST_NOTICE_FILE, LEDGER_FILE, MAX_AUTO_CONTINUES, PLAN_FILE, PROOF_FILE, SECRET_RE, SERVER_LEASE, SF_VERSION, SOURCE_PROFILE_FILE, SOURCE_PROFILE_SCHEMA, WAIVES_FILE, ForgeError, append_jsonl, ensure_git_repo, file_sha256, git_head, git_status, is_text_file, read_json, redact, relative_to_project, run_git, scan_paths, snapshot_file_candidates, source_dirty_entries, source_hash, write_json
-from starforge.runtime_project import enforcement_mode, ensure_project_manifest, ensure_source_profile, ensure_state_dirs, git_history_has_fast_mvp_before_gates, hooks_liveness, project_profile, read_source_profile, required_review_policy, required_review_roles, resolve_project, review_profile, review_roles_for_profile
-from starforge.runtime_plan import blueprint_has_valid_lock, blueprint_is_approved, command_is_noop, parse_tasks, parse_tasks_from_text, plan_parse_problem, ready_tasks, scope_hash, task_files, task_files_are_infrastructure, task_files_are_python_control_plane, task_is_visual, task_owns_visual_source, task_proof_kinds, task_requires_real_workers, validate_tasks
-from starforge.runtime_records import cmd_browser_run, cmd_server_lease, cmd_verify, fresh_passing_verify, has_noop_verify, load_run_records, passing_browser_runs
-from starforge.runtime_preview import cmd_preview_proof, cmd_proof_run
-from starforge.runtime_native import cmd_native_ios_proof, cmd_native_macos_proof
-from starforge.runtime_security import cmd_security_handoff_packet, cmd_security_proof, cmd_source_packet_github_pr_review, cmd_source_packet_proof
-from starforge.runtime_review import cmd_complete_task, cmd_done, cmd_review, cmd_waive, known_subagent_ids, load_review_findings, local_subagent_ids, merge_review, review_findings_for_done, reviews_scope_dir, secret_scan_findings
-from starforge.runtime_orchestration import agent_role_names, cmd_agents_install, cmd_approve_blueprint, cmd_approve_change, cmd_doctor, cmd_init, cmd_learn, cmd_migrate_plan, cmd_quality, cmd_run, cmd_status, cmd_validate_plan, learnings_digest, learnings_report, operating_card, render_agent_toml, reviewer_spawn_prompt, scaffold_amend, spawn_plan, version_core, version_key
-from starforge.runtime_hooks import cmd_hook, cmd_post_hook, cmd_pre_compact_hook, cmd_prompt_hook, cmd_self_test, cmd_session_start_hook, cmd_stop_hook, cmd_subagent_start_hook, cmd_subagent_stop_hook, should_block_stop
+from starforge import runtime_hooks as _hooks
+from starforge import runtime_native as _native
+from starforge import runtime_orchestration as _orchestration
+from starforge import runtime_plan as _plan
+from starforge import runtime_preview as _preview
+from starforge import runtime_project as _project
+from starforge import runtime_records as _records
+from starforge import runtime_review as _review
+from starforge import runtime_security as _security
+from starforge import runtime_support as _support
 
-__all__ = ("build_parser", "main", "cmd_run", "cmd_init", "cmd_review", "cmd_done", "cmd_approve_blueprint", "cmd_browser_run", "cmd_migrate_plan", "cmd_validate_plan", "CANONICAL_STATE", "HOOK_TRUST_NOTICE_FILE", "LEDGER_FILE", "MAX_AUTO_CONTINUES", "PROOF_FILE", "SECRET_RE", "SERVER_LEASE", "SF_VERSION", "SOURCE_PROFILE_FILE", "SOURCE_PROFILE_SCHEMA", "WAIVES_FILE", "append_jsonl", "blueprint_has_valid_lock", "blueprint_is_approved", "command_is_noop", "enforcement_mode", "ensure_git_repo", "ensure_project_manifest", "ensure_source_profile", "ensure_state_dirs", "file_sha256", "fresh_passing_verify", "git_head", "git_history_has_fast_mvp_before_gates", "git_status", "has_noop_verify", "hooks_liveness", "is_text_file", "known_subagent_ids", "learnings_digest", "learnings_report", "live_common", "load_review_findings", "load_run_records", "local_subagent_ids", "merge_review", "operating_card", "parse_tasks", "parse_tasks_from_text", "passing_browser_runs", "plan_parse_problem", "project_changes", "project_lifecycle", "project_profile", "read_json", "read_source_profile", "ready_tasks", "redact", "relative_to_project", "required_review_policy", "required_review_roles", "resolve_project", "review_findings_for_done", "review_profile", "review_roles_for_profile", "reviewer_spawn_prompt", "reviews_scope_dir", "run_git", "scaffold_amend", "scan_paths", "scope_hash", "secret_scan_findings", "should_block_stop", "snapshot_file_candidates", "source_dirty_entries", "source_hash", "spawn_plan", "task_files", "task_files_are_infrastructure", "task_files_are_python_control_plane", "task_is_visual", "task_owns_visual_source", "task_proof_kinds", "task_requires_real_workers", "validate_tasks", "version_core", "version_key", "write_json")
+def _export_names(value: str) -> frozenset[str]:
+    return frozenset(value.split())
+
+_COMPATIBILITY_EXPORT_GROUPS = {
+    _support: _export_names("CANONICAL_STATE HOOK_TRUST_NOTICE_FILE LEDGER_FILE MAX_AUTO_CONTINUES PLAN_FILE PROOF_FILE SECRET_RE SERVER_LEASE SF_VERSION SOURCE_PROFILE_FILE SOURCE_PROFILE_SCHEMA WAIVES_FILE ForgeError append_jsonl ensure_git_repo file_sha256 git_head git_status is_text_file read_json redact relative_to_project run_git scan_paths snapshot_file_candidates source_dirty_entries source_hash write_json"),
+    _project: _export_names("enforcement_mode ensure_project_manifest ensure_source_profile ensure_state_dirs git_history_has_fast_mvp_before_gates hooks_liveness project_profile read_source_profile required_review_policy required_review_roles resolve_project review_profile review_roles_for_profile"),
+    _plan: _export_names("blueprint_has_valid_lock blueprint_is_approved command_is_noop parse_tasks parse_tasks_from_text plan_parse_problem ready_tasks scope_hash task_files task_files_are_infrastructure task_files_are_python_control_plane task_is_visual task_owns_visual_source task_proof_kinds task_requires_real_workers validate_tasks"),
+    _records: _export_names("cmd_browser_run cmd_server_lease cmd_verify fresh_passing_verify has_noop_verify load_run_records passing_browser_runs"),
+    _review: _export_names("cmd_complete_task cmd_done cmd_review cmd_waive known_subagent_ids load_review_findings local_subagent_ids merge_review review_findings_for_done reviews_scope_dir secret_scan_findings"),
+    _orchestration: _export_names("agent_role_names cmd_agents_install cmd_approve_blueprint cmd_approve_change cmd_doctor cmd_init cmd_learn cmd_migrate_plan cmd_quality cmd_run cmd_status cmd_validate_plan learnings_digest learnings_report operating_card render_agent_toml reviewer_spawn_prompt scaffold_amend spawn_plan version_core version_key"),
+    _preview: _export_names("cmd_preview_proof cmd_proof_run"), _native: _export_names("cmd_native_ios_proof cmd_native_macos_proof"), _security: _export_names("cmd_security_handoff_packet cmd_security_proof cmd_source_packet_github_pr_review cmd_source_packet_proof"),
+    _hooks: _export_names("cmd_hook cmd_post_hook cmd_pre_compact_hook cmd_prompt_hook cmd_self_test cmd_session_start_hook cmd_stop_hook cmd_subagent_start_hook cmd_subagent_stop_hook should_block_stop"),
+}
+_COMPATIBILITY_EXPORTS = {name: provider for provider, names in _COMPATIBILITY_EXPORT_GROUPS.items() for name in names}
+_LEGACY_DIRECT_ONLY = frozenset("PLAN_FILE ForgeError agent_role_names cmd_agents_install cmd_approve_change cmd_complete_task cmd_doctor cmd_hook cmd_learn cmd_native_ios_proof cmd_native_macos_proof cmd_post_hook cmd_pre_compact_hook cmd_preview_proof cmd_proof_run cmd_prompt_hook cmd_quality cmd_self_test cmd_security_handoff_packet cmd_security_proof cmd_server_lease cmd_session_start_hook cmd_source_packet_github_pr_review cmd_source_packet_proof cmd_status cmd_stop_hook cmd_subagent_start_hook cmd_subagent_stop_hook cmd_verify cmd_waive render_agent_toml".split())
+agent_role_names = _orchestration.agent_role_names
+render_agent_toml = _orchestration.render_agent_toml
+def __getattr__(name: str) -> object:
+    """Resolve an explicitly declared compatibility export."""
+    provider = _COMPATIBILITY_EXPORTS.get(name)
+    if provider is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    return getattr(provider, name)
+__all__ = ("build_parser", "live_common", "main", "project_changes", "project_lifecycle", *sorted(set(_COMPATIBILITY_EXPORTS) - _LEGACY_DIRECT_ONLY))
+def _option(*flags: str, **settings: object) -> tuple[tuple[str, ...], dict[str, object]]:
+    return flags, settings
+
+_empty = partial(_option, default="")
+_flag = partial(_option, action="store_true")
+_required = partial(_option, required=True)
+
+_OPTIONS: dict[str, tuple[tuple[str, ...], dict[str, object]]] = {}
+
+def _register(names: str, builder: object) -> None:
+    for name in names.split():
+        flag = "--" + name.replace("_", "-")
+        _OPTIONS[name] = builder(flag)
+
+_register("objective product_slug codex_home active_plugin_root command summary url live_manifest deployment_metadata smoke_checks artifact scheme simulator build_result launch_result test_result ui_snapshot app_name bundle_id run_result app_bundle signing_note packaging_note kind input scanner scanner_version findings base_url detail", _empty)
+_register("fast_mvp no_auto_init no_agents force include_files noop require_server_lease degraded write_summary", _flag)
+_register("change scenario finding reason title rule", _required)
+for _name in "interaction_evidence console_evidence changed_file trigger".split():
+    _OPTIONS[_name] = _option("--" + _name.replace("_", "-"), action="append")
+_OPTIONS.update({
+    "mode": _option("--mode", default="cruise", choices=["cruise", "sync"]),
+    "project_profile": _option("--profile", default="", choices=["", "standard", "fast-mvp"]),
+    "adopt_root": _flag("--adopt-root", help="Deliberately build in an existing foreign project root (recorded in the manifest)"),
+    "run_no_hooks": _flag("--no-hooks", help="Suppress optional hook trust prompts for this run"),
+    "init_no_hooks": _flag("--no-hooks", help="Compatibility flag; init does not install project-local hooks"),
+    "global_learnings": _flag("--global-learnings", help="Opt in to reading validated global learnings for this run"),
+    "plan_file": _option("--file", default=_support.PLAN_FILE),
+    "output": _required("--output", help="New draft path; the legacy Plan is never overwritten"),
+    "source_root": _empty("--source-root", "--plugin-root", dest="source_root"),
+    "timeout": _option("--timeout", type=int, default=120),
+    "viewport": _option("--viewport", action="append", help="NAME=WIDTHxHEIGHT:SCREENSHOT or NAME=SCREENSHOT"),
+    "append_screenshot": _option("--screenshot", action="append"),
+    "screenshot": _empty("--screenshot"),
+    "require_viewports": _flag("--require-viewports", default=True),
+    "no_require_viewports": _option("--no-require-viewports", action="store_false", dest="require_viewports"),
+    "require_interaction": _flag("--require-interaction", default=True),
+    "no_require_interaction": _option("--no-require-interaction", action="store_false", dest="require_interaction"),
+    "require_console": _flag("--require-console", default=True),
+    "no_require_console": _option("--no-require-console", action="store_false", dest="require_console"),
+    "server_lease": _option("--server-lease", nargs="?", const=str(_support.SERVER_LEASE), default=""),
+    "expect_status": _option("--expect-status", type=int, default=200),
+    "proof_profile": _required("--profile"),
+    "action": _option("--action", choices=["claim", "release", "status"], default="claim"),
+    "port": _option("--port", type=int),
+    "owner": _option("--owner", default="star-forge"),
+    "pid": _option("--pid", type=int),
+    "category": _option("--category", default="general", choices=sorted(global_learnings.ALLOWED_CATEGORIES)),
+    "source": _option("--source", default="manual", choices=sorted(global_learnings.ALLOWED_ORIGINS)),
+    "confidence": _option("--confidence", default="medium", choices=sorted(global_learnings.ALLOWED_CONFIDENCE)),
+})
+
+def _command(help_text: str, func: object, options: str = "", **settings: object) -> dict[str, object]:
+    return {"help": help_text, "func": func, "options": tuple(options.split()), **settings}
+
+_COMMANDS = {
+    "run": _command("Run the Star Forge Forge-Loop state machine", _orchestration.cmd_run, "objective mode fast_mvp project_profile product_slug adopt_root no_auto_init run_no_hooks no_agents global_learnings", strict=True),
+    "init": _command("Initialize Star Forge artifacts", _orchestration.cmd_init, "force no_agents init_no_hooks product_slug adopt_root fast_mvp project_profile"),
+    "approve-blueprint": _command("Write a content lock after explicit user approval of Blueprint.md", _orchestration.cmd_approve_blueprint),
+    "approve-change": _command("Approve and activate a derived post-completion change packet", _orchestration.cmd_approve_change, "change"),
+    "validate-plan": _command("Validate Plan.md", _orchestration.cmd_validate_plan, "plan_file", strict=True),
+    "migrate-plan": _command("Create a separate reviewable Plan v2 draft from a legacy Plan", _orchestration.cmd_migrate_plan, "plan_file output"),
+    "status": _command("Read-only Star Forge state (no mutation)", _orchestration.cmd_status),
+    "doctor": _command("Read-only Codex installation diagnostics", _orchestration.cmd_doctor, "codex_home source_root active_plugin_root", project=False, strict=True),
+    "quality": _command("Classify source and report deterministic architecture debt", _orchestration.cmd_quality, "include_files", strict=True),
+    "verify": _command("Run and record a Star Forge-owned verification command", _records.cmd_verify, "command summary timeout noop", task=True, strict=True),
+    "browser-run": _command("Record a deterministic browser scenario with viewport/interaction/console evidence", _records.cmd_browser_run, "url scenario viewport append_screenshot interaction_evidence console_evidence live_manifest summary require_viewports no_require_viewports require_interaction no_require_interaction require_console no_require_console server_lease require_server_lease degraded", task=True, strict=True),
+    "preview-proof": _command("Validate and record provider-neutral preview proof evidence", _preview.cmd_preview_proof, "url expect_status deployment_metadata smoke_checks", task=True, strict=True),
+    "proof-run": _command("Validate and record a generic live proof profile artifact", _preview.cmd_proof_run, "proof_profile artifact", task=True, strict=True),
+    "native-ios-proof": _command("Validate and record native iOS proof evidence", _native.cmd_native_ios_proof, "scheme simulator build_result launch_result test_result screenshot ui_snapshot", task=True, strict=True),
+    "native-macos-proof": _command("Validate and record native macOS proof evidence", _native.cmd_native_macos_proof, "app_name bundle_id build_result run_result test_result screenshot app_bundle signing_note packaging_note", task=True, strict=True),
+    "security-handoff-packet": _command("Validate and record a security scanner handoff packet", _security.cmd_security_handoff_packet, "kind input", strict=True),
+    "security-proof": _command("Validate and record security proof evidence", _security.cmd_security_proof, "proof_profile scanner scanner_version findings artifact", task=True, strict=True),
+    "source-packet-proof": _command("Validate and record source packet proof evidence", _security.cmd_source_packet_proof, "proof_profile input", task=True, strict=True),
+    "source-packet-github-pr-review": _command("Validate and record read-only GitHub PR source packet evidence", _security.cmd_source_packet_github_pr_review, "input", strict=True),
+    "server-lease": _command("Claim, release, or inspect the local dev-server lease", _records.cmd_server_lease, "action port base_url command owner pid"),
+    "review": _command("Merge reviewer findings + tree scan into the fix queue", _review.cmd_review, strict=True),
+    "waive": _command("Waive a review finding with a recorded reason", _review.cmd_waive, "finding reason"),
+    "complete-task": _command("Mark one Plan.md task complete after proof checks pass", _review.cmd_complete_task, "changed_file summary", task=True),
+    "done": _command("Compute the completion predicate from git facts and record proof", _review.cmd_done, "write_summary", strict=True),
+    "learn": _command("Write a validated global learning after explicit opt-in", _orchestration.cmd_learn, "title rule trigger category detail source confidence global_learnings"),
+    "agents-install": _command("Install Star Forge roles as native Codex agents (.codex/agents/*.toml)", _orchestration.cmd_agents_install),
+    "self-test": _command("Validate the Star Forge plugin package", _hooks.cmd_self_test, project=False, strict=True),
+}
+_HOOK_NAMES = "hook post-hook prompt-hook session-start-hook subagent-start-hook subagent-stop-hook stop-hook pre-compact-hook".split()
+_HOOK_HANDLERS = {name: getattr(_hooks, "cmd_" + name.replace("-", "_")) for name in _HOOK_NAMES}
+_COMMANDS.update({name: _command(f"Codex {name} handler", func, project=False) for name, func in _HOOK_HANDLERS.items()})
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Star Forge deterministic helper")
     sub = parser.add_subparsers(dest="command", required=True)
-    def command(name: str, help: str, func: object, *, project: bool = True,
-                task: bool = False, strict: bool = False) -> argparse.ArgumentParser:
-        child = sub.add_parser(name, help=help)
-        if project:
+    for name, spec in _COMMANDS.items():
+        child = sub.add_parser(name, help=str(spec["help"]))
+        if spec.get("project", True):
             child.add_argument("--project", default=".")
-        if task:
+        if spec.get("task"):
             child.add_argument("--task", required=True)
-        if strict:
+        if spec.get("strict"):
             child.add_argument("--strict", action="store_true")
-        child.set_defaults(func=func)
-        return child
-    p = command("run", "Run the Star Forge Forge-Loop state machine", cmd_run, strict=True)
-    p.add_argument("--objective", default="")
-    p.add_argument("--mode", default="cruise", choices=["cruise", "sync"])
-    p.add_argument("--fast-mvp", action="store_true")
-    p.add_argument("--profile", default="", choices=["", "standard", "fast-mvp"])
-    p.add_argument("--product-slug", default="")
-    p.add_argument("--adopt-root", action="store_true", help="Deliberately build in an existing foreign project root (recorded in the manifest)")
-    p.add_argument("--no-auto-init", action="store_true")
-    p.add_argument("--no-hooks", action="store_true", help="Suppress optional hook trust prompts for this run")
-    p.add_argument("--no-agents", action="store_true", help="Do not generate project-local agent profiles during auto-init")
-    p.add_argument(
-        "--global-learnings",
-        action="store_true",
-        help="Opt in to reading validated global learnings for this run",
-    )
-    p = command("init", "Initialize Star Forge artifacts", cmd_init)
-    p.add_argument("--force", action="store_true")
-    p.add_argument("--no-agents", action="store_true")
-    p.add_argument("--no-hooks", action="store_true", help="Compatibility flag; init does not install project-local hooks")
-    p.add_argument("--product-slug", default="")
-    p.add_argument("--adopt-root", action="store_true")
-    p.add_argument("--fast-mvp", action="store_true")
-    p.add_argument("--profile", default="", choices=["", "standard", "fast-mvp"])
-    p = command(
-        "approve-blueprint",
-        help="Write a content lock after explicit user approval of Blueprint.md",
-        func=cmd_approve_blueprint,
-    )
-    p = command(
-        "approve-change",
-        help="Approve and activate a derived post-completion change packet",
-        func=cmd_approve_change,
-    )
-    p.add_argument("--change", required=True)
-    p = command("validate-plan", "Validate Plan.md", cmd_validate_plan, strict=True)
-    p.add_argument("--file", default=PLAN_FILE)
-    p = command(
-        "migrate-plan",
-        help="Create a separate reviewable Plan v2 draft from a legacy Plan",
-        func=cmd_migrate_plan,
-    )
-    p.add_argument("--file", default=PLAN_FILE)
-    p.add_argument(
-        "--output",
-        required=True,
-        help="New draft path; the legacy Plan is never overwritten",
-    )
-    command("status", "Read-only Star Forge state (no mutation)", cmd_status)
-    p = command("doctor", "Read-only Codex installation diagnostics", cmd_doctor, project=False, strict=True)
-    p.add_argument("--codex-home", default="")
-    p.add_argument("--source-root", "--plugin-root", dest="source_root", default="")
-    p.add_argument("--active-plugin-root", default="")
-    p = command(
-        "quality",
-        help="Classify source and report deterministic architecture debt",
-        func=cmd_quality,
-        strict=True,
-    )
-    p.add_argument("--include-files", action="store_true")
-    p = command("verify", "Run and record a Star Forge-owned verification command", cmd_verify, task=True, strict=True)
-    p.add_argument("--command", default="")
-    p.add_argument("--summary", default="")
-    p.add_argument("--timeout", type=int, default=120)
-    p.add_argument("--noop", action="store_true")
-    p = command("browser-run", "Record a deterministic browser scenario with viewport/interaction/console evidence", cmd_browser_run, task=True, strict=True)
-    p.add_argument("--url", default="")
-    p.add_argument("--scenario", required=True)
-    p.add_argument("--viewport", action="append", help="NAME=WIDTHxHEIGHT:SCREENSHOT or NAME=SCREENSHOT")
-    p.add_argument("--screenshot", action="append")
-    p.add_argument("--interaction-evidence", action="append")
-    p.add_argument("--console-evidence", action="append")
-    p.add_argument("--live-manifest", default="")
-    p.add_argument("--summary", default="")
-    p.add_argument("--require-viewports", action="store_true", default=True)
-    p.add_argument("--no-require-viewports", action="store_false", dest="require_viewports")
-    p.add_argument("--require-interaction", action="store_true", default=True)
-    p.add_argument("--no-require-interaction", action="store_false", dest="require_interaction")
-    p.add_argument("--require-console", action="store_true", default=True)
-    p.add_argument("--no-require-console", action="store_false", dest="require_console")
-    p.add_argument("--server-lease", nargs="?", const=str(SERVER_LEASE), default="")
-    p.add_argument("--require-server-lease", action="store_true")
-    p.add_argument("--degraded", action="store_true")
-    p = command("preview-proof", "Validate and record provider-neutral preview proof evidence", cmd_preview_proof, task=True, strict=True)
-    p.add_argument("--url", default="")
-    p.add_argument("--expect-status", type=int, default=200)
-    p.add_argument("--deployment-metadata", default="")
-    p.add_argument("--smoke-checks", default="")
-    p = command("proof-run", "Validate and record a generic live proof profile artifact", cmd_proof_run, task=True, strict=True)
-    p.add_argument("--profile", required=True)
-    p.add_argument("--artifact", default="")
-    p = command("native-ios-proof", "Validate and record native iOS proof evidence", cmd_native_ios_proof, task=True, strict=True)
-    p.add_argument("--scheme", default="")
-    p.add_argument("--simulator", default="")
-    p.add_argument("--build-result", default="")
-    p.add_argument("--launch-result", default="")
-    p.add_argument("--test-result", default="")
-    p.add_argument("--screenshot", default="")
-    p.add_argument("--ui-snapshot", default="")
-    p = command("native-macos-proof", "Validate and record native macOS proof evidence", cmd_native_macos_proof, task=True, strict=True)
-    p.add_argument("--app-name", default="")
-    p.add_argument("--bundle-id", default="")
-    p.add_argument("--build-result", default="")
-    p.add_argument("--run-result", default="")
-    p.add_argument("--test-result", default="")
-    p.add_argument("--screenshot", default="")
-    p.add_argument("--app-bundle", default="")
-    p.add_argument("--signing-note", default="")
-    p.add_argument("--packaging-note", default="")
-    p = command("security-handoff-packet", "Validate and record a security scanner handoff packet", cmd_security_handoff_packet, strict=True)
-    p.add_argument("--kind", default="")
-    p.add_argument("--input", default="")
-    p = command("security-proof", "Validate and record security proof evidence", cmd_security_proof, task=True, strict=True)
-    p.add_argument("--profile", required=True)
-    p.add_argument("--scanner", default="")
-    p.add_argument("--scanner-version", default="")
-    p.add_argument("--findings", default="")
-    p.add_argument("--artifact", default="")
-    p = command("source-packet-proof", "Validate and record source packet proof evidence", cmd_source_packet_proof, task=True, strict=True)
-    p.add_argument("--profile", required=True)
-    p.add_argument("--input", default="")
-    p = command("source-packet-github-pr-review", "Validate and record read-only GitHub PR source packet evidence", cmd_source_packet_github_pr_review, strict=True)
-    p.add_argument("--input", default="")
-    p = command("server-lease", "Claim, release, or inspect the local dev-server lease", cmd_server_lease)
-    p.add_argument("--action", choices=["claim", "release", "status"], default="claim")
-    p.add_argument("--port", type=int)
-    p.add_argument("--base-url", default="")
-    p.add_argument("--command", default="")
-    p.add_argument("--owner", default="star-forge")
-    p.add_argument("--pid", type=int)
-    command("review", "Merge reviewer findings + tree scan into the fix queue", cmd_review, strict=True)
-    p = command("waive", "Waive a review finding with a recorded reason", cmd_waive)
-    p.add_argument("--finding", required=True)
-    p.add_argument("--reason", required=True)
-    p = command("complete-task", "Mark one Plan.md task complete after proof checks pass", cmd_complete_task, task=True)
-    p.add_argument("--changed-file", action="append")
-    p.add_argument("--summary", default="")
-    p = command("done", "Compute the completion predicate from git facts and record proof", cmd_done, strict=True)
-    p.add_argument("--write-summary", action="store_true")
-    p = command(
-        "learn",
-        help="Write a validated global learning after explicit opt-in",
-        func=cmd_learn,
-    )
-    p.add_argument("--title", required=True)
-    p.add_argument("--rule", required=True)
-    p.add_argument("--trigger", action="append")
-    p.add_argument(
-        "--category",
-        default="general",
-        choices=sorted(global_learnings.ALLOWED_CATEGORIES),
-    )
-    p.add_argument("--detail", default="")
-    p.add_argument(
-        "--source",
-        default="manual",
-        choices=sorted(global_learnings.ALLOWED_ORIGINS),
-    )
-    p.add_argument(
-        "--confidence",
-        default="medium",
-        choices=sorted(global_learnings.ALLOWED_CONFIDENCE),
-    )
-    p.add_argument(
-        "--global-learnings",
-        action="store_true",
-        help="Opt in to writing this validated global learning",
-    )
-    command("agents-install", "Install Star Forge roles as native Codex agents (.codex/agents/*.toml)", cmd_agents_install)
-    command("self-test", "Validate the Star Forge plugin package", cmd_self_test, project=False, strict=True)
-    for name, func in [
-        ("hook", cmd_hook),
-        ("post-hook", cmd_post_hook),
-        ("prompt-hook", cmd_prompt_hook),
-        ("session-start-hook", cmd_session_start_hook),
-        ("subagent-start-hook", cmd_subagent_start_hook),
-        ("subagent-stop-hook", cmd_subagent_stop_hook),
-        ("stop-hook", cmd_stop_hook),
-        ("pre-compact-hook", cmd_pre_compact_hook),
-    ]:
-        p = sub.add_parser(name, help=f"Codex {name} handler")
-        p.set_defaults(func=func)
+        for option_name in spec["options"]:
+            flags, settings = _OPTIONS[option_name]
+            child.add_argument(*flags, **settings)
+        child.set_defaults(func=spec["func"])
     return parser
-HOOK_COMMANDS = {
-    "hook",
-    "post-hook",
-    "prompt-hook",
-    "session-start-hook",
-    "subagent-start-hook",
-    "subagent-stop-hook",
-    "stop-hook",
-    "pre-compact-hook",
-}
+HOOK_COMMANDS = frozenset(_HOOK_HANDLERS)
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
@@ -241,7 +162,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     is_hook = str(getattr(args, "command", "")) in HOOK_COMMANDS
     try:
         return int(args.func(args))
-    except ForgeError as exc:
+    except _support.ForgeError as exc:
         if is_hook:
             # An observation-only hook must never block a tool call on its own bug.
             return 0

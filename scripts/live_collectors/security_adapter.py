@@ -309,18 +309,6 @@ maybe_record = lambda commands, cwd: {name: live_common.run_trusted_command(
 security_provider = lambda schema_family: str(EVIDENCE_ROUTES["codex-security" if schema_family == "codex-security" else "fallback"]["provider"])
 
 
-def provider_receipt_valid(receipt: Any, input_sha256: str) -> bool:
-    return bool(
-        isinstance(receipt, Mapping)
-        and receipt.get("source") == "codex-security-direct"
-        and receipt.get("input_sha256") == input_sha256
-        and receipt.get("scanner") == "codex-security"
-        and receipt.get("scanner_version")
-        and receipt.get("ruleset") and receipt.get("scan_scope")
-        and isinstance(receipt.get("source_binding"), Mapping)
-    )
-
-
 def write_evidence_envelope(
     project: Path,
     manifest_path: Path,
@@ -356,10 +344,8 @@ def write_evidence_envelope(
         envelope_path, envelope, project_root=project, verify_artifacts=True)
 
 
-def adapt(
-    args: argparse.Namespace, *, provider_receipt: Mapping[str, Any] | None = None,
-) -> tuple[int, dict[str, Any]]:
-    project = Path(args.project).resolve()
+def adapt(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
+    project = live_common.assert_collector_project_safe(Path(args.project))
     root = live_common.live_collector_dir(project, args.task, "security")
     problems: list[dict[str, Any]] = []
     command_argv = ["security_adapter.py", *getattr(args, "_command_argv", sys.argv[1:])]
@@ -381,19 +367,12 @@ def adapt(
         )
     source_schema, schema_family, trusted_schema = detect_schema(payload)
     actual_input_hash = file_sha256(input_path) if input_path.exists() else ""
-    trusted_provenance = provider_receipt_valid(provider_receipt, actual_input_hash)
-    if trusted_provenance:
-        assert provider_receipt is not None
-        scanner, version = "codex-security", str(provider_receipt["scanner_version"])
-        ruleset, scope = provider_receipt["ruleset"], provider_receipt["scan_scope"]
-        binding = dict(provider_receipt["source_binding"])
-    else:
-        scanner, version = scanner_name(payload, args, schema_family), scanner_version(payload, args)
-        ruleset, scope = ruleset_metadata(payload, args), scan_scope(payload, args)
-        binding = source_binding(payload, args)
+    trusted_provenance = False
+    scanner, version = scanner_name(payload, args, schema_family), scanner_version(payload, args)
+    ruleset, scope = ruleset_metadata(payload, args), scan_scope(payload, args)
+    binding = source_binding(payload, args)
     source_binding_ok = validate_source_binding(project, binding, problems)
-    declared_hash = (str(provider_receipt["input_sha256"])
-                     if trusted_provenance and provider_receipt else declared_input_hash(payload, args))
+    declared_hash = declared_input_hash(payload, args)
     input_hash_ok = bool(declared_hash and actual_input_hash and declared_hash.lower() == actual_input_hash.lower())
     dependency_manifests = dependency_manifest_records(project, payload, args, problems)
     validate_required_metadata(
@@ -401,11 +380,10 @@ def adapt(
         ruleset=ruleset, scope=scope, input_hash_ok=input_hash_ok,
         source_binding_ok=source_binding_ok, problems=problems,
     )
-    if not trusted_provenance:
-        problems.append(live_common.problem(
-            "Imported security JSON has no independently verified direct-provider receipt",
-            rule="security-provider-provenance", severity="medium", blocking=False,
-        ))
+    problems.append(live_common.problem(
+        "Imported security JSON has no independently verifiable host-controlled provenance",
+        rule="security-provider-provenance", severity="medium", blocking=False,
+    ))
     redaction_totals: dict[str, Any] = dict(REDACTION_COUNTS)
     normalized = [
         normalized_finding(
@@ -425,8 +403,9 @@ def adapt(
     values: dict[str, Any] = {
         **vars(args), **locals(), "version": version, "findings": normalized,
         "input_path": live_common.project_relative(project, input_path) if input_path.exists() else "",
-        "report_provenance": (dict(provider_receipt) if trusted_provenance and provider_receipt
-                              else payload.get("provenance") if isinstance(payload, Mapping) else {}),
+        "report_provenance": (
+            payload.get("provenance") if isinstance(payload, Mapping) else {}
+        ),
     }
     def clean(value: Any) -> Any:
         nonlocal redaction_totals
@@ -471,6 +450,8 @@ def adapt(
     })
     summary = render_descriptor(PAYLOAD_TEMPLATES["summary"], values)
     summary.update(findings_summary)
+    summary["preferred_provider_available"] = False
+    summary["provenance_trust_boundary"] = "unavailable-for-file-imports"
     safe_command_argv = clean(command_argv)
     manifest_path = live_common.write_live_manifest(
         project, task=args.task, collector="security", command_argv=safe_command_argv,
@@ -523,13 +504,15 @@ def adapt(
     })
     result = render_descriptor(PAYLOAD_TEMPLATES["result"], values)
     result["trusted_provenance"] = trusted_provenance
+    result["preferred_provider_available"] = False
+    result["provenance_trust_boundary"] = "unavailable-for-file-imports"
     if record_results:
         result["record_results"] = record_results
     return (1 if record_failed or (args.strict and problems) else 0), result
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Normalize trusted security scanner reports for Star Forge")
+    parser = argparse.ArgumentParser(description="Normalize imported security scanner reports for Star Forge")
     for option in PARSER_OPTIONS:
         kwargs = {key: value for key, value in option.items() if key != "name"}
         kwargs.update(choices=sorted(VALID_PROFILES)) if kwargs.get("choices") == "profiles" else None

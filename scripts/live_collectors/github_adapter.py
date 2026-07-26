@@ -29,17 +29,7 @@ _update_manifest_redaction = update_manifest_redaction_report
 def _as_dict(value: Any) -> dict[str, Any]:
     return dict(value) if isinstance(value, Mapping) else {}
 
-def connector_receipt_valid(receipt: Any, path: Path) -> bool:
-    return bool(
-        isinstance(receipt, Mapping)
-        and receipt.get("source") == "github-connector-direct"
-        and receipt.get("input_sha256") == live_common.file_sha256(path)
-        and receipt.get("operation_id") and receipt.get("collected_at")
-    )
-
-def _load_connector(
-    path: Path, *, live: bool, provider_receipt: Mapping[str, Any] | None = None,
-) -> RawEvidence:
+def _load_connector(path: Path, *, live: bool) -> RawEvidence:
     payload = _as_dict(read_json(path, {}))
     pr_payload = payload.get("pr") or payload.get("pull_request") or {}
     final_pr = payload.get("final_pr") or payload.get("freshness") or ({} if live else pr_payload)
@@ -48,10 +38,8 @@ def _load_connector(
         or payload.get("provenance") or {}
     )
     foundation = payload.get("foundation") or payload.get("foundation_provenance") or {}
-    trusted = live and connector_receipt_valid(provider_receipt, path)
     return RawEvidence(
-        source=("github-connector-live" if trusted else
-                "github-import-live" if live else "connector-fixture"),
+        source="github-import-live" if live else "connector-fixture",
         pr=_as_dict(pr_payload),
         final_pr=_as_dict(final_pr),
         diff=str(payload.get("diff") or ""),
@@ -71,10 +59,8 @@ def _load_connector(
 def load_connector_fixture(path: Path) -> RawEvidence:
     return _load_connector(path, live=False)
 
-def load_connector_input(
-    path: Path, provider_receipt: Mapping[str, Any] | None = None,
-) -> RawEvidence:
-    return _load_connector(path, live=True, provider_receipt=provider_receipt)
+def load_connector_input(path: Path) -> RawEvidence:
+    return _load_connector(path, live=True)
 
 def update_manifest_redaction_report(path: Path, report: Mapping[str, int]) -> None:
     _update_manifest_redaction(path, report)
@@ -109,7 +95,7 @@ def load_gh_fixture_dir(path: Path) -> RawEvidence:
 
 def load_gh_readonly_dir(path: Path) -> RawEvidence:
     raw = load_gh_fixture_dir(path)
-    raw.source = "gh-readonly-live"
+    raw.source = "gh-readonly-import-live"
     if not (path / "final-pr-view.json").exists():
         raw.final_pr = {}
     raw.live_provenance = _as_dict(read_json(path / "provenance.json", {}))
@@ -375,11 +361,10 @@ def validate_live_import(
         blocking_problem(message, rule=rule)
         for failed, message in zip(conditions[:2], messages[:2]) if failed
     ]
-    if raw.source == "github-import-live":
-        problems.append(blocking_problem(
-            "Imported connector JSON has no independently verified direct-connector receipt",
-            rule="github-provider-receipt",
-        ))
+    problems.append(blocking_problem(
+        "This GitHub collector has no independently verifiable host-controlled provenance route",
+        rule="github-provider-receipt",
+    ))
     problems += validate_live_github_host(raw)
     problems += [
         blocking_problem(message, rule=rule)

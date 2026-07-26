@@ -23,7 +23,7 @@ DELIVERY_FIXTURES = ROOT / "fixtures" / "delivery"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
-from starforge import contracts, lifecycle
+from starforge import contracts, lifecycle, runtime_plan
 
 
 def fixture(name: str) -> dict[str, Any]:
@@ -139,6 +139,81 @@ def test_foundation_evidence_is_bound_to_current_source_and_exact_contract() -> 
     )
     assert not contract_drift.ready_for_feature_work
     assert "foundation evidence is not bound to the current contract" in contract_drift.blockers
+
+
+def test_runtime_foundation_gate_requires_current_source_or_exact_prior_transition() -> None:
+    contract, evidence = fixture_pair("private-new")
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        contract_path = project / ".starforge" / "foundation" / "contract.json"
+        evidence_path = project / ".starforge" / "foundation" / "evidence.json"
+        contract_path.parent.mkdir(parents=True)
+        contract_path.write_text(json.dumps(contract), encoding="utf-8")
+        evidence_path.write_text(json.dumps(evidence), encoding="utf-8")
+        current = runtime_plan.lifecycle_gate_state(
+            project,
+            kind="foundation",
+            required=True,
+            current_source_hash=evidence["source_hash"],
+        )
+        assert current["status"] == "PASS"
+        assert current["satisfied"] is True
+        stale = runtime_plan.lifecycle_gate_state(
+            project,
+            kind="foundation",
+            required=True,
+            current_source_hash="0" * 64,
+        )
+        assert stale["status"] == "BLOCKED"
+        assert stale["satisfied"] is False
+        state_path = project / ".starforge" / "state.json"
+        for damaged_text in ("{damaged", "[]"):
+            state_path.write_text(damaged_text, encoding="utf-8")
+            damaged = runtime_plan.lifecycle_gate_state(
+                project,
+                kind="foundation",
+                required=True,
+                current_source_hash="0" * 64,
+            )
+            assert damaged["status"] == "BLOCKED"
+        valid_state = {
+            "schema": "star-forge.state.v3",
+            "project": str(project),
+            "phase": "build",
+            "foundation": current,
+        }
+        state_path.write_text(json.dumps(valid_state), encoding="utf-8")
+        transitioned = runtime_plan.lifecycle_gate_state(
+            project,
+            kind="foundation",
+            required=True,
+            current_source_hash="0" * 64,
+        )
+        assert transitioned["status"] == "PASS"
+        assert transitioned["satisfied"] is True
+        invalid_states = []
+        for path, value in (
+            (("project",), str(project.parent / "other")),
+            (("phase",), "foundation"),
+            (("foundation", "source_hash"), "f" * 64),
+            (("foundation", "contract_sha256"), "f" * 64),
+            (("foundation", "status"), "BLOCKED"),
+        ):
+            invalid = copy.deepcopy(valid_state)
+            target = invalid
+            for key in path[:-1]:
+                target = target[key]
+            target[path[-1]] = value
+            invalid_states.append(invalid)
+        for invalid in invalid_states:
+            state_path.write_text(json.dumps(invalid), encoding="utf-8")
+            refused = runtime_plan.lifecycle_gate_state(
+                project,
+                kind="foundation",
+                required=True,
+                current_source_hash="0" * 64,
+            )
+            assert refused["status"] == "BLOCKED"
 
 
 def test_initial_commit_ci_environment_and_security_artifacts_are_hash_bound() -> None:

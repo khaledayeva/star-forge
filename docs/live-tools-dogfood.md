@@ -48,7 +48,9 @@ Good evidence is falsifiable:
 - console and interaction artifacts include observable assertions
 - preview evidence is tied to a source-bound deployment identity, and loopback previews include a scoped server lease artifact
 - native evidence includes build, launch, test, and visible UI artifacts where applicable
-- security evidence includes trusted provenance, scan scope, input hash, normalized findings, redaction report, and fresh source or commit binding even when findings are only low or info severity
+- strict security evidence requires independently verifiable host provenance,
+  scan scope, input hash, normalized findings, redaction report, and fresh source
+  or commit binding even when findings are only low or info severity
 - GitHub PR evidence is fresh against base and head refs, includes completed passing checks bound to the captured head SHA, records positive live provenance, and includes hash-bound packet artifacts
 
 ## Red Flags
@@ -68,7 +70,9 @@ Treat these as blockers until strict proof says otherwise:
 - native iOS transcript missing `session_show_defaults`, explicit XcodeBuildMCP provenance, exporter identity, or current source hash
 - macOS evidence built from shell strings instead of JSON argv arrays
 - security report or handoff packet outside `.starforge/live/<task-id>/security/`
-- security report without trusted provenance, input hash artifact, normalized findings, redaction report, or fresh source or commit binding
+- security report without independently verifiable host provenance, input hash
+  artifact, normalized findings, redaction report, or fresh source or commit
+  binding
 - GitHub evidence with stale refs, partial permissions, incomplete pagination, pending checks, checks bound to the wrong head SHA, fixture-only provenance, or missing packet artifact hashes
 
 ## Fixture Limits

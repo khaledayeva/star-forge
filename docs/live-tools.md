@@ -28,7 +28,10 @@ Collectors write task-scoped output:
   ...
 ```
 
-Fixtures under `fixtures/` are not release proof. They are allowed for schema coverage, happy-path normalization, and negative-path tests. Fixture-sourced GitHub PR packets are rejected by strict production-review proof even after collection, and fixture-only GitHub collection does not emit production proof commands.
+Fixtures under `fixtures/` are not release proof. They are allowed for schema
+coverage, happy-path normalization, and negative-path tests. Fixture-sourced and
+caller-exported GitHub PR packets are rejected by strict production-review proof,
+and neither route emits production proof commands.
 
 ## Collectors
 
@@ -117,7 +120,7 @@ Commands are structured argv only. Shell commands, signing pipelines, notarizati
 
 ### Security
 
-The security adapter imports trusted scanner output or the documented Star Forge security schema, normalizes findings, records provenance, and prints handoff and proof commands.
+The security adapter imports scanner output or the documented Star Forge security schema, normalizes findings, and records fallback provenance.
 
 ```sh
 python3 scripts/live_collectors/security_adapter.py \
@@ -131,11 +134,13 @@ python3 scripts/live_collectors/security_adapter.py \
   --scanner-version 1.2.3
 ```
 
-Every security proof requires the scoped adapter bundle: `handoff-input.json`, `input-hash.json`, `normalized-findings.json`, and `redaction-report.json`. Strict proof verifies trusted scanner schema provenance, ruleset, scan scope, fresh source or commit binding, the input hash against current bytes, manifest artifact records, raw artifact hashes, and that the proof command is using the manifest's normalized findings. Unknown or blocking severities fail strict proof. Low and info findings still require the full adapter bundle. Security handoff packets must be under `.starforge/live/<task-id>/security/` with a sibling scoped manifest.
+Every security evidence packet requires the scoped adapter bundle: `handoff-input.json`, `input-hash.json`, `normalized-findings.json`, and `redaction-report.json`. A file import remains untrusted even when its scanner metadata is complete, because the same caller can author the report and its provenance. Strict proof therefore requires an independently verifiable host-controlled collection boundary that the public file adapter does not currently expose. Unknown or blocking severities still fail, and security handoff packets must be under `.starforge/live/<task-id>/security/` with a sibling scoped manifest.
 
 ### GitHub PR
 
-The GitHub PR adapter creates a read-only source packet from production connector exports, production readonly `gh` export directories, or fixtures for tests. It binds evidence to base, head, current base, current head, and merge-base SHAs.
+The GitHub PR adapter creates a read-only source packet from connector exports,
+read-only `gh` export directories, or fixtures for tests. It binds evidence to
+base, head, current base, current head, and merge-base SHAs.
 
 ```sh
 python3 scripts/live_collectors/github_pr.py \
@@ -146,7 +151,13 @@ python3 scripts/live_collectors/github_pr.py \
   --connector-input github-pr-live.json
 ```
 
-Use `--connector-fixture` or `--gh-fixture-dir` only for tests. Release-capable imports use `--connector-input` or `--gh-readonly-dir`; they must include non-fixture tool versions, positive live provenance, read-only operations or commands, and a collection timestamp. The collector writes `operation-transcript.json` and records every required packet file in the manifest artifacts and raw artifact hashes.
+Use `--connector-fixture` or `--gh-fixture-dir` only for tests.
+`--connector-input` and `--gh-readonly-dir` are untrusted imports because their
+files and provenance fields are caller-authored. They produce degraded diagnostic
+packets and never production proof commands. A release-capable GitHub source
+packet requires a future host-controlled direct collection route with
+independently verifiable provenance. The official GitHub plugin remains the
+preferred workflow route for repository operations and read context.
 
 Allowed operations are reads only. CI log reads through `gh run view` or `gh api` Actions endpoints must name the requested repo and reference run or job ids present in check evidence bound to the captured head SHA. Failed checks, pending checks, stale SHAs, check runs not bound to the captured head SHA, partial permissions, incomplete pagination, unsafe `gh` commands, missing or mismatched packet hashes, or fixture provenance block strict proof. Production-review proof requires positive live GitHub provenance, repo and PR identity, freshness refs, timestamps, tool versions, and scoped hash-bound packet artifacts.
 

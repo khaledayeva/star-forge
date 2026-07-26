@@ -45,7 +45,8 @@ def _proof_commands(project: Path, task: str, manifest: Path) -> list[list[str]]
 
 
 def collect(args: argparse.Namespace) -> CollectionResult:
-    project = Path(args.project).resolve()
+    project = live_common.assert_collector_project_safe(Path(args.project))
+    root = live_common.live_collector_dir(project, args.task, COLLECTOR)
     source_hash_before = live_common.compute_source_hash(project)
     problems: list[dict[str, Any]] = []
     raw = _load_input(args, problems)
@@ -142,7 +143,6 @@ def collect(args: argparse.Namespace) -> CollectionResult:
         if log_problems:
             logs = None
 
-    root = live_common.live_collector_dir(project, args.task, COLLECTOR)
     safe_commands, command_report = redact_gh_api_command_query_values(raw.commands)
     pr_payload = normalize_pr_payload(
         raw=raw, repo=args.repo, pr_number=str(args.pr),
@@ -208,6 +208,9 @@ def collect(args: argparse.Namespace) -> CollectionResult:
         ),
         live_provenance=live_provenance, foundation=foundation,
     )
+    summary["trusted_provenance"] = False
+    summary["preferred_provider_available"] = False
+    summary["provenance_trust_boundary"] = "unavailable-for-this-collector"
     tool_versions = {"adapter": "github-pr.v1", "source": raw.source, **raw.tool_versions}
     safe_argv, argv_report = redact_artifact_payload(args.command_argv)
     redaction_report = merge_reports(redaction_report, argv_report)
@@ -229,9 +232,7 @@ def collect(args: argparse.Namespace) -> CollectionResult:
         captured_head=captured_head, current_base=current_base,
         current_head=current_head, foundation=foundation,
     )
-    commands = [] if raw.source in {
-        "connector-fixture", "gh-fixture", "missing-fixture"
-    } else _proof_commands(project, str(args.task), manifest)
+    commands: list[list[str]] = []
     return CollectionResult(manifest, envelope, commands, problems)
 
 
@@ -279,11 +280,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         for command in result.commands:
             print(display_command(command))
     else:
-        print("Fixture-only evidence was written; production proof commands were not emitted.")
+        print(
+            "Fixture or untrusted import evidence was written; "
+            "production proof commands were not emitted."
+        )
     if args.record:
         if not result.commands:
             print(
-                "Record skipped because fixture-only evidence cannot satisfy production proof.",
+                "Record skipped because this evidence cannot satisfy production proof.",
                 file=sys.stderr,
             )
             return 1

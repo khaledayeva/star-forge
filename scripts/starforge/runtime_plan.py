@@ -8,7 +8,7 @@ from typing import Any, Mapping, Sequence
 from starforge import changes as project_changes
 from starforge import contracts as project_contracts
 from starforge import lifecycle as project_lifecycle
-from .runtime_support import BLUEPRINT_FILE, PLAN_FILE, ForgeError, read_json, read_text, write_text
+from .runtime_support import BLUEPRINT_FILE, CANONICAL_STATE, PLAN_FILE, ForgeError, read_json, read_text, write_text
 
 PLAN_POLICY = _policy_value("runtime_plan.POLICY")
 VALID_STATUSES, VALID_MODES = (set(PLAN_POLICY[key]) for key in ("statuses", "modes"))
@@ -157,7 +157,7 @@ def task_allows_noop_verification(task: dict[str, Any]) -> bool:
     return str(task.get("mode") or "").lower() == "docs" and not task_owns_code(task)
 
 def normalize_command(text: str) -> str:
-    return re.sub(r"\s+", " ", str(text or "").strip()).lower()
+    return str(text or "").strip()
 
 def task_verify_command(task: dict[str, Any]) -> str:
     return str(task.get("verify") or "").strip()
@@ -362,9 +362,26 @@ def lifecycle_gate_state(project: Path, *, kind: str, required: bool,
     except Exception as exc:
         message = policy["unreadable_message"].format(kind=kind, error=exc)
         return _blocked_gate(base, policy["blocked_status"], [message])
-    source = evidence.get("source_hash") if descriptor["bind_evidence_source"] else current_source_hash
     evaluator = getattr(project_lifecycle, f"evaluate_{kind}")
-    gate = evaluator(contract, evidence, current_source_hash=str(source or ""))
+    gate = evaluator(contract, evidence, current_source_hash=str(current_source_hash or ""))
+    if kind == "foundation" and not getattr(gate, descriptor["satisfied_field"]):
+        try:
+            prior = read_json(project / CANONICAL_STATE) if (project / CANONICAL_STATE).exists() else {}
+        except Exception:
+            prior = {}
+        prior_gate = prior.get("foundation") if isinstance(prior, dict) else {}
+        evidence_source = str(evidence.get("source_hash") or "") if isinstance(evidence, Mapping) else ""
+        historical = evaluator(contract, evidence, current_source_hash=evidence_source)
+        transition_bound = (
+            isinstance(prior, dict)
+            and prior.get("schema") == "star-forge.state.v3"
+            and prior.get("project") == str(project.resolve())
+            and prior.get("phase") in {"build", "review", "deliver", "done", "amend"}
+            and isinstance(prior_gate, dict)
+            and prior_gate == base | historical.to_dict() | {"satisfied": True}
+        )
+        if transition_bound and getattr(historical, descriptor["satisfied_field"]):
+            gate = historical
     payload = gate.to_dict()
     satisfied = getattr(gate, descriptor["satisfied_field"])
     if kind == "delivery":

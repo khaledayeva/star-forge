@@ -245,6 +245,35 @@ class ArchitectureDebtTests(unittest.TestCase):
         finally:
             quality.MAX_PRODUCTION_PYTHON_LINES = original
 
+    def test_packed_lines_and_statements_cannot_fake_budget_headroom(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp)
+            source = project / "src" / "packed.py"
+            source.parent.mkdir(parents=True)
+            source.write_text(
+                "payload = " + repr("x" * quality.MAX_SOURCE_LINE_LENGTH) + "\n"
+                "left = 1; right = 2\n"
+                "literal = '; is data, not a statement separator'\n",
+                encoding="utf-8",
+            )
+
+            findings = quality.architecture_debt_findings(
+                quality.iter_project_files(project), project
+            )
+            packed = [
+                item
+                for item in findings
+                if item["rule"].startswith("architecture-debt-packed-")
+            ]
+            self.assertEqual(
+                [(item["rule"], item["line"]) for item in packed],
+                [
+                    ("architecture-debt-packed-line", 1),
+                    ("architecture-debt-packed-statements", 2),
+                ],
+            )
+            self.assertTrue(all(item["severity"] == "medium" for item in packed))
+
     def test_cycles_coupling_and_duplicate_control_plane_responsibilities(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project = Path(tmp)
@@ -314,6 +343,8 @@ class ArchitectureDebtTests(unittest.TestCase):
         blocking_budget_rules = {
             "architecture-debt-cli-concentration",
             "architecture-debt-large-file",
+            "architecture-debt-packed-line",
+            "architecture-debt-packed-statements",
             "architecture-debt-python-budget",
         }
         violations = [

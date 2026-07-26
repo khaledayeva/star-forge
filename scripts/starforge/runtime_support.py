@@ -12,44 +12,37 @@ from typing import Any, Iterable, Sequence
 from live_collectors import common as live_common
 from starforge import quality as project_quality
 from starforge import review_policy as adaptive_review_policy
-"""Deterministic helpers for the Star Forge Codex plugin (v0.3 "Forge Loop").
-
-The loop is plan -> build -> review -> done, with automatic amend re-entry on
-post-done drift. Gates consume only evidence the model cannot author about itself:
-captured command output (verify), screenshot bytes (browser-run), git tree state,
-and reviewer freshness attestations. Reviewer findings are load-bearing -- they
-feed the fix queue that `done` consumes -- so review cannot be back-filled. Hooks
-observe and re-anchor; they never deny. See docs/forge-loop.md.
-"""
 SCRIPT_DIR = Path(__file__).resolve().parents[1]
 
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 SUPPORT_POLICY = _policy_value("runtime_support.POLICY")
-_CONSTANTS, _PATHS, _SETS = (SUPPORT_POLICY[name] for name in ("constants", "paths", "sets"))
-SF_VERSION, PLUGIN_NAME, BLUEPRINT_FILE, PLAN_FILE, SOURCE_PROFILE_FILE, SOURCE_PROFILE_SCHEMA, AGENT_NAME_PREFIX, MAX_AUTO_CONTINUES, STAR_FORGE_STATE_VERSION = (_CONSTANTS[name] for name in ("SF_VERSION", "PLUGIN_NAME", "BLUEPRINT_FILE", "PLAN_FILE", "SOURCE_PROFILE_FILE", "SOURCE_PROFILE_SCHEMA", "AGENT_NAME_PREFIX", "MAX_AUTO_CONTINUES", "STAR_FORGE_STATE_VERSION"))
-LOOP_DIR, STATE_DIR, STATE_SUBDIR, RUNS_DIR, TASKS_DIR, FINAL_DIR, REVIEWS_DIR, SCREENSHOTS_DIR, RUNTIME_DIR, CANONICAL_STATE, PROJECT_MANIFEST, PROOF_FILE, FINAL_SUMMARY, LEDGER_FILE, HOOK_EVENTS, SUBAGENT_EVENTS, AUTO_CONTINUE_FILE, CHANGED_FILES, HANDOFF_ARTIFACT, WAIVES_FILE, INCIDENTS_FILE, HOOK_TRUST_NOTICE_FILE, SERVER_LEASE, SCREENSHOT_MANIFEST = (Path(_PATHS[name]) for name in ("LOOP_DIR", "STATE_DIR", "STATE_SUBDIR", "RUNS_DIR", "TASKS_DIR", "FINAL_DIR", "REVIEWS_DIR", "SCREENSHOTS_DIR", "RUNTIME_DIR", "CANONICAL_STATE", "PROJECT_MANIFEST", "PROOF_FILE", "FINAL_SUMMARY", "LEDGER_FILE", "HOOK_EVENTS", "SUBAGENT_EVENTS", "AUTO_CONTINUE_FILE", "CHANGED_FILES", "HANDOFF_ARTIFACT", "WAIVES_FILE", "INCIDENTS_FILE", "HOOK_TRUST_NOTICE_FILE", "SERVER_LEASE", "SCREENSHOT_MANIFEST"))
-VALID_STATUSES, VALID_MODES, BLOCKING_SEVERITIES, FINDING_SEVERITIES, INFRASTRUCTURE_DOCUMENT_SUFFIXES, PYTHON_CONTROL_PLANE_PARTS, SECRET_PRONE_SUFFIXES = (_SETS[name] for name in ("VALID_STATUSES", "VALID_MODES", "BLOCKING_SEVERITIES", "FINDING_SEVERITIES", "INFRASTRUCTURE_DOCUMENT_SUFFIXES", "PYTHON_CONTROL_PLANE_PARTS", "SECRET_PRONE_SUFFIXES"))
+_POLICY_EXPORT_GROUPS = {group: frozenset(SUPPORT_POLICY[group]) for group in ("constants", "paths", "sets")}
+_ALIAS_PROVIDERS = {"live_common": live_common, "project_quality": project_quality, "review_policy": adaptive_review_policy}
+_PROVIDER_EXPORTS = {_ALIAS_PROVIDERS[group]: exports for group, exports in SUPPORT_POLICY["aliases"].items()}
+
+BLUEPRINT_FILE = SUPPORT_POLICY["constants"]["BLUEPRINT_FILE"]
+PLAN_FILE = SUPPORT_POLICY["constants"]["PLAN_FILE"]
+BLOCKING_SEVERITIES = SUPPORT_POLICY["sets"]["BLOCKING_SEVERITIES"]
+SECRET_PRONE_SUFFIXES = SUPPORT_POLICY["sets"]["SECRET_PRONE_SUFFIXES"]
 FINDING_SEVERITY_RANK = SUPPORT_POLICY["finding_severity_rank"]
-SOURCE_SNAPSHOT_NAMES = set(SUPPORT_POLICY["source_snapshot_names"])
 TEXT_SUFFIXES = set(SUPPORT_POLICY["text_suffixes"])
-VISUAL_TASK_RE = re.compile(SUPPORT_POLICY["visual_task_pattern"], re.IGNORECASE)
-AI_RESIDUAL_PATTERNS = [
-    (re.compile(pattern, re.IGNORECASE), rule, severity)
-    for pattern, rule, severity in SUPPORT_POLICY["ai_residual_patterns"]]
+AI_RESIDUAL_PATTERNS = [(re.compile(pattern, re.IGNORECASE), rule, severity) for pattern, rule, severity in SUPPORT_POLICY["ai_residual_patterns"]]
 PNG_MAGIC = bytes.fromhex(SUPPORT_POLICY["image_magic_hex"]["png"])
 JPEG_MAGIC = bytes.fromhex(SUPPORT_POLICY["image_magic_hex"]["jpeg"])
 
-now_utc, file_sha256, run_git, is_git_repo, git_status_path, snapshot_file_candidates, source_snapshot_includes, files_fingerprint, source_hash, source_snapshot_rel_paths, dirty_paths_missing_from_source_snapshot = (getattr(live_common, name) for name in ("now_utc", "file_sha256", "run_git", "is_git_repo", "git_status_path", "snapshot_file_candidates", "source_snapshot_includes", "files_fingerprint", "compute_source_hash", "source_snapshot_rel_paths", "dirty_paths_missing_from_source_snapshot"))
-REVIEW_PROFILE_ROLES, KNOWN_REVIEW_ROLES, REVIEW_ROLE_LENSES = adaptive_review_policy.LEGACY_PROFILE_ROLES, adaptive_review_policy.ALL_REVIEW_ROLES, adaptive_review_policy.ROLE_LENSES
-is_source_file, architecture_debt_findings = project_quality.is_source_file, project_quality.architecture_debt_findings
+def __getattr__(name: str) -> Any:
+    """Resolve explicitly declared compatibility names from their owner."""
+    for group, names in _POLICY_EXPORT_GROUPS.items():
+        if name in names:
+            value = SUPPORT_POLICY[group][name]
+            return Path(value) if group == "paths" else value
+    for provider, exports in _PROVIDER_EXPORTS.items():
+        if name in exports:
+            return getattr(provider, exports[name])
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 STOPWORDS = _policy_value('runtime_support.STOPWORDS')
-SOURCE_SNAPSHOT_SUFFIXES = _policy_value('runtime_support.SOURCE_SNAPSHOT_SUFFIXES')
-SOURCE_SNAPSHOT_NAME_PREFIXES = _policy_value('runtime_support.SOURCE_SNAPSHOT_NAME_PREFIXES')
-INFRASTRUCTURE_TASK_PARTS = _policy_value('runtime_support.INFRASTRUCTURE_TASK_PARTS')
-VISUAL_SOURCE_SUFFIXES = _policy_value('runtime_support.VISUAL_SOURCE_SUFFIXES')
-VISUAL_SOURCE_PARTS = _policy_value('runtime_support.VISUAL_SOURCE_PARTS')
-IGNORED_PARTS = _policy_value('runtime_support.IGNORED_PARTS')
 SECRET_RE = re.compile(
     r"("
     r"\bsk-[A-Za-z0-9_-]{20,}|"
@@ -184,14 +177,17 @@ def decode_image_meta(path: Path) -> dict[str, Any]:
         return {"valid_image": True, "image_format": "jpeg"}
     return {"valid_image": False}
 
+def _run_git(command: str, project: Path) -> tuple[int, str, str]:
+    return live_common.run_git(SUPPORT_POLICY["git_commands"][command], project)
+
 def git_head(project: Path) -> str | None:
-    if not is_git_repo(project):
+    if not live_common.is_git_repo(project):
         return None
-    code, out, _ = run_git(SUPPORT_POLICY["git_commands"]["head"], project)
+    code, out, _ = _run_git("head", project)
     return out.strip() if code == 0 and out.strip() else None
 
 def repo_root(cwd: Path) -> Path:
-    code, out, _ = run_git(SUPPORT_POLICY["git_commands"]["root"], cwd)
+    code, out, _ = _run_git("root", cwd)
     if code == 0 and out.strip():
         return Path(out.strip()).resolve()
     return cwd.resolve()
@@ -201,15 +197,15 @@ def ensure_git_repo(project: Path) -> bool:
     # own repository; otherwise every git-backed gate points at the user's repo.
     if (project / ".git").exists():
         return False
-    code, _, err = run_git(SUPPORT_POLICY["git_commands"]["init"], project)
+    code, _, err = _run_git("init", project)
     if code != 0:
         raise _error("git_init", error=err.strip())
     return True
 
 def git_status(project: Path) -> list[str]:
-    if not is_git_repo(project):
+    if not live_common.is_git_repo(project):
         return []
-    code, out, _ = run_git(SUPPORT_POLICY["git_commands"]["status"], project)
+    code, out, _ = _run_git("status", project)
     if code != 0:
         return []
     return [line for line in out.splitlines() if line.strip()]
@@ -219,11 +215,11 @@ def source_dirty_entries(entries: Sequence[str]) -> list[str]:
     return live_common.source_hash_dirty_entries(Path.cwd(), entries)
 
 def git_changed_files(project: Path) -> list[Path]:
-    if not is_git_repo(project):
+    if not live_common.is_git_repo(project):
         return []
-    code, out, _ = run_git(SUPPORT_POLICY["git_commands"]["changed"], project)
+    code, out, _ = _run_git("changed", project)
     files = [project / line.strip() for line in out.splitlines() if line.strip()] if code == 0 else []
-    code, out, _ = run_git(SUPPORT_POLICY["git_commands"]["untracked"], project)
+    code, out, _ = _run_git("untracked", project)
     if code == 0:
         files.extend(project / line.strip() for line in out.splitlines() if line.strip())
     seen: set[Path] = set()
@@ -262,13 +258,9 @@ def template_text(name: str) -> str:
         raise _error("template_missing", path=path)
     return read_text(path)
 
-def is_dotenv(path: Path) -> bool:
-    # Path('.env').suffix is '' and Path('.env.local').suffix is '.local', so the
-    # tree scan missed literal dotenv files entirely. Match them by name.
-    return path.name == ".env" or path.name.startswith(".env.")
-
 def is_text_file(path: Path) -> bool:
-    return (path.name in SUPPORT_POLICY["text_names"] or is_dotenv(path) or path.suffix.lower() in TEXT_SUFFIXES or
+    dotenv = path.name == ".env" or path.name.startswith(".env.")
+    return (path.name in SUPPORT_POLICY["text_names"] or dotenv or path.suffix.lower() in TEXT_SUFFIXES or
             path.suffix.lower() in SECRET_PRONE_SUFFIXES)
 
 def iter_project_files(project: Path, *, all_files: bool = False) -> Iterable[Path]:
@@ -300,40 +292,41 @@ def scan_paths(paths: Iterable[Path], project: Path) -> list[dict[str, Any]]:
 def tree_clean_for_commit_binding(project: Path) -> bool:
     return not source_dirty_entries(git_status(project))
 
+def _release_hashes(project: Path) -> dict[str, str | None]:
+    paths = {"blueprint_hash": project / BLUEPRINT_FILE, "plan_hash": project / PLAN_FILE}
+    return {name: live_common.file_sha256(path) if path.exists() else None for name, path in paths.items()}
+
 def release_snapshot(project: Path) -> dict[str, Any]:
-    source_files = snapshot_file_candidates(project)
-    blueprint = project / BLUEPRINT_FILE
-    plan = project / PLAN_FILE
+    source_files = live_common.snapshot_file_candidates(project)
     return policy_record(
         "release_snapshot",
-        created_at=now_utc(),
+        created_at=live_common.now_utc(),
         git_head=git_head(project),
-        source_hash=files_fingerprint(project, source_files),
+        source_hash=live_common.files_fingerprint(project, source_files),
         source_files=[relative_to_project(path, project) for path in source_files],
-        blueprint_hash=file_sha256(blueprint) if blueprint.exists() else None,
-        plan_hash=file_sha256(plan) if plan.exists() else None,
+        **_release_hashes(project),
     )
 
 def release_snapshot_unavailable(project: Path, problems: Sequence[dict[str, Any]]) -> dict[str, Any]:
-    blueprint = project / BLUEPRINT_FILE
-    plan = project / PLAN_FILE
     return policy_record(
         "release_snapshot_unavailable",
-        created_at=now_utc(),
+        created_at=live_common.now_utc(),
         git_head=git_head(project),
         source_hash=None,
         source_hash_unavailable=True,
         problems=list(problems),
         source_files=[],
-        blueprint_hash=file_sha256(blueprint) if blueprint.exists() else None,
-        plan_hash=file_sha256(plan) if plan.exists() else None,
+        **_release_hashes(project),
     )
 
 def artifact_entry(project: Path, path: Path, *, kind: str) -> dict[str, Any]:
     candidate = path if path.is_absolute() else project / path
     entry: dict[str, Any] = {"kind": kind, "path": relative_to_project(candidate, project), "exists": candidate.exists()}
     if candidate.exists() and candidate.is_file():
-        entry.update({"sha256": file_sha256(candidate), "bytes": candidate.stat().st_size})
+        entry.update({
+            "sha256": live_common.file_sha256(candidate),
+            "bytes": candidate.stat().st_size,
+        })
         if kind == "screenshot":
             entry.update(decode_image_meta(candidate))
     return entry
@@ -346,5 +339,3 @@ def finding_problem(finding: dict[str, Any]) -> dict[str, Any]:
     rule = finding.get("rule", "finding")
     message = finding.get("message") or finding.get("evidence") or "blocking finding"
     return {"severity": finding.get("severity", "high"), "message": f"{rule} at {location}: {message}"}
-
-__all__ = tuple(name for name in globals() if not name.startswith("__"))

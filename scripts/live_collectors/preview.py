@@ -511,7 +511,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(list(argv) if argv is not None else None)
-    project = Path(args.project).resolve()
+    project = common.assert_collector_project_safe(Path(args.project))
     root = common.live_collector_dir(project, args.task, COLLECTOR)
     source_before, runtime_hash = (
         common.compute_source_hash(project), common.compute_runtime_asset_hash(project),
