@@ -1,114 +1,249 @@
 # Star Forge Workflow
 
-Star Forge runs the Forge Loop. The canonical state is `.starforge/state.json`,
-produced by the command that starts every turn:
+One `$forge` invocation drives the lifecycle:
 
-```bash
-python3 <plugin-root>/scripts/star_forge.py run --project . --objective "<objective>"
+```text
+intake -> design -> plan -> foundation -> build -> review -> deliver -> done
 ```
 
-The first lines of its output are the operating card (version, hook liveness,
-phase, required next action, paste-ready spawn commands). Follow `phase`,
-`required_next_action`, and `spawn_plan`.
+The coordinator reruns `run` after each resolved phase and follows
+`.starforge/state.json`, the generated operating card, and its `required_next_action`.
 
-Bundled hooks are useful for continuity re-anchors, changed-file trails, and
-local sub-agent provenance diagnostics. They write project-local ledgers only, so
-in this version they do not create a trusted witness source and cannot remove the
-advisory suffix from a passing `done` verdict.
-
-## 1. Plan
-
-`forge-plan` creates `Blueprint.md` — the product contract with `AC-n` acceptance
-criteria — and asks for approval exactly once (`Status: approved`). Then it writes
-`Plan.md`:
-
-```
-| Task | Description | Status | Mode | Files | Depends | Verify | Evidence |
+```sh
+python3 <plugin-root>/scripts/star_forge.py run \
+  --project . \
+  --objective "<objective>"
 ```
 
-- `Mode`: `delegate` (a spawned `starforge-builder` implements it — required for
-  real code), `solo` (coordinator may implement trivial glue), `docs` (no code).
-- `Files`: what the task owns — drives parallel safety and the builder prompt.
-- `Verify`: the exact verification command.
+Use `status --project .` for a read-only snapshot. Use `run --no-auto-init` when
+you want inspection to fail rather than initialize a missing project.
 
-Validate with `validate-plan --strict`. Apply the `learnings_digest` lines from
-`run` output — they are lessons from past projects.
+## 1. Intake
 
-## 2. Build
+Star Forge inspects the objective, repository, supplied context, and existing
+Blueprint. It asks one concise batch containing only decisions that could change
+scope, architecture, design, security, or delivery.
 
-For each ready task, the operating card prints a paste-ready spawn command for
-`delegate` tasks. Run independent tasks in parallel waves when their `Files` do
-not overlap (Codex caps ~6 threads; spawn ≤5 per wave, `wait_agent` between).
+The Blueprint records resolved decisions, explicit assumptions, Toolchain routes,
+accepted fallbacks, risk flags, Repository Contract, and Delivery Contract. New
+projects must select `source-only`, `private-repo`, `preview`, `production`,
+`package`, or a named platform-specific delivery target.
 
-After each task, the coordinator records verification — captured output is the
-evidence, claims are not:
+Existing foreign roots are protected. Use `--product-slug <name>` to create an
+isolated `work/<name>/` project, or `--adopt-root` to record deliberate in-place
+adoption.
 
-```bash
-python3 <plugin-root>/scripts/star_forge.py verify --project . --task "<id>" --command "<test command>" --strict
+## 2. Design
+
+Non-UI projects record design as not applicable and continue.
+
+UI projects use the capability router. Mobbin is preferred for real-world
+interaction patterns, followed by Figma, ImageGen, supplied references, then a
+documented unavailable state. Star Forge uses the host-discovered tool schema and
+supported OAuth connection. It never invents a Mobbin command, stores an API key,
+or uses an undocumented REST fallback.
+
+Research is normalized directly into the Blueprint as stable references, observed
+patterns, relevance, `Borrow`, `Avoid`, and product-specific constraints. When
+evidence supports it, Star Forge presents two or three original directions. The
+selected direction is part of the one complete Blueprint approval, not a second
+approval checkpoint.
+
+## 3. Plan And Approval
+
+Once every material decision is resolved, the user approves the complete
+Blueprint. The coordinator then records a content lock:
+
+```sh
+python3 <plugin-root>/scripts/star_forge.py approve-blueprint --project .
 ```
 
-UI tasks additionally need browser proof (claim a `server-lease` first for local
-apps):
+Any Blueprint edit invalidates the lock and returns the lifecycle to plan until
+the revised contract is explicitly approved.
 
-```bash
-python3 <plugin-root>/scripts/star_forge.py browser-run --project . --task "<id>" --scenario "<scenario>" --url "<url>" \
-  --live-manifest ".starforge/live/<id>/browser/manifest.json" --server-lease ".starforge/runtime/server.json" \
-  --viewport "desktop=1280x800:<png>" --viewport "mobile=390x844:<png>" \
-  --interaction-evidence "<path>" --console-evidence "<path>" --strict
+Plan v2 has exactly these columns:
+
+```text
+| Task | Description | Status | Mode | Files | Depends | ACs | Proof | Verify | Evidence |
 ```
 
-Then:
+`ACs` maps each task to approved acceptance criteria. `Proof` uses validated kinds
+such as `unit`, `integration`, `browser`, `preview`, `native-ios`,
+`native-macos`, `security`, `github`, `package`, and `delivery`.
 
-```bash
-python3 <plugin-root>/scripts/star_forge.py complete-task --project . --task "<id>" --changed-file "<file>"
+Validate the plan:
+
+```sh
+python3 <plugin-root>/scripts/star_forge.py validate-plan \
+  --file Plan.md \
+  --project . \
+  --strict
 ```
 
-`complete-task` refuses without a passing verify that matches the *current*
-source tree. Manual Plan.md row edits are not completion.
+## 4. Foundation
 
-## 3. Review
+Local Git initialization is automatic. The approved Foundation Contract marks each
+obligation as requested, not applicable, or blocking.
 
-When all tasks are complete, spawn `starforge-reviewer` agents (the spawn command
-is in the operating card). Each reviewer writes its own findings file to
-`.starforge/reviews/<scope>/<role>.findings.json` — an empty findings array is a
-valid clean result. Then:
+For a new GitHub repository, the contract requires private visibility, `origin`,
+the approved default branch, an initial commit, and CI before feature work. The
+GitHub plugin is preferred. The only narrow creation fallback is:
 
-```bash
+```sh
+gh repo create --private
+```
+
+That fallback is valid only with approved write authority and the full approved
+owner and repository context. Existing repositories are inspected read-only first.
+Identity and visibility must match the contract. Star Forge never overwrites a
+remote or changes visibility implicitly.
+
+Foundation evidence is bound to the current source and exact contract. Depending
+on risk, it also proves the source scaffold, environment example without secrets,
+secret scan, dependency audit, and security plan.
+
+## 5. Capability Routing
+
+The router derives needs from project class, enabled Blueprint flags, Plan proof
+kinds, and delivery target. It consumes
+`config/capability-routing.json` in stable catalog order.
+
+Each decision reports:
+
+- selected provider
+- why it is required
+- `available`, `degraded`, or `blocked` status
+- missing preferred options
+- whether a fallback ran
+- a material installation suggestion, when applicable
+
+Preference order is dedicated plugin or MCP, native Codex capability, Computer
+Use, safe shell fallback, then blocker. Optional installation is always
+suggestion-only and requires user action. If a safe fallback satisfies the
+contract, Star Forge discloses it and continues.
+
+Platform rules:
+
+| Work | Route |
+| --- | --- |
+| Local web QA | In-app Browser, then Playwright |
+| Authenticated or extension-dependent web state | Chrome, then in-app Browser |
+| iOS | Build iOS Apps and XcodeBuildMCP, including Simulator proof |
+| macOS | Build macOS Apps and the most specific UI, test, signing, and packaging route |
+| React Native or Expo | Official Expo plugin, then a discovered repository-native CLI workflow |
+| Security-sensitive work | Codex Security, then normalized scanner or reviewer fallback |
+
+An unavailable preferred provider is never reported as if it ran.
+
+## 6. Build And Verify
+
+Plan task modes are:
+
+- `delegate`: substantive implementation by a `starforge-builder`
+- `solo`: trivial coordinator glue
+- `docs`: documentation work, eligible for a recorded no-op
+
+Tasks with disjoint owned files may run in parallel. The coordinator, not a
+builder, records the exact `Verify` command:
+
+```sh
+python3 <plugin-root>/scripts/star_forge.py verify \
+  --project . \
+  --task SF-123 \
+  --command "<exact Plan Verify command>" \
+  --strict
+```
+
+Docs tasks use:
+
+```sh
+python3 <plugin-root>/scripts/star_forge.py verify \
+  --project . \
+  --task SF-123 \
+  --noop \
+  --summary "<why no command applies>" \
+  --strict
+```
+
+Live proof is additional to the Plan Verify command. See
+[proof-recipes.md](proof-recipes.md). After current-source proof passes:
+
+```sh
+python3 <plugin-root>/scripts/star_forge.py complete-task \
+  --project . \
+  --task SF-123 \
+  --changed-file path/to/file \
+  --summary "What shipped"
+```
+
+Manual Plan status edits do not complete a task.
+
+## 7. Adaptive Review
+
+Correctness review always applies. UX and accessibility, security and privacy,
+architecture, and performance and reliability are added from deterministic risk
+flags, with adjacent lenses combined to keep the wave at four agents or fewer.
+Fast MVP cannot remove a risk-required review.
+
+Reviewers write source-bound findings. The coordinator merges them with tree
+scans:
+
+```sh
 python3 <plugin-root>/scripts/star_forge.py review --project . --strict
 ```
 
-This merges reviewer findings with a tree scan (secrets, AI residuals,
-architecture debt) into the fix queue. Fix each blocking finding and re-verify,
-or waive false positives with a recorded reason:
+Fix each blocker and rerun affected proof, or record a justified false-positive
+waiver:
 
-```bash
-python3 <plugin-root>/scripts/star_forge.py waive --project . --finding F-3 --reason "<why this is not a real blocker>"
+```sh
+python3 <plugin-root>/scripts/star_forge.py waive \
+  --project . \
+  --finding F-3 \
+  --reason "<why this finding is not applicable>"
 ```
 
-Re-run `review` after fixes. Review cannot be back-filled: no findings files
-means `done` reports review-not-performed; a source change after review makes it
-stale.
+## 8. Deliver And Complete
 
-## 4. Done
+The Delivery Contract names one result. Suitable simple or internal apps route to
+Sites. Production web apps that need its workflow route to Vercel. Star Forge
+never selects both by default or substitutes an opportunistic second provider.
 
-```bash
-python3 <plugin-root>/scripts/star_forge.py done --project . --strict
+Delivery proof records current source, repository commit, delivery or package
+identity, live URL when applicable, and a smoke result. React Native and Expo
+platform delivery needs this separate delivery proof in addition to normal task
+verification.
+
+Blueprint approval covers only stated non-destructive writes. Credentials, signing,
+billing, production access, public release, destructive replacement, and
+visibility changes remain user-controlled. Unresolved requirements collapse into
+one explicit blocker.
+
+```sh
+python3 <plugin-root>/scripts/star_forge.py done \
+  --project . \
+  --strict \
+  --write-summary
 ```
 
-`done` is a predicate computed from git facts: Blueprint approved, all tasks
-complete via `complete-task`, fresh passing verifies, browser proof for UI work,
-a fresh review with an empty (or waived) fix queue, and a clean tree. On pass it
-writes `.starforge/final/proof.json` and `--write-summary` writes the human
-summary. Quote the verdict line verbatim, including the advisory label. In this
-version, local hook and sub-agent ledgers are diagnostic only, so a passing build
-normally reports `COMPLETE (advisory: ...)` rather than unqualified `COMPLETE`.
+Completion is computed from the current repository. It requires the Blueprint
+lock, traced Plan, task and platform proof, foundation gate, fresh review, empty or
+waived fix queue, Delivery Contract, and clean tree. Hooks remain diagnostic, so
+the passing verdict may carry an advisory trust suffix.
 
-## 5. Amend
+## 9. Post-Completion Changes
 
-Any source edit after a passing `done` flips the next `run` to phase `amend` and
-scaffolds an `AMEND-n` task from the changed files. The amendment flows through
-build → review → done like any other work; the proof is superseded by the new
-pass. There is no flag to remember — re-entry is automatic.
+Source drift enters `amend`. New work uses
+`.starforge/changes/<change-id>/change.md` and a scoped change Plan instead of
+appending another `AMEND-n` row.
 
-Star Forge does not push, publish, deploy, migrate, or create remote PRs unless
-explicitly asked.
+The packet records the original completed source hash, changed scope, affected ACs,
+delivery impact, and approval state. Review it, then approve it:
+
+```sh
+python3 <plugin-root>/scripts/star_forge.py approve-change \
+  --project . \
+  --change CHANGE-1
+```
+
+Only affected build, proof, review, and delivery gates repeat. Historical root
+plans, completion proofs, and v0.3 amendment rows remain readable and unchanged.
