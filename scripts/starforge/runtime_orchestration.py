@@ -12,6 +12,7 @@ from starforge import contracts as project_contracts
 from starforge import doctor as installation_doctor
 from starforge import learnings as global_learnings
 from starforge import lifecycle as project_lifecycle
+from starforge import migration as project_migration
 from starforge import quality as project_quality
 from starforge import review_policy as adaptive_review_policy
 from starforge import safe_io
@@ -633,13 +634,10 @@ def cmd_validate_plan(args: argparse.Namespace) -> int:
 def cmd_migrate_plan(args: argparse.Namespace) -> int:
     """Create a separate Plan v2 draft from an eight-column legacy Plan."""
     project = resolve_project(args.project)
-    source_raw = Path(args.file)
-    output_raw = Path(args.output)
-    source = source_raw.resolve() if source_raw.is_absolute() else (project / source_raw).resolve()
-    output = output_raw.resolve() if output_raw.is_absolute() else (project / output_raw).resolve()
     try:
-        payload = project_contracts.write_plan_v2_migration(source, output)
-    except project_contracts.ContractError as exc:
+        payload = project_migration.create_plan_v2_draft(
+            project, args.file, args.output)
+    except project_migration.LegacyMigrationError as exc:
         raise ForgeError(str(exc)) from exc
     print(json.dumps(payload | {"project": str(project)}, indent=2))
     return 0

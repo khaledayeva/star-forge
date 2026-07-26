@@ -184,7 +184,7 @@ def git_status(project: Path) -> list[str]:
         return []
     code, out, _ = _run_git("status", project)
     if code != 0:
-        return []
+        return ["?? <git status unavailable>"]
     return [line for line in out.splitlines() if line.strip()]
 def source_dirty_entries(entries: Sequence[str]) -> list[str]:
     """Filter Star Forge's own state writes out of dirty-tree checks."""

@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import stat
 from pathlib import Path
 from typing import Any, Mapping
 
-from . import changes, contracts, evidence
+from . import changes, contracts, evidence, safe_io
 LEGACY_PROJECT_INSPECTION_SCHEMA = "star-forge.legacy-v03-inspection.v1"
 LEGACY_REVIEW_SCHEMA = "star-forge.review.v2"
 LEGACY_COMPLETION_SCHEMA = "star-forge.complete-task.v1"
@@ -16,6 +17,66 @@ LEGACY_STATE_SCHEMA = "star-forge.state.v3"
 
 class LegacyMigrationError(ValueError):
     """A legacy project cannot be inspected without ambiguity."""
+
+def _migration_path(root: Path, raw: str | Path, label: str) -> Path:
+    text = str(raw)
+    candidate = Path(text)
+    if (not text or candidate.is_absolute() or "\\" in text
+            or any(part in {"", ".", ".."} for part in candidate.parts)):
+        raise LegacyMigrationError(
+            f"{label} must be a normalized project-relative path")
+    return root.joinpath(*candidate.parts)
+
+def create_plan_v2_draft(
+    project: str | Path,
+    source: str | Path,
+    output: str | Path,
+) -> dict[str, Any]:
+    """Create one confined Plan v2 draft without resolving project symlinks."""
+    root = Path(project).resolve()
+    if not root.is_dir():
+        raise LegacyMigrationError(f"legacy project is not a directory: {root}")
+    source_path = _migration_path(root, source, "Migration source")
+    output_path = _migration_path(root, output, "Migration output")
+    if source_path == output_path:
+        raise LegacyMigrationError(
+            "Migration output must be separate from the legacy Plan")
+    try:
+        source_bytes, source_digest, _size = safe_io.read_snapshot(
+            root, source_path)
+        source_text = source_bytes.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise LegacyMigrationError(
+            f"{source_path.name} is not valid UTF-8") from exc
+    except OSError as exc:
+        raise LegacyMigrationError(
+            f"{source_path.name} cannot be read safely: {exc}") from exc
+    try:
+        migrated, summary = contracts.migrate_plan_text(source_text)
+        parsed = contracts.parse_plan_tasks_text(migrated)
+    except contracts.ContractError as exc:
+        raise LegacyMigrationError(str(exc)) from exc
+    if not parsed or any(task["plan_version"] != "v2" for task in parsed):
+        raise LegacyMigrationError(
+            "Migrated Plan v2 draft failed its schema check")
+    try:
+        safe_io.create_text_exclusive(root, output_path, migrated)
+    except FileExistsError as exc:
+        raise LegacyMigrationError(
+            f"{output_path.name} already exists; choose a new output path") from exc
+    except OSError as exc:
+        raise LegacyMigrationError(
+            f"Could not create migration output safely: {exc}") from exc
+    return {
+        "schema": contracts.PLAN_MIGRATION_SCHEMA,
+        "source": str(source_path),
+        "output": str(output_path),
+        "source_sha256": source_digest,
+        "output_sha256": hashlib.sha256(migrated.encode("utf-8")).hexdigest(),
+        "source_preserved": True,
+        "review_required": True,
+        **summary,
+    }
 
 def _relative(path: Path, root: Path) -> str:
     try:

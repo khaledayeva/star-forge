@@ -16,6 +16,7 @@ import tempfile
 import traceback
 from pathlib import Path
 from typing import Any, Callable, Iterator
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
@@ -615,6 +616,63 @@ def test_simulator_browser_route_is_recorded_or_degraded_honestly() -> None:
             blocker.get("capability") == native_ios.SIMULATOR_BROWSER_PROVIDER
             for blocker in envelope["blockers"]
         )
+
+def test_json_source_swap_never_reads_external_bytes() -> None:
+    with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as outside_tmp:
+        project = Path(tmp).resolve()
+        out_dir = project / ".starforge" / "live" / TASK / "native-ios"
+        out_dir.mkdir(parents=True)
+        source = write_json(project / "input.json", {"trusted": True})
+        outside = write_json(Path(outside_tmp) / "secret.json", {"secret": "outside-value"})
+        real_read = native_ios.safe_io.read_snapshot
+        swapped = False
+        def swap_before_read(root: Path, path: Path, **kwargs: Any) -> tuple[bytes, str, int]:
+            nonlocal swapped
+            if not swapped:
+                source.unlink()
+                source.symlink_to(outside)
+                swapped = True
+            return real_read(root, path, **kwargs)
+        problems: list[dict[str, Any]] = []
+        with mock.patch.object(native_ios.safe_io, "read_snapshot", side_effect=swap_before_read):
+            _path, payload = native_ios.copy_json_artifact(
+                project, out_dir, str(source), "copied.json", "input", problems,
+                missing_rule="native-ios-input")
+        assert problems
+        assert "outside-value" not in json.dumps(payload)
+
+def test_static_in_project_symlink_source_is_not_followed() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        target = write_json(project / "target.json", {"secret": "linked-value"})
+        source = project / "input.json"
+        source.symlink_to(target)
+        problems: list[dict[str, Any]] = []
+        resolved = native_ios.resolve_input_path(
+            project, str(source), "input", problems, rule="native-ios-input")
+        assert resolved is None
+        assert problems
+
+def test_image_destination_parent_swap_cannot_write_outside_project() -> None:
+    with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as outside_tmp:
+        project = Path(tmp).resolve()
+        out_dir = project / ".starforge" / "live" / TASK / "native-ios"
+        out_dir.mkdir(parents=True)
+        source = make_png(project / "input.png")
+        outside = Path(outside_tmp).resolve()
+        parked = project / "parked-native-ios"
+        real_read = native_ios.safe_io.read_snapshot
+        def read_then_swap(root: Path, path: Path, **kwargs: Any) -> tuple[bytes, str, int]:
+            result = real_read(root, path, **kwargs)
+            out_dir.rename(parked)
+            out_dir.symlink_to(outside, target_is_directory=True)
+            return result
+        problems: list[dict[str, Any]] = []
+        with mock.patch.object(native_ios.safe_io, "read_snapshot", side_effect=read_then_swap):
+            result = native_ios.copy_image_artifact(project, out_dir, str(source), problems)
+        assert result is None
+        assert problems
+        assert not (outside / "screenshot.png").exists()
 
 
 def main() -> int:

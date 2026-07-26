@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 import copy
 import hashlib
 import json
@@ -18,6 +19,7 @@ SCRIPTS = ROOT / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
+import star_forge
 from starforge import changes, contracts, evidence, migration
 
 
@@ -179,6 +181,67 @@ class LegacyPlanMigrationTests(unittest.TestCase):
                 [item["change_id"] for item in changes.legacy_amendment_history(project)],
                 ["AMEND-1", "AMEND-2"],
             )
+
+    def test_cli_rejects_final_and_intermediate_source_symlinks(self) -> None:
+        if not hasattr(Path, "symlink_to"):
+            self.skipTest("symlinks unavailable")
+        for intermediate in (False, True):
+            with self.subTest(intermediate=intermediate), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                project = copy_fixture(COMPLETED, root)
+                outside = root / "outside"
+                outside.mkdir()
+                (outside / "Plan.md").write_bytes((project / "Plan.md").read_bytes())
+                source = project / "input"
+                if intermediate:
+                    source.symlink_to(outside, target_is_directory=True)
+                    source_arg = "input/Plan.md"
+                else:
+                    source = source.with_suffix(".md")
+                    source.symlink_to(outside / "Plan.md")
+                    source_arg = source.name
+                with self.assertRaises(star_forge.ForgeError):
+                    star_forge.cmd_migrate_plan(argparse.Namespace(
+                        project=str(project), file=source_arg,
+                        output="drafts/Plan.v2.md"))
+                self.assertFalse((project / "drafts" / "Plan.v2.md").exists())
+
+    def test_cli_rejects_intermediate_and_dangling_output_symlinks(self) -> None:
+        if not hasattr(Path, "symlink_to"):
+            self.skipTest("symlinks unavailable")
+        for intermediate in (False, True):
+            with self.subTest(intermediate=intermediate), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                project = copy_fixture(COMPLETED, root)
+                outside = root / "outside"
+                outside.mkdir()
+                drafts = project / "drafts"
+                if intermediate:
+                    drafts.symlink_to(outside, target_is_directory=True)
+                else:
+                    drafts.mkdir()
+                    (drafts / "Plan.v2.md").symlink_to(
+                        outside / "missing-plan.md")
+                with self.assertRaises(star_forge.ForgeError):
+                    star_forge.cmd_migrate_plan(argparse.Namespace(
+                        project=str(project), file="Plan.md",
+                        output="drafts/Plan.v2.md"))
+                self.assertFalse((outside / "Plan.v2.md").exists())
+                self.assertFalse((outside / "missing-plan.md").exists())
+
+    def test_cli_rejects_absolute_source_and_output_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = copy_fixture(COMPLETED, Path(tmp))
+            cases = (
+                (str(project / "Plan.md"), "drafts/Plan.v2.md"),
+                ("Plan.md", str(project / "drafts" / "Plan.v2.md")),
+            )
+            for source, output in cases:
+                with self.subTest(source=source, output=output):
+                    with self.assertRaisesRegex(
+                            star_forge.ForgeError, "project-relative"):
+                        star_forge.cmd_migrate_plan(argparse.Namespace(
+                            project=str(project), file=source, output=output))
 
     def test_automatic_packet_derivation_refuses_unmapped_legacy_rows(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

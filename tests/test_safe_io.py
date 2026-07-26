@@ -95,6 +95,30 @@ class CollectorBoundaryTests(unittest.TestCase):
 
 
 class DescriptorStabilityTests(unittest.TestCase):
+    def test_read_snapshot_returns_one_bounded_attested_value(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp).resolve()
+            artifact = project / "artifact.bin"
+            artifact.write_bytes(b"bounded")
+            content, digest, byte_count = safe_io.read_snapshot(
+                project, artifact, max_bytes=7)
+            self.assertEqual(content, b"bounded")
+            self.assertEqual(digest, hashlib.sha256(content).hexdigest())
+            self.assertEqual(byte_count, len(content))
+            with self.assertRaises(safe_io.SafeIOError):
+                safe_io.read_snapshot(project, artifact, max_bytes=6)
+
+    def test_exclusive_create_refuses_existing_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp).resolve()
+            outside = project.parent / "outside-exclusive.txt"
+            outside.write_text("sentinel\n", encoding="utf-8")
+            target = project / "record.txt"
+            target.symlink_to(outside)
+            with self.assertRaises(FileExistsError):
+                safe_io.create_text_exclusive(project, target, "replacement\n")
+            self.assertEqual(outside.read_text(encoding="utf-8"), "sentinel\n")
+
     def test_snapshot_hash_and_size_use_the_opened_descriptor(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project = Path(tmp).resolve()

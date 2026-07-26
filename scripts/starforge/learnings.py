@@ -13,12 +13,12 @@ import hashlib
 import json
 import os
 import re
-import tempfile
 import urllib.parse
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from live_collectors import common as live_common
+from . import safe_io
 LEARNING_POLICY = _policy_value("learnings.POLICY")
 globals().update(LEARNING_POLICY["exports"])
 DEFAULT_RELATIVE_HOME = Path(".star-forge") / "learnings"
@@ -137,23 +137,14 @@ def learnings_home(environ: Mapping[str, str] | None = None) -> Path:
     override = str(env.get(HOME_ENV) or "").strip()
     return Path(override).expanduser() if override else Path.home() / DEFAULT_RELATIVE_HOME
 
-def _bounded_json(path: Path) -> dict[str, Any]:
+def _bounded_json(path: Path, *, root: Path | None = None) -> dict[str, Any]:
     try:
-        if path.is_symlink() or path.stat().st_size > MAX_RECORD_BYTES:
-            return {}
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        content, _digest, _size = safe_io.read_snapshot(
+            root or safe_io.infer_root(path), path, max_bytes=MAX_RECORD_BYTES)
+        payload = json.loads(content.decode("utf-8"))
     except (OSError, ValueError, TypeError):
         return {}
     return payload if isinstance(payload, dict) else {}
-
-def _manifest_opt_in(project: Path | None, action: str) -> bool:
-    if project is None:
-        return False
-    payload = _bounded_json(project / ".starforge" / "project.json")
-    settings = payload.get("global_learnings") if isinstance(payload, dict) else None
-    if settings is True:
-        return True
-    return bool(isinstance(settings, dict) and settings.get("enabled") is True and settings.get(action) is True)
 
 def opt_in_status(
     project: Path | None,
@@ -169,7 +160,6 @@ def opt_in_status(
         (explicit, "explicit-action"),
         (str(env.get(OPT_IN_ENV) or "").strip().lower() in TRUTHY, "user-environment"),
         (bool(str(env.get(HOME_ENV) or "").strip()), "configured-store"),
-        (_manifest_opt_in(project, action), "project-manifest"),
     )
     reason = next((value for enabled, value in reasons if enabled), "disabled")
     return policy_mapping("learning_opt_in", enabled=reason != "disabled", action=action, reason=reason)
@@ -212,27 +202,9 @@ def _safe_root(
         return None, {**status, "enabled": False, "reason": "unsafe-store-root"}
     return resolved, status
 
-def _within(root: Path, candidate: Path) -> bool:
-    try:
-        candidate.resolve(strict=False).relative_to(root.resolve(strict=False))
-        return True
-    except (OSError, ValueError):
-        return False
-
-def _reject_symlink_chain(root: Path, candidate: Path) -> None:
-    if not _within(root, candidate):
-        raise LearningsError("learning path escapes the configured store")
-    current = candidate
-    while current != root:
-        if current.exists() and current.is_symlink():
-            raise LearningsError("learning path contains a symlink")
-        current = current.parent
-    if root.exists() and root.is_symlink():
-        raise LearningsError("learning store must not be a symlink")
-
 def project_identity(project: Path) -> dict[str, str]:
     resolved = project.resolve()
-    manifest = _bounded_json(resolved / ".starforge" / "project.json")
+    manifest = _bounded_json(resolved / ".starforge" / "project.json", root=resolved)
     identifier = str(manifest.get("project_id") or "")
     if not SAFE_ID_RE.fullmatch(identifier):
         identifier = _stable_hash({"kind": "local-project", "root": str(resolved)})[:16]
@@ -354,6 +326,16 @@ def _write_result(record: dict[str, Any], path: Path, root: Path, opt_in: dict[s
         storage_relative_path=path.relative_to(root).as_posix(), opt_in=opt_in, created=created,
     )
 
+def _record_relative(root: Path, path: Path) -> Path:
+    try:
+        relative = path.relative_to(root)
+    except ValueError as exc:
+        raise LearningsError("record path escapes the configured store") from exc
+    if (len(relative.parts) != 2 or relative.parts[0] not in ALLOWED_CATEGORIES
+            or relative.suffix != ".md"):
+        raise LearningsError("record path does not match the learning layout")
+    return relative
+
 def write_learning(
     project: Path,
     *,
@@ -404,31 +386,21 @@ def write_learning(
     serialized = _serialize_record(record)
     category_dir = root / normalized_category
     path = category_dir / f"{_slug(normalized_text['title'], fallback='learning')}.md"
-    _reject_symlink_chain(root, category_dir)
-    _reject_symlink_chain(root, path)
-    root.mkdir(parents=True, exist_ok=True)
-    _reject_symlink_chain(root, category_dir)
-    category_dir.mkdir(parents=True, exist_ok=True)
-    _reject_symlink_chain(root, path)
-    if path.exists():
-        if path.is_symlink():
-            raise LearningsError("refusing to overwrite a symlink")
-        existing = path.read_text(encoding="utf-8")
-        if existing == serialized:
+    io_root = safe_io.infer_root(root)
+    try:
+        existing, _digest, _size = safe_io.read_snapshot(
+            io_root, path, max_bytes=MAX_RECORD_BYTES)
+    except FileNotFoundError:
+        try:
+            safe_io.create_text_exclusive(io_root, path, serialized)
+        except OSError as exc:
+            raise LearningsError(f"learning path cannot be created safely: {exc}") from exc
+    except OSError as exc:
+        raise LearningsError(f"learning path cannot be read safely: {exc}") from exc
+    else:
+        if existing == serialized.encode("utf-8"):
             return _write_result(record, path, root, opt_in, created=False)
         raise LearningsError("learning id collision")
-    fd, temporary_name = tempfile.mkstemp(prefix=".learning-", suffix=".tmp", dir=str(category_dir))
-    temporary = Path(temporary_name)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(serialized)
-            handle.flush()
-            os.fsync(handle.fileno())
-        _reject_symlink_chain(root, path)
-        os.replace(temporary, path)
-    finally:
-        if temporary.exists():
-            temporary.unlink()
     return _write_result(record, path, root, opt_in, created=True)
 
 def _keyword_terms(text: str) -> set[str]:
@@ -472,10 +444,15 @@ def read_digest(
         environ=environ,
     )
     report = policy_mapping("learning_digest", enabled=bool(root is not None), opt_in=opt_in, limit=bounded_limit)
-    if root is None or bounded_limit == 0 or not root.exists():
+    if root is None or bounded_limit == 0:
         return report
-    if not root.is_dir():
+    io_root = safe_io.infer_root(root)
+    try:
+        store_exists = safe_io.directory_exists(io_root, root)
+    except OSError:
         report.update(enabled=False, opt_in={**opt_in, "enabled": False, "reason": "store-not-directory"})
+        return report
+    if not store_exists:
         return report
     current_time = now or dt.datetime.now(dt.timezone.utc)
     try:
@@ -486,12 +463,10 @@ def read_digest(
     for path in candidates:
         report["records_scanned"] += 1
         try:
-            _reject_symlink_chain(root, path)
-            if path.is_symlink() or not path.is_file():
-                raise LearningsError("record path is unsafe")
-            if path.stat().st_size > MAX_RECORD_BYTES:
-                raise LearningsError("record exceeds the size limit")
-            record = _parse_record(path.read_text(encoding="utf-8"), now=current_time)
+            relative = _record_relative(root, path)
+            content, _digest, _size = safe_io.read_snapshot(
+                io_root, path, max_bytes=MAX_RECORD_BYTES)
+            record = _parse_record(content.decode("utf-8"), now=current_time)
         except (LearningsError, OSError, UnicodeError) as exc:
             reason = str(exc) or "invalid record"
             report["records_rejected"] += 1
@@ -503,7 +478,7 @@ def read_digest(
             continue
         item = policy_mapping(
             "learning_digest_item", **{field: record[field] for field in ("id", "title", "rule", "detail", "category", "confidence", "triggers", "timestamp", "producer", "source_project", "source_hash", "provenance")},
-            matched_triggers=matched, score=(score := len(matched)), storage_relative_path=path.relative_to(root).as_posix(),
+            matched_triggers=matched, score=(score := len(matched)), storage_relative_path=relative.as_posix(),
         )
         scored.append((score, str(record["title"]).casefold(), str(record["id"]), item))
     scored.sort(key=lambda item: (-item[0], item[1], item[2]))

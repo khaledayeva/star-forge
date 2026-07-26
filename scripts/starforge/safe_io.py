@@ -135,6 +135,24 @@ def atomic_write_bytes(root: str | Path, path: str | Path, data: bytes) -> None:
         os.close(parent)
 def atomic_write_text(root: str | Path, path: str | Path, text: str) -> None:
     atomic_write_bytes(root, path, text.encode("utf-8"))
+def create_bytes_exclusive(root: str | Path, path: str | Path, data: bytes) -> None:
+    """Create one regular file without following or replacing any entry."""
+    parent, name = _parent_fd(root, path, True)
+    descriptor = -1
+    try:
+        descriptor = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _FILE_FLAGS,
+                             0o600, dir_fd=parent)
+        _write_all(descriptor, data)
+        os.fsync(descriptor)
+        os.close(descriptor)
+        descriptor = -1
+        os.fsync(parent)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        os.close(parent)
+def create_text_exclusive(root: str | Path, path: str | Path, text: str) -> None:
+    create_bytes_exclusive(root, path, text.encode("utf-8"))
 def atomic_create_bundle(root: str | Path, path: str | Path, *,
                          directories: Sequence[str], files: Mapping[str, str]) -> None:
     parent, name = _parent_fd(root, path, True)
@@ -248,6 +266,16 @@ def read_bytes(root: str | Path, path: str | Path, *, limit: int | None = None) 
     return _read(root, path, limit=limit, capture_limit=None)[0]
 def read_text(root: str | Path, path: str | Path) -> str:
     return read_bytes(root, path).decode("utf-8")
+def read_snapshot(root: str | Path, path: str | Path, *,
+                  max_bytes: int | None = None) -> tuple[bytes, str, int]:
+    """Capture, hash, and size accepted bytes from one regular descriptor."""
+    if max_bytes is not None and max_bytes < 0:
+        raise ValueError("max_bytes must be non-negative")
+    limit = None if max_bytes is None else max_bytes + 1
+    content, digest, size = _read(root, path, limit=limit, capture_limit=None)
+    if max_bytes is not None and size > max_bytes:
+        raise SafeIOError(f"confined source exceeds {max_bytes} bytes")
+    return content, digest, size
 def digest_size(root: str | Path, path: str | Path) -> tuple[str, int]:
     _content, digest, size = _read(root, path, limit=None, capture_limit=0)
     return digest, size

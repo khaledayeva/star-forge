@@ -6,16 +6,18 @@ import json
 import re
 import urllib.parse
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 from live_collectors import browser_safety
 from live_collectors import common as live_common
 from live_collectors import preview as preview_collector
+from . import safe_io
 from .policy_data import mapping as policy_mapping, value as _policy_value
-from .runtime_support import BLOCKING_SEVERITIES, SERVER_LEASE, artifact_entry, dirty_paths_missing_from_source_snapshot, file_sha256, git_head, now_utc, read_text, redact, relative_to_project, tree_clean_for_commit_binding
+from .runtime_support import BLOCKING_SEVERITIES, SERVER_LEASE, artifact_entry, dirty_paths_missing_from_source_snapshot, file_sha256, git_head, now_utc, redact, relative_to_project, tree_clean_for_commit_binding
 from .runtime_project import ensure_state_dirs, resolve_project, safe_release_snapshot, try_source_hash
 from .runtime_store import write_run_record
 
 PREVIEW_POLICY = _policy_value("runtime_preview.POLICY")
+MAX_JSON_ARTIFACT_BYTES = 16 * 1024 * 1024
 
 def live_problem(message: str, *, severity: str = "high", rule: str = "live-proof", path: str = "") -> dict[str, Any]:
     return {"severity": severity, "rule": rule, "message": message} | ({"path": path} if path else {})
@@ -61,9 +63,6 @@ def task_from_scoped_live_path(project: Path, path: Path, collector: str | None)
     parts = scoped_live_path_parts(project, path, collector)
     return parts[2] if parts else None
 
-def json_load_path(path: Path) -> Any:
-    return json.loads(read_text(path))
-
 def validate_artifact_arg(
     project: Path,
     raw_path: str | None,
@@ -94,21 +93,27 @@ def validate_artifact_arg(
         f"{label} must be under .starforge/live/{live_common.sanitize_segment(task or 'task')}/{live_common.sanitize_segment(collector or 'collector')}/",
         rule="artifact-scope", path=rel,
     )
-    if not path.exists():
-        problems.append(live_problem(f"{label} does not exist", rule="artifact-missing", path=rel))
-        return {"kind": label, "path": rel, "exists": False}, None
     if require_dir:
+        exists = path.exists()
         flag_live_problem(problems, not path.is_dir(), f"{label} must be a directory", rule="artifact-shape", path=rel)
-        return {"kind": label, "path": rel, "exists": path.exists(), "directory": path.is_dir()}, None
-    entry = artifact_entry(project, path, kind="screenshot" if require_image else label)
+        return {"kind": label, "path": rel, "exists": exists, "directory": path.is_dir()}, None
     payload = None
+    entry = {"kind": label, "path": rel, "exists": False}
     if require_json:
         try:
-            payload = json_load_path(path)
+            content, digest, byte_count = safe_io.read_snapshot(
+                project, path, max_bytes=MAX_JSON_ARTIFACT_BYTES)
+            entry.update(exists=True, sha256=digest, bytes=byte_count)
+            payload = json.loads(content)
+        except FileNotFoundError:
+            problems.append(live_problem(f"{label} does not exist", rule="artifact-missing", path=rel))
+            return {"kind": label, "path": rel, "exists": False}, None
         except Exception as exc:
             problems.append(live_problem(f"{label} is malformed JSON: {exc}", rule="artifact-json", path=rel))
         else:
             flag_live_problem(problems, require_object and not isinstance(payload, dict), f"{label} must be a JSON object", rule="artifact-shape", path=rel)
+    else:
+        entry = artifact_entry(project, path, kind="screenshot" if require_image else label)
     flag_live_problem(problems, require_image and not entry.get("valid_image"), f"{label} is not a decodable PNG/JPEG image", rule="artifact-image", path=rel)
     return entry, payload
 
@@ -204,27 +209,33 @@ def require_raw_hash_for_artifact(
     *,
     label: str,
     rule: str = "artifact-hash",
+    attested_entry: Mapping[str, Any] | None = None,
 ) -> str:
     rel = live_rel(project, path)
-    actual = ""
+    actual = str(attested_entry.get("sha256") or "") if attested_entry else ""
     record = manifest_artifact_record_for_path(project, manifest, path)
     if record is None:
         problems.append(live_problem(f"{label} must be recorded in manifest artifacts", rule=rule, path=rel))
-    elif path.exists() and path.is_file():
-        actual = file_sha256(path)
+    else:
+        if not actual:
+            try:
+                actual = file_sha256(path)
+            except OSError:
+                actual = ""
         record_hash = str(record.get("sha256") or "")
         if not record_hash:
             problems.append(live_problem(f"{label} manifest artifact is missing sha256", rule=rule, path=rel))
-        elif actual != record_hash:
+        elif actual and actual != record_hash:
             problems.append(live_problem(f"{label} manifest artifact sha256 does not match current bytes", rule=rule, path=rel))
     expected = manifest_raw_hash_for_path(project, manifest, path)
     if not expected:
         problems.append(live_problem(f"{label} must be recorded in raw_artifact_hashes", rule=rule, path=rel))
         return ""
-    if not path.exists() or not path.is_file():
-        return expected
     if not actual:
-        actual = file_sha256(path)
+        try:
+            actual = file_sha256(path)
+        except OSError:
+            return expected
     if actual != expected:
         problems.append(live_problem(f"{label} raw artifact hash does not match current bytes", rule=rule, path=rel))
     return actual
@@ -271,7 +282,9 @@ def validate_manifest_bound_artifact_arg(
         except ValueError as exc:
             problems.append(live_problem(f"{label} path is unsafe: {exc}", rule="artifact-path", path=str(entry.get("path") or "")))
         else:
-            require_raw_hash_for_artifact(project, manifest, path, problems, label=label, rule=raw_hash_rule)
+            require_raw_hash_for_artifact(
+                project, manifest, path, problems, label=label,
+                rule=raw_hash_rule, attested_entry=entry)
     return entry, payload
 
 def validate_manifest_artifact_scopes(
@@ -318,11 +331,13 @@ def load_and_validate_live_manifest(
         scope_task = live_common.sanitize_segment(task or "task")
         scope_collector = live_common.sanitize_segment(collector or "collector")
         problems.append(live_problem(f"manifest must be under .starforge/live/{scope_task}/{scope_collector}/", rule="manifest-scope", path=rel))
-    if not path.exists():
+    try:
+        content, _digest, _byte_count = safe_io.read_snapshot(
+            project, path, max_bytes=MAX_JSON_ARTIFACT_BYTES)
+        payload = json.loads(content)
+    except FileNotFoundError:
         problems.append(live_problem("manifest does not exist", rule="manifest-missing", path=rel))
         return None, path
-    try:
-        payload = json_load_path(path)
     except Exception as exc:
         problems.append(live_problem(f"manifest is malformed JSON: {exc}", rule="manifest-json", path=rel))
         return None, path

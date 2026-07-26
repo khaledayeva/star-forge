@@ -96,7 +96,7 @@ class OptInTests(unittest.TestCase):
                             source_hash=SOURCE_HASH,
                         )
 
-    def test_project_manifest_can_opt_in_to_read_and_write_separately(self) -> None:
+    def test_project_manifest_cannot_authorize_global_reads_or_writes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as store_tmp:
             project = Path(tmp)
             store = Path(store_tmp)
@@ -130,10 +130,9 @@ class OptInTests(unittest.TestCase):
                     write_status = learnings.opt_in_status(
                         project, action="write"
                     )
-                    self.assertEqual(
-                        read_status["reason"], "project-manifest"
-                    )
+                    self.assertFalse(read_status["enabled"])
                     self.assertFalse(write_status["enabled"])
+                    self.assertEqual(read_status["reason"], "disabled")
                     with self.assertRaises(learnings.LearningsError):
                         learnings.write_learning(
                             project,
@@ -142,6 +141,16 @@ class OptInTests(unittest.TestCase):
                             triggers=["py"],
                             source_hash=SOURCE_HASH,
                         )
+                    result = learnings.write_learning(
+                        project,
+                        title="Explicitly authorized title",
+                        rule="Verify the result independently",
+                        triggers=["py"],
+                        source_hash=SOURCE_HASH,
+                        explicit_opt_in=True,
+                    )
+                    self.assertEqual(
+                        result["opt_in"]["reason"], "explicit-action")
 
     def test_configured_isolated_store_is_explicit_user_opt_in(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as store_tmp:
@@ -343,6 +352,83 @@ class SchemaAndRedactionTests(unittest.TestCase):
                         triggers=["py"],
                         source_hash=SOURCE_HASH,
                     )
+
+    def test_write_rejects_a_swapped_category_parent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as store_tmp, tempfile.TemporaryDirectory() as outside_tmp:
+            project, store, outside = Path(tmp), Path(store_tmp), Path(outside_tmp)
+            category = store / "verification"
+            category.mkdir()
+            detached = store / "detached-verification"
+            original = learnings.safe_io.create_text_exclusive
+            swapped = False
+
+            def swap_parent(root: Path, path: Path, text: str) -> None:
+                nonlocal swapped
+                if not swapped:
+                    category.rename(detached)
+                    category.symlink_to(outside, target_is_directory=True)
+                    swapped = True
+                original(root, path, text)
+
+            with mock.patch.dict(
+                    os.environ, {learnings.HOME_ENV: str(store)}, clear=False):
+                with mock.patch.object(
+                        learnings.safe_io, "create_text_exclusive",
+                        side_effect=swap_parent):
+                    with self.assertRaises(learnings.LearningsError):
+                        learnings.write_learning(
+                            project,
+                            title="Swap resistant record",
+                            rule="Verify the result independently",
+                            triggers=["py"],
+                            category="verification",
+                            source_hash=SOURCE_HASH,
+                        )
+            self.assertEqual(list(outside.iterdir()), [])
+
+    def test_read_rejects_a_swapped_category_parent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as store_tmp, tempfile.TemporaryDirectory() as outside_tmp:
+            project, store, outside = Path(tmp), Path(store_tmp), Path(outside_tmp)
+            write_learning(project, store, title="Swap read record")
+            write_learning(
+                project, outside, title="Swap read record",
+                rule="Use attacker selected data")
+            category = store / "verification"
+            detached = store / "detached-verification"
+            original = learnings.safe_io.read_snapshot
+            swapped = False
+
+            def swap_parent(
+                    root: Path, path: Path, *,
+                    max_bytes: int | None = None) -> tuple[bytes, str, int]:
+                nonlocal swapped
+                if not swapped:
+                    category.rename(detached)
+                    category.symlink_to(
+                        outside / "verification", target_is_directory=True)
+                    swapped = True
+                return original(root, path, max_bytes=max_bytes)
+
+            with mock.patch.object(
+                    learnings.safe_io, "read_snapshot",
+                    side_effect=swap_parent):
+                report = read_learning(project, store)
+            self.assertEqual(report["items"], [])
+            self.assertEqual(report["records_rejected"], 1)
+
+    def test_discovered_path_outside_store_is_rejected_before_read(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as store_tmp, tempfile.TemporaryDirectory() as outside_tmp:
+            project, store, outside = Path(tmp), Path(store_tmp), Path(outside_tmp)
+            store.mkdir(exist_ok=True)
+            record = Path(write_learning(
+                project, outside, title="Outside record")["path"])
+            with mock.patch.object(Path, "rglob", return_value=[record]):
+                with mock.patch.object(
+                        learnings.safe_io, "read_snapshot",
+                        side_effect=AssertionError("outside record was read")):
+                    report = read_learning(project, store)
+            self.assertEqual(report["items"], [])
+            self.assertEqual(report["records_rejected"], 1)
 
 
 class DigestAndIntegrationTests(unittest.TestCase):

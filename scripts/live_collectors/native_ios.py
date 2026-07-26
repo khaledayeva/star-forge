@@ -1,40 +1,32 @@
 #!/usr/bin/env python3
 """Normalize agent-exported XcodeBuildMCP iOS evidence for Star Forge.
-
 This adapter does not call Xcode, simctl, xcrun, or any local shell fallback.
 It accepts an MCP transcript and local artifacts produced by an agent-mediated
 XcodeBuildMCP workflow, writes task-scoped evidence, and prints the strict
 native iOS proof command.
 """
-
 from __future__ import annotations
-
 import argparse
 import json
 import re
-import shutil
 import sys
 from functools import partial
 from pathlib import Path
 from typing import Any, Mapping, Sequence
-
 SCRIPTS_ROOT = Path(__file__).resolve().parent.parent
 if str(SCRIPTS_ROOT) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_ROOT))
-
 from live_collectors import common, native_argv, native_transcript as native
 from live_collectors.native_transcript import *  # noqa: F401,F403
 from live_collectors.policy_data import policy_dict, policy_list, policy_set, policy_tuple
 from live_collectors.provider_engine import candidate_text, first_candidate, render_descriptor
-
-
+from starforge import safe_io
 RESULT_SCHEMA = "star-forge.native-ios.result.v1"
 SESSION_SCHEMA = "star-forge.native-ios.session-defaults.v1"
 TRANSCRIPT_SCHEMA = "star-forge.native-ios.mcp-transcript.v1"
 APP_BUNDLE_SCHEMA = "star-forge.native-ios.app-bundle.v1"
 PRIMARY_PROVIDER = "xcodebuildmcp"
 SIMULATOR_BROWSER_PROVIDER = "ios-simulator-browser"
-
 SESSION_TOOLS = policy_set("native_ios", "SESSION_TOOLS")
 BUILD_TOOLS = policy_set("native_ios", "BUILD_TOOLS")
 LAUNCH_TOOLS = policy_set("native_ios", "LAUNCH_TOOLS")
@@ -57,6 +49,8 @@ OUTPUT_TEMPLATE = policy_dict("native_ios", "OUTPUT_TEMPLATE")
 PARSER_ARGUMENTS = policy_list("native_ios", "PARSER_ARGUMENTS")
 PROVENANCE_TEMPLATE = policy_dict("native_ios", "PROVENANCE_TEMPLATE")
 RESULT_FALLBACK_TEMPLATE = policy_dict("native_ios", "RESULT_FALLBACK_TEMPLATE")
+MAX_JSON_INPUT_BYTES = 16 * 1024 * 1024
+MAX_IMAGE_INPUT_BYTES = 64 * 1024 * 1024
 RESULT_RUNTIME_PATHS = policy_tuple("native_ios", "RESULT_RUNTIME_PATHS")
 RESULT_UDID_PATHS = policy_tuple("native_ios", "RESULT_UDID_PATHS")
 SESSION_INFO_TEMPLATE = policy_dict("native_ios", "SESSION_INFO_TEMPLATE")
@@ -68,30 +62,20 @@ TRANSCRIPT_SUMMARY_TEMPLATE = policy_dict("native_ios", "TRANSCRIPT_SUMMARY_TEMP
 TRANSCRIPT_CATEGORY_REQUIREMENTS = policy_list("native_ios", "TRANSCRIPT_CATEGORY_REQUIREMENTS")
 UI_SNAPSHOT_MARKERS = policy_tuple("native_ios", "UI_SNAPSHOT_MARKERS")
 MappingLike = dict[str, Any]
-
-
 descriptor = render_descriptor
 rel = common.project_relative
-
-
 def problem(message: str, *, rule: str, path: str = "", severity: str = "high", blocking: bool = True) -> MappingLike:
     payload = common.blocking_problem(message, rule=rule, path=path, severity=severity)
     payload["blocking"] = blocking
     return payload
-
-
 write_json = native.write_json
 write_text = native.write_text
-
-
 def input_display_path(project: Path, path: Path | str) -> str:
     candidate = Path(str(path))
     try:
         return rel(project, candidate.resolve())
     except OSError:
         return common.sanitize_external_path(candidate)
-
-
 def resolve_input_path(project: Path, raw_path: str, label: str, problems: list[MappingLike], *, rule: str) -> Path | None:
     raw = str(raw_path or "").strip()
     if not raw:
@@ -103,20 +87,23 @@ def resolve_input_path(project: Path, raw_path: str, label: str, problems: list[
     if raw.startswith("~"):
         problems.append(problem(f"{label} path must not be home-relative", rule="native-ios-input-path", path="[home]"))
         return None
+    candidate = Path(raw)
     try:
-        resolved = common.safe_project_path(project, raw, must_exist=False)
+        project_root = project.resolve()
+        resolved = (candidate if candidate.is_absolute() else project_root / candidate).absolute()
+        resolved.relative_to(project_root)
     except ValueError:
         problems.append(problem(f"{label} path must stay inside the project", rule=rule, path=common.sanitize_external_path(Path(raw))))
         return None
-    if not resolved.exists():
+    try:
+        safe_io.read_bytes(project, resolved, limit=0)
+    except FileNotFoundError:
         problems.append(problem(f"{label} does not exist", rule=rule, path=input_display_path(project, resolved)))
         return None
-    if not resolved.is_file():
-        problems.append(problem(f"{label} must be a file", rule=rule, path=input_display_path(project, resolved)))
+    except OSError as exc:
+        problems.append(problem(f"{label} must be a safe regular file: {exc}", rule=rule, path=input_display_path(project, resolved)))
         return None
     return resolved
-
-
 def copy_json_artifact(
     project: Path,
     out_dir: Path,
@@ -144,7 +131,9 @@ def copy_json_artifact(
         )
     else:
         try:
-            payload = json.loads(src.read_text(encoding="utf-8"))
+            content, _digest, _size = safe_io.read_snapshot(
+                project, src, max_bytes=MAX_JSON_INPUT_BYTES)
+            payload = json.loads(content)
         except Exception as exc:
             problems.append(problem(f"{label} is malformed JSON: {exc}", rule="native-ios-json", path=input_display_path(project, src)))
             payload = {
@@ -156,8 +145,6 @@ def copy_json_artifact(
             payload = descriptor(RESULT_FALLBACK_TEMPLATE, kind=label, status="wrong_shape")
     write_json(dest, payload)
     return dest, payload
-
-
 def copy_image_artifact(
     project: Path,
     out_dir: Path,
@@ -170,29 +157,34 @@ def copy_image_artifact(
     dest = out_dir / "screenshot.png"
     if src is None:
         return None
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    if src.resolve() != dest.resolve():
-        shutil.copyfile(src, dest)
+    try:
+        content, _digest, _size = safe_io.read_snapshot(
+            project, src, max_bytes=MAX_IMAGE_INPUT_BYTES)
+        safe_io.atomic_write_bytes(project, dest, content)
+    except OSError as exc:
+        problems.append(problem(f"screenshot cannot be copied safely: {exc}", rule="native-ios-screenshot", path=input_display_path(project, src)))
+        return None
     record = common.artifact_record(project, dest, kind="screenshot", must_exist=True)
     if not record.get("valid_image") or int(record.get("bytes") or 0) <= 0:
         problems.append(problem("screenshot must be a decodable non-empty PNG or JPEG", rule="native-ios-screenshot", path=record.get("path", rel(project, dest))))
     return dest
-
-
 def copy_log_artifact(project: Path, out_dir: Path, raw_path: str, max_bytes: int, problems: list[MappingLike]) -> Path | None:
     if not str(raw_path or "").strip():
         return None
     src = resolve_input_path(project, raw_path, "log", problems, rule="native-ios-log")
     if src is None:
         return None
-    data = src.read_bytes()
-    truncated = len(data) > max_bytes
-    text = data[:max_bytes].decode("utf-8", "replace")
+    bounded = max(0, max_bytes)
+    try:
+        data = safe_io.read_bytes(project, src, limit=bounded + 1)
+    except OSError as exc:
+        problems.append(problem(f"log cannot be read safely: {exc}", rule="native-ios-log", path=input_display_path(project, src)))
+        return None
+    truncated = len(data) > bounded
+    text = data[:bounded].decode("utf-8", "replace")
     if truncated:
         text += "\n[TRUNCATED_BY_STAR_FORGE_NATIVE_IOS_ADAPTER]\n"
     return write_text(out_dir / "log.txt", text)
-
-
 def normalize_tool_name(raw: Any) -> str:
     cleaned = str(raw or "").strip().replace("-", "_").replace(".", "_")
     lowered = re.sub(r"[^A-Za-z0-9_]+", "_", cleaned).strip("_").lower()
@@ -200,13 +192,9 @@ def normalize_tool_name(raw: Any) -> str:
         if marker in lowered:
             lowered = lowered.split(marker, 1)[1]
     return lowered
-
-
 def raw_call_items(payload: Any) -> list[Any]:
     value = first_candidate(payload, CALL_LIST_KEYS) if isinstance(payload, dict) else None
     return payload if isinstance(payload, list) else value if isinstance(value, list) else []
-
-
 def normalize_call(item: Any, index: int) -> MappingLike:
     if isinstance(item, str):
         return {"index": index, "tool": normalize_tool_name(item), "raw_tool": item, "args": {}, "result": {}}
@@ -226,12 +214,8 @@ def normalize_call(item: Any, index: int) -> MappingLike:
         parallel_group=item.get("parallel_group") or item.get("batch_id"),
         type=item.get("type") or item.get("kind") or "",
     )
-
-
 def transcript_calls(payload: Any) -> list[MappingLike]:
     return [normalize_call(item, index) for index, item in enumerate(raw_call_items(payload))]
-
-
 def extract_transcript_provenance(payload: Any, args: argparse.Namespace) -> MappingLike:
     if not isinstance(payload, dict):
         return descriptor(
@@ -250,8 +234,6 @@ def extract_transcript_provenance(payload: Any, args: argparse.Namespace) -> Map
                           for key in ("mcp", "provenance"))
                       or payload.get("tool_surface") or payload.get("server") or payload.get("exported_by")),
     )
-
-
 def merge_manifest_provenance(provenance: MappingLike, args: argparse.Namespace) -> MappingLike:
     manifest_provenance = getattr(args, "manifest_mcp_provenance", None)
     if provenance.get("explicit") or not isinstance(manifest_provenance, dict):
@@ -265,15 +247,11 @@ def merge_manifest_provenance(provenance: MappingLike, args: argparse.Namespace)
         explicit=True,
     )
     return {**merged, "source": "manifest-summary"}
-
-
 def transcript_source_hash(payload: Any) -> str:
     return candidate_text(
         payload, ("source_hash", "source_hash_before", "source_hash_after",
                   "provenance.source_hash")
     )
-
-
 def extract_capabilities(payload: Any) -> set[str] | None:
     if not isinstance(payload, dict):
         return None
@@ -286,8 +264,6 @@ def extract_capabilities(payload: Any) -> set[str] | None:
         {normalize_tool_name(item) for item in raw if normalize_tool_name(item)}
         if isinstance(raw, list) else set()
     )
-
-
 def mcp_marked_unavailable(payload: Any) -> bool:
     if not isinstance(payload, dict):
         return False
@@ -299,16 +275,12 @@ def mcp_marked_unavailable(payload: Any) -> bool:
         "xcodebuild" in str(item).lower() or "mcp" in str(item).lower()
         for item in unavailable
     )
-
-
 def extract_session_defaults(transcript: Any) -> MappingLike | None:
     return next((
         dict(value) for call in transcript_calls(transcript)
         if call.get("tool") in SESSION_TOOLS for field in ("result", "args")
         if isinstance((value := call.get(field)), dict) and value
     ), None)
-
-
 def nested_get(payload: Mapping[str, Any], keys: Sequence[str]) -> str:
     return next((
         candidate.strip() for key in keys
@@ -318,16 +290,10 @@ def nested_get(payload: Mapping[str, Any], keys: Sequence[str]) -> str:
         )
         if isinstance(candidate, str) and candidate.strip()
     ), "")
-
-
 def session_field(payload: Any, field: str) -> str:
     return nested_get(payload, SESSION_FIELD_KEYS[field]) if isinstance(payload, dict) else ""
-
-
 for _field in ("scheme", "simulator", "runtime", "udid"):
     globals()[f"session_{_field}"] = partial(session_field, field=_field)
-
-
 def session_needs_discovery(payload: Any) -> bool:
     if not isinstance(payload, dict):
         return True
@@ -336,8 +302,6 @@ def session_needs_discovery(payload: Any) -> bool:
         or isinstance(payload.get("missing"), list) and payload.get("missing")
         or not (session_scheme(payload) and session_simulator(payload))
     )
-
-
 def bool_success(payload: Any) -> bool:
     if not isinstance(payload, dict):
         return False
@@ -347,8 +311,6 @@ def bool_success(payload: Any) -> bool:
     return candidate_text(payload, ("status", "conclusion")).lower() in {
         "success", "succeeded", "passed", "pass", "ok"
     }
-
-
 def result_failure(payload: Any) -> str | None:
     if not isinstance(payload, dict):
         return "result must be a JSON object"
@@ -372,17 +334,11 @@ def result_failure(payload: Any) -> str | None:
     if not bool_success(payload):
         return "success was not recorded"
     return None
-
-
 result_runtime = partial(candidate_text, paths=RESULT_RUNTIME_PATHS)
 result_udid = partial(candidate_text, paths=RESULT_UDID_PATHS)
-
-
 def result_provenance(payload: Any) -> MappingLike | None:
     provenance = first_candidate(payload, ("mcp_provenance", "provenance"))
     return dict(provenance) if isinstance(provenance, dict) else None
-
-
 def validate_result_artifact_contract(
     label: str,
     expected_kind: str,
@@ -422,14 +378,10 @@ def validate_result_artifact_contract(
             (server != "XcodeBuildMCP", f"{label} provenance server must be XcodeBuildMCP", "native-ios-result"),
         ]
     problems.extend(problem(message, rule=rule, path=path) for failed, message, rule in checks if failed)
-
-
 def validate_result(label: str, payload: Any, problems: list[MappingLike], path: Path, project: Path) -> None:
     failure = result_failure(payload)
     if failure:
         problems.append(problem(f"{label} failed: {failure}", rule=f"native-ios-{label}", path=rel(project, path)))
-
-
 def validate_ui_snapshot(payload: Any, path: Path, project: Path, problems: list[MappingLike]) -> bool:
     if not isinstance(payload, dict):
         problems.append(problem("UI snapshot must be a JSON object", rule="native-ios-ui-snapshot", path=rel(project, path)))
@@ -438,8 +390,6 @@ def validate_ui_snapshot(payload: Any, path: Path, project: Path, problems: list
         problems.append(problem("UI snapshot must contain inspectable UI structure", rule="native-ios-ui-snapshot", path=rel(project, path)))
         return False
     return True
-
-
 def app_bundle_hash(project: Path, raw_path: str, problems: list[MappingLike]) -> MappingLike:
     if not str(raw_path or "").strip():
         return {"available": False}
@@ -460,8 +410,6 @@ def app_bundle_hash(project: Path, raw_path: str, problems: list[MappingLike]) -
         "kind": "directory",
         "files": sum(1 for path in bundle.glob("**/*") if path.is_file() and not path.is_symlink()),
     }
-
-
 def validate_transcript(
     transcript: Any,
     session: Any,
@@ -490,13 +438,11 @@ def validate_transcript(
     if not calls:
         unavailable.append("mcp-transcript")
         problems.append(problem("MCP transcript is missing tool calls", rule="native-ios-mcp-transcript"))
-
     source = transcript_source_hash(transcript) or str(getattr(args, "manifest_source_hash", "") or "")
     if not source:
         problems.append(problem("MCP transcript requires a source hash bound to the current project", rule="native-ios-source"))
     elif source != current_source_hash:
         problems.append(problem("MCP transcript source hash does not match current source", rule="native-ios-source"))
-
     capabilities = extract_capabilities(transcript)
     if capabilities is not None:
         required = SESSION_TOOLS | {
@@ -507,14 +453,12 @@ def validate_transcript(
         if missing:
             unavailable.extend(f"xcodebuildmcp:{name}" for name in missing)
             problems.append(problem("XcodeBuildMCP transcript is missing required capabilities: " + ", ".join(missing), rule="native-ios-mcp-capability"))
-
     first_session = min(
         (int(call["index"]) for call in calls if call.get("tool") in SESSION_TOOLS),
         default=None,
     )
     if first_session is None:
         problems.append(problem("MCP transcript must include session_show_defaults", rule="native-ios-session-defaults"))
-
     for call in calls:
         tool = str(call.get("tool") or "")
         idx = int(call.get("index") or 0)
@@ -538,7 +482,6 @@ def validate_transcript(
         call_sim = candidate_text(call_args, ("simulator", "device", "destination"))
         if call_sim and simulator and simulator not in call_sim and call_sim not in simulator:
             problems.append(problem("transcript tool call used a different simulator than the requested simulator", rule="native-ios-simulator"))
-
     categories = {
         category: any(call.get("tool") in tools for call in calls)
         for category, tools in CATEGORY_TOOLS.items()
@@ -555,8 +498,6 @@ def validate_transcript(
         categories=categories, capabilities_declared=capabilities is not None,
     )
     return summary, problems, sorted(set(unavailable))
-
-
 def validate_session_defaults(session: Any, *, scheme: str, simulator: str, runtime: str, udid: str, problems: list[MappingLike]) -> MappingLike:
     if not isinstance(session, dict):
         problems.append(problem("session-defaults.json must be a JSON object", rule="native-ios-session-defaults"))
@@ -575,8 +516,6 @@ def validate_session_defaults(session: Any, *, scheme: str, simulator: str, runt
         SESSION_INFO_TEMPLATE, scheme=found_scheme, simulator=found_simulator,
         runtime=found_runtime, udid=found_udid,
     )
-
-
 def collect(args: argparse.Namespace, command_argv: Sequence[str]) -> tuple[int, MappingLike]:
     project = common.assert_collector_project_safe(Path(args.project))
     out_dir = common.live_collector_dir(project, args.task, NATIVE_FINALIZE["collector"])
@@ -584,7 +523,6 @@ def collect(args: argparse.Namespace, command_argv: Sequence[str]) -> tuple[int,
     runtime_hash = common.compute_runtime_asset_hash(project)
     problems: list[MappingLike] = []
     unavailable: list[str] = []
-
     scheme = str(args.scheme or "").strip()
     simulator = str(args.simulator or "").strip()
     app_identity = str(args.app_identity or args.bundle_id or "").strip()
@@ -594,7 +532,6 @@ def collect(args: argparse.Namespace, command_argv: Sequence[str]) -> tuple[int,
         browser_conflict=False, browser_artifacts_missing=False,
     )
     problems.extend(problem(message, rule=rule) for failed, message, rule in collect_checks if failed)
-
     transcript_path, transcript_payload = copy_json_artifact(
         project,
         out_dir,
@@ -607,7 +544,6 @@ def collect(args: argparse.Namespace, command_argv: Sequence[str]) -> tuple[int,
     )
     if not str(args.mcp_transcript or "").strip():
         unavailable.append("mcp-transcript")
-
     derived_session = extract_session_defaults(transcript_payload)
     session_fallback = derived_session or {"schema": SESSION_SCHEMA, "status": "missing"}
     session_path, session_payload = copy_json_artifact(
@@ -621,7 +557,6 @@ def collect(args: argparse.Namespace, command_argv: Sequence[str]) -> tuple[int,
         missing_rule="native-ios-session-defaults",
         fallback=session_fallback,
     )
-
     artifacts: dict[str, Path] = {
         "session_defaults": session_path, "mcp_transcript": transcript_path,
     }
@@ -642,11 +577,9 @@ def collect(args: argparse.Namespace, command_argv: Sequence[str]) -> tuple[int,
     build_path, build_payload = result_artifacts["build"]
     launch_path, launch_payload = result_artifacts["launch"]
     test_path, test_payload = result_artifacts["test"]
-
     screenshot_path = copy_image_artifact(project, out_dir, args.screenshot, problems)
     if screenshot_path is not None:
         artifacts["screenshot"] = screenshot_path
-
     ui_snapshot_payload: Any | None = None
     if str(args.ui_snapshot or "").strip():
         ui_snapshot_path, ui_snapshot_payload = copy_json_artifact(
@@ -660,11 +593,9 @@ def collect(args: argparse.Namespace, command_argv: Sequence[str]) -> tuple[int,
         )
         artifacts["ui_snapshot"] = ui_snapshot_path
         validate_ui_snapshot(ui_snapshot_payload, ui_snapshot_path, project, problems)
-
     log_path = copy_log_artifact(project, out_dir, args.log, int(args.max_log_bytes), problems)
     if log_path is not None:
         artifacts["log"] = log_path
-
     session_info = validate_session_defaults(
         session_payload,
         scheme=scheme,
@@ -695,7 +626,6 @@ def collect(args: argparse.Namespace, command_argv: Sequence[str]) -> tuple[int,
     problems.extend(problem(message, rule=rule) for failed, message, rule in collect_checks if failed)
     if args.simulator_browser_unavailable:
         unavailable.append(SIMULATOR_BROWSER_PROVIDER)
-
     for expected_kind, (path, payload) in result_artifacts.items():
         validate_result_artifact_contract(
             f"{expected_kind} result",
@@ -706,11 +636,9 @@ def collect(args: argparse.Namespace, command_argv: Sequence[str]) -> tuple[int,
             expected_runtime=str(session_info.get("runtime") or ""),
             expected_udid=str(session_info.get("udid") or ""),
         )
-
     bundle_record = app_bundle_hash(project, str(args.app_bundle or ""), problems)
     bundle_path = write_json(out_dir / "app-bundle.json", {"schema": APP_BUNDLE_SCHEMA, **bundle_record})
     artifacts["app_bundle"] = bundle_path
-
     simulator_browser_status = (
         "used" if args.simulator_browser_used else
         "unavailable" if args.simulator_browser_unavailable else "availability-not-reported"
@@ -749,14 +677,10 @@ def collect(args: argparse.Namespace, command_argv: Sequence[str]) -> tuple[int,
         output_template=OUTPUT_TEMPLATE, values={"scheme": scheme, "simulator": simulator},
         record=args.record, script_path=SCRIPTS_ROOT / "star_forge.py",
     )
-
-
 def build_parser() -> argparse.ArgumentParser:
     return native.build_parser(
         "Validate and normalize agent-exported XcodeBuildMCP iOS evidence", PARSER_ARGUMENTS
     )
-
-
 def main(argv: Sequence[str] | None = None) -> int:
     raw_argv = list(argv if argv is not None else sys.argv[1:])
     args = build_parser().parse_args(raw_argv)
@@ -767,7 +691,5 @@ def main(argv: Sequence[str] | None = None) -> int:
             redacted[field] = output[field]
     print(json.dumps(redacted, indent=2, sort_keys=True))
     return code
-
-
 if __name__ == "__main__":
     raise SystemExit(main())

@@ -31,8 +31,11 @@ SPEC.loader.exec_module(star_forge)
 
 from live_collectors import browser_playwright
 from live_collectors import common as live_common
+from starforge import runtime_preview
 from starforge import runtime_records
 from starforge import runtime_review
+from starforge import runtime_security
+from starforge import runtime_support
 
 # Isolate learnings from the real home for the whole suite (item: setup detail).
 os.environ["STAR_FORGE_LEARNINGS_HOME"] = tempfile.mkdtemp(prefix="star-forge-test-learnings-")
@@ -2418,6 +2421,56 @@ def test_done_happy_path_writes_complete_proof() -> None:
             "verdict",
             "witness",
         }
+
+
+def test_git_status_failure_is_not_a_clean_commit_or_proof_binding() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        init_project(project)
+        commit_all(project)
+        original_run_git = runtime_support._run_git
+
+        def fail_status(command: str, target: Path) -> tuple[int, str, str]:
+            if command == "status":
+                return 1, "", "simulated git status failure"
+            return original_run_git(command, target)
+
+        with mock.patch.object(runtime_support, "_run_git", side_effect=fail_status):
+            head = star_forge.git_head(project)
+            assert head
+            assert runtime_support.git_status(project) == [
+                "?? <git status unavailable>"
+            ]
+            assert runtime_support.tree_clean_for_commit_binding(project) is False
+            assert not runtime_preview.deployment_bound_to_current(
+                project, {"commit_sha": head}
+            )
+            assert not runtime_security.source_binding_is_fresh(
+                project, {"commit_sha": head}
+            )
+
+
+def test_done_fails_closed_when_git_status_is_unavailable() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        build_completed_project(project)
+        original_run_git = runtime_support._run_git
+
+        def fail_status(command: str, target: Path) -> tuple[int, str, str]:
+            if command == "status":
+                return 1, "", "simulated git status failure"
+            return original_run_git(command, target)
+
+        with mock.patch.object(runtime_support, "_run_git", side_effect=fail_status):
+            assert star_forge.git_head(project)
+            code, payload = run_done(project)
+
+        assert code == 1, payload
+        assert payload["is_complete"] is False
+        assert any(
+            "<git status unavailable>" in str(problem)
+            for problem in payload["problems"]
+        )
 
 
 def test_done_requires_change_packet_for_post_proof_drift_without_run() -> None:

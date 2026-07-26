@@ -16,6 +16,7 @@ import tempfile
 import traceback
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "star_forge.py"
@@ -27,6 +28,7 @@ SPEC.loader.exec_module(star_forge)
 from live_collectors import common as live_common
 from live_collectors import browser_playwright
 from live_collectors import preview as live_preview
+from starforge import runtime_preview
 
 os.environ["STAR_FORGE_LEARNINGS_HOME"] = tempfile.mkdtemp(prefix="star-forge-live-test-learnings-")
 
@@ -2838,6 +2840,36 @@ def test_github_source_packet_requires_check_run_raw_hash() -> None:
             "--profile", "production-review", "--input", str(manifest), "--strict",
         ])
         assert_fail(code, payload, "github-live-provenance")
+
+def test_manifest_bound_json_uses_one_attested_descriptor_without_reopen() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        artifact = write_json(project / ".starforge" / "live" / "SF-1" / "security" / "proof.json", {"trusted": True})
+        rel = live_common.project_relative(project, artifact)
+        captured, digest, size = runtime_preview.safe_io.read_snapshot(project, artifact)
+        manifest = {
+            "artifacts": [{"kind": "proof", "path": rel, "sha256": digest, "bytes": size}],
+            "raw_artifact_hashes": {rel: digest},
+        }
+        real_read = runtime_preview.safe_io.read_snapshot
+        swapped = False
+        def read_then_swap(root: Path, path: Path, **kwargs: Any) -> tuple[bytes, str, int]:
+            nonlocal swapped
+            result = real_read(root, path, **kwargs)
+            if not swapped:
+                artifact.write_text('{"trusted": false, "injected": true}', encoding="utf-8")
+                swapped = True
+            return result
+        problems: list[dict[str, Any]] = []
+        with mock.patch.object(runtime_preview.safe_io, "read_snapshot", side_effect=read_then_swap), \
+                mock.patch.object(runtime_preview, "file_sha256", side_effect=AssertionError("pathname reopened")):
+            entry, payload = runtime_preview.validate_manifest_bound_artifact_arg(
+                project, artifact, "proof", problems, manifest=manifest,
+                task="SF-1", collector="security", require_json=True, require_object=True)
+        assert captured == b'{\n  "trusted": true\n}\n'
+        assert payload == {"trusted": True}
+        assert entry and entry["sha256"] == digest and entry["bytes"] == size
+        assert not problems, problems
 
 
 def main() -> int:
