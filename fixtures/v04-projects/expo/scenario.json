@@ -1,0 +1,19 @@
+{
+  "name": "expo",
+  "profile": "standard",
+  "project_class": "Expo React Native application",
+  "routing_project_class": "expo",
+  "target_platforms": "iOS and Android",
+  "delivery_target": "platform-specific",
+  "platform_target": "expo",
+  "github_requested": false,
+  "proofs": ["unit", "native-ios", "delivery"],
+  "risk_flags": ["User-facing UI", "Meaningful dependency exposure"],
+  "available_capabilities": ["official expo plugin", "expo cli", "xcodebuildmcp"],
+  "expected_routes": {
+    "expo": "expo-plugin",
+    "expo-platform-delivery": "expo-plugin"
+  },
+  "source_file": "app.json",
+  "verify_command": "python3 -m unittest discover -s tests"
+}

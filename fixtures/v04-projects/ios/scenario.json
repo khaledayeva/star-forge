@@ -1,0 +1,19 @@
+{
+  "name": "ios",
+  "profile": "standard",
+  "project_class": "native iOS application",
+  "routing_project_class": "ios",
+  "target_platforms": "iOS",
+  "delivery_target": "platform-specific",
+  "platform_target": "ios-app-store",
+  "github_requested": false,
+  "proofs": ["unit", "native-ios", "delivery"],
+  "risk_flags": ["User-facing UI", "Performance or reliability constraints"],
+  "available_capabilities": ["build ios apps", "xcodebuildmcp", "simulator browser"],
+  "expected_routes": {
+    "ios-implementation": "build-ios-apps",
+    "ios-verification": "xcodebuildmcp"
+  },
+  "source_file": "Sources/FixtureApp.swift",
+  "verify_command": "python3 -m unittest discover -s tests"
+}

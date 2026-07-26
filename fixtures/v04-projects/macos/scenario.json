@@ -1,0 +1,18 @@
+{
+  "name": "macos",
+  "profile": "standard",
+  "project_class": "native macOS desktop application",
+  "routing_project_class": "macos",
+  "target_platforms": "macOS",
+  "delivery_target": "package",
+  "platform_target": "",
+  "github_requested": false,
+  "proofs": ["unit", "native-macos", "package", "delivery"],
+  "risk_flags": ["User-facing UI", "Destructive operations"],
+  "available_capabilities": ["build macos apps", "computer use"],
+  "expected_routes": {
+    "macos-implementation": "build-macos-apps"
+  },
+  "source_file": "Sources/FixtureMacApp.swift",
+  "verify_command": "python3 -m unittest discover -s tests"
+}

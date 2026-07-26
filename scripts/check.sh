@@ -15,6 +15,7 @@ tests/test_live_native_macos.py
 tests/test_live_security_adapter.py
 tests/test_live_github_pr.py
 tests/test_live_collectors_integration.py
+tests/test_v04_e2e.py
 "
 
 PYTHON_FILES="
@@ -27,6 +28,7 @@ scripts/live_collectors/native_ios.py
 scripts/live_collectors/native_macos.py
 scripts/live_collectors/security_adapter.py
 scripts/live_collectors/github_pr.py
+tests/test_v04_e2e.py
 "
 
 python3 -m json.tool .codex-plugin/plugin.json >/dev/null

@@ -1,0 +1,16 @@
+{
+  "name": "amendment",
+  "profile": "standard",
+  "project_class": "Python CLI",
+  "routing_project_class": "cli",
+  "target_platforms": "Linux and macOS",
+  "delivery_target": "source-only",
+  "platform_target": "",
+  "github_requested": false,
+  "proofs": ["unit", "delivery"],
+  "risk_flags": [],
+  "available_capabilities": [],
+  "expected_routes": {},
+  "source_file": "src/calculator.py",
+  "verify_command": "python3 -m unittest discover -s tests"
+}

@@ -1,0 +1,20 @@
+{
+  "name": "fast-mvp",
+  "profile": "fast-mvp",
+  "project_class": "web API",
+  "routing_project_class": "web",
+  "target_platforms": "web",
+  "delivery_target": "private-repo",
+  "platform_target": "",
+  "github_requested": true,
+  "proofs": ["unit", "security", "github", "delivery"],
+  "risk_flags": ["Authentication or authorization", "User, sensitive, or regulated data", "Network access or external input"],
+  "available_capabilities": ["codex security", "github plugin", "build web apps"],
+  "expected_routes": {
+    "web-implementation": "build-web-apps",
+    "security": "codex-security",
+    "github-lifecycle": "github-plugin"
+  },
+  "source_file": "src/session_api.py",
+  "verify_command": "python3 -m unittest discover -s tests"
+}

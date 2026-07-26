@@ -1,0 +1,20 @@
+{
+  "name": "web",
+  "profile": "standard",
+  "project_class": "simple internal web dashboard",
+  "routing_project_class": "web",
+  "target_platforms": "web",
+  "delivery_target": "preview",
+  "platform_target": "",
+  "github_requested": true,
+  "proofs": ["unit", "browser", "preview", "github", "delivery"],
+  "risk_flags": ["User-facing UI", "Network access or external input"],
+  "available_capabilities": ["build web apps", "browser plugin", "sites", "github plugin"],
+  "expected_routes": {
+    "web-implementation": "build-web-apps",
+    "local-web-qa": "in-app-browser",
+    "github-lifecycle": "github-plugin"
+  },
+  "source_file": "web/index.html",
+  "verify_command": "python3 -m unittest discover -s tests"
+}
