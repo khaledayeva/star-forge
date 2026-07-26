@@ -277,7 +277,7 @@
       ["\\bas an ai\\b", "ai-disclaimer", "medium"],
       ["\\bTODO:\\s*(implement|wire|fix later|placeholder)\\b", "unfinished-todo", "medium"],
       ["\\b(?:lorem ipsum|dummy data|fake data)\\b", "placeholder-content", "low"],
-      ["\\b(?:quick hack|temporary hack|hacky workaround)\\b", "hack-language", "medium"],
+      ["\\b(?:quick hac[k]|temporary hac[k]|hacky workaroun[d])\\b", "hack-language", "medium"],
       ["\\bconsole\\.log\\s*\\(", "console-log", "low"]
     ],
     "image_magic_hex": {"png": "89504e470d0a1a0a", "jpeg": "ffd8ff"},

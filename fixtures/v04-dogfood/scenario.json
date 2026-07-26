@@ -1,0 +1,16 @@
+{
+  "name": "star-forge-v04-dogfood",
+  "profile": "standard",
+  "project_class": "Python CLI",
+  "routing_project_class": "cli",
+  "target_platforms": "Linux and macOS",
+  "delivery_target": "source-only",
+  "platform_target": "",
+  "github_requested": false,
+  "proofs": ["unit", "integration", "delivery"],
+  "risk_flags": ["Performance or reliability constraints"],
+  "available_capabilities": [],
+  "expected_routes": {},
+  "source_file": "scripts/starforge/dogfood_status.py",
+  "verify_command": "python3 -m unittest discover -s tests"
+}

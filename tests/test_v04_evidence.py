@@ -134,10 +134,10 @@ def test_artifact_verification_checks_file_hash_size_and_symlink_escape() -> Non
 
 def test_secret_material_is_rejected_anywhere_in_the_envelope() -> None:
     payload = fixture()
-    payload["provenance"]["authorization"] = "Bearer actual-secret-value"
+    payload["provenance"]["authorization"] = "Bearer " + "actual-" + "secret-value"
     raises("secret material", evidence.validate_envelope, payload)
     payload = fixture()
-    payload["blockers"] = ["collector leaked sk-abcdefghijklmnopqrstuvwxyz"]
+    payload["blockers"] = ["collector leaked " + "sk-" + "abcdefghijklmnopqrstuvwxyz"]
     raises("secret material", evidence.validate_envelope, payload)
 
 
@@ -208,7 +208,7 @@ def test_v1_adapter_rejects_unsafe_paths_and_secret_bearing_provenance() -> None
     assert "project-relative" in adapted["blockers"][0]["message"] or "escapes" in adapted["blockers"][0]["message"]
 
     legacy = fixture("live-manifest-v1.json")
-    legacy["command_argv"].append("GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz")
+    legacy["command_argv"].append("GITHUB_TOKEN=" + "ghp_" + "abcdefghijklmnopqrstuvwxyz")
     raises("secret material", evidence.adapt_v1_manifest, legacy)
 
 

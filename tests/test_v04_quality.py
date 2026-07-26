@@ -199,6 +199,52 @@ class ArchitectureDebtTests(unittest.TestCase):
             )
             self.assertIn("6 production Python lines", budget["evidence"])
 
+    def test_python_budget_counts_only_authoritative_discovered_roots(self) -> None:
+        original = quality.MAX_PRODUCTION_PYTHON_LINES
+        quality.MAX_PRODUCTION_PYTHON_LINES = 5
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                project = Path(tmp)
+                write_lines(project / "scripts" / "runtime.py", 5)
+                fixture = write_lines(
+                    project / "fixtures" / "sample-product" / "app.py",
+                    quality.MAX_RUNTIME_MODULE_LINES + 1,
+                )
+                self.assertEqual(quality.discover_source_roots(project), ("scripts",))
+                fixture_classification = quality.classify_source_path(fixture, project)
+                self.assertEqual(fixture_classification.category, "production")
+                self.assertEqual(fixture_classification.source_root, ".")
+                findings = quality.architecture_debt_findings(
+                    quality.iter_project_files(project), project
+                )
+                self.assertFalse(
+                    any(item["rule"] == "architecture-debt-python-budget" for item in findings)
+                )
+                self.assertTrue(
+                    any(
+                        item["rule"] == "architecture-debt-large-file"
+                        and item["file"] == "fixtures/sample-product/app.py"
+                        for item in findings
+                    )
+                )
+
+            with tempfile.TemporaryDirectory() as tmp:
+                project = Path(tmp)
+                write_lines(project / "go.mod", 1, "module example.test/root")
+                write_lines(project / "runtime.py", 6)
+                self.assertEqual(quality.discover_source_roots(project), (".",))
+                findings = quality.architecture_debt_findings(
+                    quality.iter_project_files(project), project
+                )
+                budget = next(
+                    item
+                    for item in findings
+                    if item["rule"] == "architecture-debt-python-budget"
+                )
+                self.assertIn("6 production Python lines", budget["evidence"])
+        finally:
+            quality.MAX_PRODUCTION_PYTHON_LINES = original
+
     def test_cycles_coupling_and_duplicate_control_plane_responsibilities(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project = Path(tmp)

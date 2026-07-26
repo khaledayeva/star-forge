@@ -448,7 +448,8 @@ def architecture_debt_findings(
         production.append((rel, path, count, text))
         findings.extend(_module_findings(rel, path, count, text))
         if path.suffix.lower() == ".py":
-            production_python_lines += count
+            if classification.source_root in roots:
+                production_python_lines += count
             python_files[rel] = text
             for function in _top_level_functions(text):
                 functions[function].append(rel)

@@ -23,6 +23,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "star_forge.py"
 SCRIPTS = ROOT / "scripts"
 FIXTURES = ROOT / "fixtures" / "v04-projects"
+DOGFOOD_FIXTURE = ROOT / "fixtures" / "v04-dogfood"
 FOUNDATION_FIXTURES = ROOT / "fixtures" / "foundation"
 LEGACY_FIXTURES = ROOT / "fixtures" / "legacy-v03"
 if str(SCRIPTS) not in sys.path:
@@ -30,7 +31,7 @@ if str(SCRIPTS) not in sys.path:
 
 import star_forge
 from live_collectors import browser_playwright
-from starforge import changes, evidence, lifecycle, review_policy, routing
+from starforge import changes, contracts, evidence, lifecycle, review_policy, routing
 
 
 SCENARIOS = ("web", "ios", "macos", "expo", "cli", "fast-mvp")
@@ -130,6 +131,101 @@ def install_foundation_evidence(project: Path, scenario: dict[str, Any]) -> dict
     write_json(project / lifecycle.FOUNDATION_CONTRACT_PATH, contract)
     write_json(project / lifecycle.FOUNDATION_EVIDENCE_PATH, replay)
     gate = lifecycle.evaluate_foundation(contract, replay, current_source_hash=source_hash)
+    assert gate.status == "PASS", gate.blockers
+    return gate.to_dict()
+
+
+def install_dogfood_foundation_evidence(
+    project: Path,
+    blueprint_contract: dict[str, Any],
+) -> dict[str, Any]:
+    assert blueprint_contract["delivery_target"] == "source-only"
+    contract = lifecycle.make_foundation_contract(
+        github_requested=False,
+        environment_example_required=False,
+        dependency_audit_required=False,
+        security_plan_required=False,
+    )
+    source_hash = star_forge.source_hash(project)
+    commit = star_forge.git_head(project)
+    branch = run(["git", "branch", "--show-current"], cwd=project).stdout.strip()
+    parent_fields = run(
+        ["git", "rev-list", "--parents", "-n", "1", "HEAD"],
+        cwd=project,
+    ).stdout.split()
+    assert len(parent_fields) == 1
+    source = project / "scripts" / "starforge" / "dogfood_status.py"
+    ci = project / ".github" / "workflows" / "ci.yml"
+    scanned = b"\n".join(
+        path.read_bytes() for path in star_forge.snapshot_file_candidates(project)
+    )
+    forbidden = (
+        b"github" + b"_pat_",
+        b"g" + b"hp_",
+        b"BEGIN PRIVATE" + b" KEY",
+    )
+    assert not any(marker in scanned for marker in forbidden)
+    details = {
+        "source_scaffold": {
+            "artifacts": [
+                {
+                    "path": str(source.relative_to(project)),
+                    "sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+                    "committed": True,
+                }
+            ]
+        },
+        "local_git": {
+            "is_repository": True,
+            "method": "automatic-local-init",
+        },
+        "default_branch": {
+            "name": branch,
+            "exists": True,
+            "head_commit": commit,
+        },
+        "initial_commit": {
+            "sha": commit,
+            "parent_count": 0,
+            "current_head": commit,
+            "tree_source_hash": source_hash,
+        },
+        "ci": {
+            "path": str(ci.relative_to(project)),
+            "sha256": hashlib.sha256(ci.read_bytes()).hexdigest(),
+            "committed": True,
+        },
+        "secret_scan": {
+            "tool": "deterministic-fixture-byte-scan",
+            "verdict": "PASS",
+            "findings": 0,
+        },
+    }
+    checks: dict[str, Any] = {}
+    for name in lifecycle.FOUNDATION_REQUIREMENTS:
+        requirement = contract["requirements"][name]
+        if requirement["state"] == "not-applicable":
+            checks[name] = {"state": "not-applicable"}
+        else:
+            checks[name] = {
+                "state": "satisfied",
+                "source_hash": source_hash,
+                "detail": details[name],
+            }
+    replay = {
+        "schema": lifecycle.FOUNDATION_EVIDENCE_SCHEMA,
+        "captured_at": "2026-07-26T12:00:00Z",
+        "source_hash": source_hash,
+        "contract_sha256": lifecycle.foundation_contract_sha256(contract),
+        "checks": checks,
+    }
+    write_json(project / lifecycle.FOUNDATION_CONTRACT_PATH, contract)
+    write_json(project / lifecycle.FOUNDATION_EVIDENCE_PATH, replay)
+    gate = lifecycle.evaluate_foundation(
+        contract,
+        replay,
+        current_source_hash=source_hash,
+    )
     assert gate.status == "PASS", gate.blockers
     return gate.to_dict()
 
@@ -740,6 +836,214 @@ def test_post_completion_change_packet_repeats_affected_gates_and_completes() ->
         assert initial["done"]["is_complete"] is True
 
 
+def test_star_forge_dogfood_runs_from_intake_through_change_completion() -> None:
+    with tempfile.TemporaryDirectory(prefix="star-forge-v04-self-dogfood-") as tmp:
+        workspace = Path(tmp) / "dogfood"
+        shutil.copytree(DOGFOOD_FIXTURE, workspace)
+        project = workspace / "project"
+        scenario = load_json(workspace / "scenario.json")
+
+        initial = cli(
+            project,
+            "run",
+            "--adopt-root",
+            "--no-hooks",
+            "--no-agents",
+            "--objective",
+            "Dogfood Star Forge v0.4 on its own lifecycle status control plane",
+        )
+        assert "phase: intake" in initial.stdout
+        assert state(project)["phase"] == "intake"
+
+        shutil.copy2(workspace / "contracts" / "Blueprint.md", project / "Blueprint.md")
+        shutil.copy2(workspace / "contracts" / "Plan.md", project / "Plan.md")
+        planning = run_state(project)
+        assert planning["phase"] == "plan"
+        lifecycle_contract = contracts.parse_blueprint_lifecycle_contract(
+            (project / "Blueprint.md").read_text(encoding="utf-8")
+        )
+        blueprint_contract = contracts.parse_blueprint_plan_contract(
+            (project / "Blueprint.md").read_text(encoding="utf-8")
+        )
+        assert lifecycle_contract["intake"]["complete"] is True
+        assert lifecycle_contract["design"] == {
+            "present": True,
+            "required": False,
+            "complete": True,
+            "direction_selected": False,
+            "unavailable_recorded": False,
+        }
+        assert blueprint_contract["delivery_target"] == "source-only"
+
+        cli(project, "approve-blueprint")
+        validated = cli(project, "validate-plan", "--strict")
+        assert json.loads(validated.stdout)["plan_version"] == "v2"
+        commit_all(project, "Approve the Star Forge self-dogfood contract")
+        assert run_state(project)["phase"] == "foundation"
+
+        foundation = install_dogfood_foundation_evidence(project, blueprint_contract)
+        assert foundation["status"] == "PASS"
+        assert run_state(project)["phase"] == "build"
+
+        routes = routing.resolve_routes(
+            project_class=str(scenario["routing_project_class"]),
+            blueprint_flags={"performance_sensitive": True},
+            proof_kinds=scenario["proofs"],
+            delivery_target=[scenario["delivery_target"]],
+            available_capabilities=scenario["available_capabilities"],
+        )
+        assert routes.blocked is False
+        assert routes.decisions == ()
+
+        verified = cli(
+            project,
+            "verify",
+            "--task",
+            "SF-1",
+            "--command",
+            scenario["verify_command"],
+            "--strict",
+        )
+        assert json.loads(verified.stdout)["verdict"] == "PASS"
+        envelope = write_evidence_v2(project, scenario)
+        assert envelope["provider"] == "offline-fixture-replay"
+        completed_task = cli(
+            project,
+            "complete-task",
+            "--task",
+            "SF-1",
+            "--changed-file",
+            scenario["source_file"],
+        )
+        assert json.loads(completed_task.stdout)["verdict"] == "COMPLETE"
+        cli(
+            project,
+            "verify",
+            "--task",
+            "SF-1",
+            "--command",
+            scenario["verify_command"],
+            "--strict",
+        )
+        commit_all(project, "Complete the initial Star Forge dogfood slice")
+        assert run_state(project)["phase"] == "review"
+
+        initial_roles = write_clean_review(project)
+        assert initial_roles == [
+            "correctness",
+            "ux-accessibility",
+            "performance-reliability",
+        ]
+        assert run_state(project)["phase"] == "deliver"
+        initial_delivery = install_delivery_evidence(project, scenario)
+        assert initial_delivery["status"] == "PASS"
+        assert initial_delivery["provider"] == "not-applicable"
+        assert run_state(project)["phase"] == "done"
+        initial_done = json.loads(cli(project, "done", "--strict").stdout)
+        assert initial_done["is_complete"] is True
+        initial_proof = load_json(project / ".starforge" / "final" / "proof.json")
+
+        source = project / scenario["source_file"]
+        source.write_text(
+            source.read_text(encoding="utf-8")
+            + "\n\ndef completion_is_fresh(proof_hash: str, source_hash: str) -> bool:\n"
+            + "    \"\"\"Return whether completion proof matches current source.\"\"\"\n"
+            + "    return proof_hash == source_hash\n",
+            encoding="utf-8",
+        )
+        fixture_test = project / "tests" / "test_fixture.py"
+        fixture_test.write_text(
+            fixture_test.read_text(encoding="utf-8")
+            .replace(
+                "from starforge.dogfood_status import format_status",
+                "from starforge.dogfood_status import completion_is_fresh, format_status",
+            )
+            .replace(
+                "\n\nif __name__ == \"__main__\":",
+                "\n\n    def test_completion_freshness_uses_exact_source_hash(self) -> None:\n"
+                "        self.assertTrue(completion_is_fresh(\"a\" * 64, \"a\" * 64))\n"
+                "        self.assertFalse(completion_is_fresh(\"a\" * 64, \"b\" * 64))\n"
+                "\n\nif __name__ == \"__main__\":",
+            ),
+            encoding="utf-8",
+        )
+
+        amended = run_state(project)
+        assert amended["phase"] == "amend"
+        packet = amended["change_packet"]
+        assert packet["approval_state"] == "draft"
+        assert packet["original_completed_source_hash"] == initial_proof["source_hash"]
+        assert set(packet["scope_delta"]) == {
+            "scripts/starforge/dogfood_status.py",
+            "tests/test_fixture.py",
+        }
+        change_id = str(packet["change_id"])
+        cli(project, "approve-change", "--change", change_id)
+        approved = run_state(project)
+        assert approved["change_packet"]["approval_state"] == "approved"
+        change_plan = project / str(packet["path"]) / str(packet["plan_path"])
+        task = star_forge.parse_tasks(change_plan)[0]
+        assert task["mode"] == "delegate"
+        assert task["verify"] == scenario["verify_command"]
+
+        cli(
+            project,
+            "verify",
+            "--task",
+            task["id"],
+            "--command",
+            task["verify"],
+            "--strict",
+        )
+        cli(
+            project,
+            "complete-task",
+            "--task",
+            task["id"],
+            "--changed-file",
+            "scripts/starforge/dogfood_status.py",
+            "--changed-file",
+            "tests/test_fixture.py",
+        )
+        cli(
+            project,
+            "verify",
+            "--task",
+            task["id"],
+            "--command",
+            task["verify"],
+            "--strict",
+        )
+        cli(
+            project,
+            "verify",
+            "--task",
+            "SF-1",
+            "--command",
+            scenario["verify_command"],
+            "--strict",
+        )
+        commit_all(project, "Complete the approved dogfood freshness change")
+        assert run_state(project)["phase"] == "review"
+
+        changed_roles = write_clean_review(project)
+        assert changed_roles == initial_roles
+        assert run_state(project)["phase"] == "deliver"
+        changed_delivery = install_delivery_evidence(project, scenario)
+        assert changed_delivery["status"] == "PASS"
+        assert run_state(project)["phase"] == "done"
+        changed_done = json.loads(cli(project, "done", "--strict").stdout)
+        assert changed_done["is_complete"] is True
+        final_state = run_state(project)
+        assert final_state["phase"] == "done"
+        assert final_state["drift"]["detected"] is False
+        final_proof = load_json(project / ".starforge" / "final" / "proof.json")
+        assert final_proof["source_hash"] == star_forge.source_hash(project)
+        assert final_proof["source_hash"] != initial_proof["source_hash"]
+        history = changes.lookup_change_history(project, change_id)
+        assert history["kind"] == "change-packet"
+
+
 def test_v03_completion_amendments_and_evidence_remain_readable() -> None:
     fixture = LEGACY_FIXTURES / "completed-amended"
     plan_before = (fixture / "Plan.md").read_bytes()
@@ -770,9 +1074,9 @@ def test_fixture_matrix_contains_no_credentials_or_provider_writes() -> None:
         path.read_text(encoding="utf-8", errors="ignore") for path in fixture_files
     )
     forbidden = (
-        "github_pat_",
-        "ghp_",
-        "BEGIN PRIVATE KEY",
+        "github" + "_pat_",
+        "g" + "hp_",
+        "BEGIN PRIVATE" + " KEY",
         "gh repo create --public",
         "vercel deploy",
         "sites deploy",

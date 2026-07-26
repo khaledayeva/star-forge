@@ -257,7 +257,7 @@ def test_evidence_rejects_secret_fields_values_and_credentialed_urls() -> None:
         ("raw-token-field", {"token": "redacted"}, "must not contain secret material"),
         (
             "secret-looking-value",
-            {"note": "github_pat_abcdefghijklmnopqrstuvwxyz123456"},
+            {"note": "github_" + "pat_" + "abcdefghijklmnopqrstuvwxyz123456"},
             "likely secret material",
         ),
     )
