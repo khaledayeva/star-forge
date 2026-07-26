@@ -38,6 +38,7 @@ from live_collectors import native_macos as native_macos_collector
 from starforge import changes as project_changes
 from starforge import contracts as project_contracts
 from starforge import doctor as installation_doctor
+from starforge import learnings as global_learnings
 from starforge import lifecycle as project_lifecycle
 from starforge import quality as project_quality
 from starforge import review_policy as adaptive_review_policy
@@ -79,8 +80,6 @@ KNOWN_REVIEW_ROLES = adaptive_review_policy.ALL_REVIEW_ROLES
 REVIEW_ROLE_LENSES = adaptive_review_policy.ROLE_LENSES
 MAX_AUTO_CONTINUES = 3
 STAR_FORGE_STATE_VERSION = "3.0"
-LEARNINGS_HOME = Path.home() / ".star-forge" / "learnings"
-
 VALID_STATUSES = {"queued", "ready", "in_progress", "blocked", "reviewing", "complete"}
 VALID_MODES = {"solo", "delegate", "docs"}
 BLOCKING_SEVERITIES = {"critical", "high", "medium"}
@@ -1020,6 +1019,8 @@ def ensure_project_manifest(project: Path, *, objective: str = "", product_slug:
     if existing:
         payload["created_at"] = existing.get("created_at") or payload["created_at"]
         payload["project_id"] = existing.get("project_id") or payload["project_id"]
+        if "global_learnings" in existing:
+            payload["global_learnings"] = existing["global_learnings"]
         if strip_volatile(existing) == strip_volatile(payload):
             return existing
     write_json(path, payload)
@@ -5702,83 +5703,113 @@ Generated: {payload.get('created_at')}
 
 
 def learnings_home() -> Path:
-    return Path(os.environ.get("STAR_FORGE_LEARNINGS_HOME") or LEARNINGS_HOME)
+    """Compatibility wrapper for the configured, opt-in global store."""
+
+    return global_learnings.learnings_home()
 
 
 def project_keywords(project: Path) -> set[str]:
-    terms: set[str] = set()
-    bp = project / BLUEPRINT_FILE
-    if bp.exists():
-        try:
-            terms |= lexical_terms(read_text(bp))
-        except OSError:
-            pass
-    for path in snapshot_file_candidates(project):
-        terms.add(path.suffix.lower().lstrip("."))
-        terms.add(path.name.lower())
-    return {term for term in terms if term}
+    """Compatibility wrapper for deterministic project matching terms."""
+
+    return global_learnings.project_keywords(
+        project,
+        candidate_names=[
+            relative_to_project(path, project)
+            for path in snapshot_file_candidates(project)
+        ],
+    )
 
 
-def learnings_digest(project: Path, limit: int = 5) -> list[dict[str, Any]]:
-    home = learnings_home()
-    if not home.exists():
-        return []
-    keywords = project_keywords(project)
-    scored: list[tuple[int, dict[str, Any]]] = []
-    for path in sorted(home.glob("**/*.md")):
-        try:
-            text = read_text(path)
-        except OSError:
-            continue
-        meta = parse_frontmatter(text)
-        triggers = {item.strip().lower() for item in str(meta.get("triggers") or "").split(",") if item.strip()}
-        score = len(triggers & keywords)
-        if not triggers:
-            score = 0
-        if score <= 0:
-            continue
-        scored.append((score, {"title": meta.get("title") or path.stem, "rule": meta.get("rule") or "", "category": meta.get("category") or path.parent.name, "path": str(path)}))
-    scored.sort(key=lambda item: (-item[0], item[1]["title"]))
-    return [item for _, item in scored[:limit]]
+def learnings_report(
+    project: Path,
+    limit: int = 5,
+    *,
+    explicit_opt_in: bool = False,
+) -> dict[str, Any]:
+    """Return a bounded digest report; corrupt global state never escapes."""
+
+    try:
+        return global_learnings.read_digest(
+            project,
+            keywords=project_keywords(project),
+            limit=limit,
+            explicit_opt_in=explicit_opt_in,
+        )
+    except Exception as exc:
+        return {
+            "schema": global_learnings.DIGEST_SCHEMA,
+            "enabled": False,
+            "opt_in": {
+                "enabled": False,
+                "action": "read",
+                "reason": "store-unavailable",
+            },
+            "limit": max(0, min(int(limit), global_learnings.MAX_DIGEST_LIMIT)),
+            "records_scanned": 0,
+            "records_accepted": 0,
+            "records_rejected": 1,
+            "rejection_reasons": {type(exc).__name__: 1},
+            "items": [],
+        }
 
 
-def parse_frontmatter(text: str) -> dict[str, str]:
-    if not text.startswith("---"):
-        return {}
-    end = text.find("\n---", 3)
-    if end == -1:
-        return {}
-    meta: dict[str, str] = {}
-    for line in text[3:end].splitlines():
-        if ":" in line:
-            key, _, value = line.partition(":")
-            meta[key.strip().lower()] = value.strip()
-    return meta
+def learnings_digest(
+    project: Path,
+    limit: int = 5,
+    *,
+    explicit_opt_in: bool = False,
+) -> list[dict[str, Any]]:
+    return list(
+        learnings_report(
+            project, limit=limit, explicit_opt_in=explicit_opt_in
+        )["items"]
+    )
 
 
 def cmd_learn(args: argparse.Namespace) -> int:
     if not str(args.title or "").strip() or not str(args.rule or "").strip():
         raise ForgeError("learn requires --title and --rule")
-    home = learnings_home()
-    category = slugify(args.category or "general").lower()
-    slug = slugify(args.title).lower()
-    path = home / category / f"{slug}.md"
-    triggers = ", ".join(item.strip() for item in (args.trigger or []) if item.strip())
-    body = f"""---
-title: {args.title}
-category: {category}
-triggers: {triggers}
-rule: {args.rule}
-source: {args.source or 'manual'}
-date: {now_utc()}
----
-
-{args.rule}
-
-{args.detail or ''}
-"""
-    write_text(path, body)
-    print(json.dumps({"schema": "star-forge.learn.v1", "path": str(path), "title": args.title, "category": category, "triggers": triggers}, indent=2))
+    project = resolve_project(args.project)
+    current_hash, hash_problem = try_source_hash(project)
+    if current_hash is None:
+        message = str((hash_problem or {}).get("message") or "source hash unavailable")
+        raise ForgeError(f"cannot persist a global learning: {message}")
+    try:
+        result = global_learnings.write_learning(
+            project,
+            title=args.title,
+            rule=args.rule,
+            triggers=args.trigger or [],
+            category=args.category,
+            detail=args.detail,
+            confidence=args.confidence,
+            origin=args.source,
+            source_hash=current_hash,
+            explicit_opt_in=bool(args.global_learnings),
+        )
+    except global_learnings.LearningsError as exc:
+        raise ForgeError(str(exc)) from exc
+    record = result["record"]
+    print(
+        json.dumps(
+            {
+                "schema": "star-forge.learn.v2",
+                "created": result["created"],
+                "storage_relative_path": result["storage_relative_path"],
+                "id": record["id"],
+                "title": record["title"],
+                "category": record["category"],
+                "triggers": record["triggers"],
+                "source_project": record["source_project"],
+                "source_hash": record["source_hash"],
+                "timestamp": record["timestamp"],
+                "producer": record["producer"],
+                "confidence": record["confidence"],
+                "provenance": record["provenance"],
+            },
+            indent=2,
+        )
+    )
     return 0
 
 
@@ -6195,7 +6226,14 @@ def operating_card(project: Path, state: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def canonical_state_payload(project: Path, *, objective: str = "", mode: str = "cruise", fast_mvp: bool = False) -> dict[str, Any]:
+def canonical_state_payload(
+    project: Path,
+    *,
+    objective: str = "",
+    mode: str = "cruise",
+    fast_mvp: bool = False,
+    global_learnings_opt_in: bool = False,
+) -> dict[str, Any]:
     manifest = ensure_project_manifest(project, objective=objective)
     profile_lock = fast_mvp_profile_lock_state(project)
     blueprint_state = blueprint_lock_state(project)
@@ -6340,6 +6378,9 @@ def canonical_state_payload(project: Path, *, objective: str = "", mode: str = "
             "done": "Project is complete; publish only if explicitly requested." if done and done.get("is_complete") else "Run the final completion predicate and resolve any remaining source, proof, or cleanliness blocker.",
             "blocked": f"Repair Plan.md before continuing: {parse_problem}" if parse_problem else "Inspect blockers and continue the safest unblocked phase.",
         }.get(phase, "Inspect state and continue the safest unblocked phase.")
+    global_learning_report = learnings_report(
+        project, explicit_opt_in=global_learnings_opt_in
+    )
     state = {
         "schema": "star-forge.state.v3",
         "created_at": now_utc(),
@@ -6381,7 +6422,12 @@ def canonical_state_payload(project: Path, *, objective: str = "", mode: str = "
         ),
         "source_hash_unavailable": source_hash_blocked,
         "source_hash_problems": [hash_problem] if hash_problem else [],
-        "learnings_digest": learnings_digest(project),
+        "global_learnings": {
+            key: value
+            for key, value in global_learning_report.items()
+            if key != "items"
+        },
+        "learnings_digest": global_learning_report["items"],
         "required_next_action": next_action,
     }
     state["operating_card"] = operating_card(project, state)
@@ -6564,7 +6610,13 @@ def cmd_run(args: argparse.Namespace) -> int:
                     "changed_files": drift.get("changed_files"),
                 },
             )
-    payload = canonical_state_payload(project, objective=args.objective or "", mode=args.mode, fast_mvp=review_profile(project) == "fast-mvp")
+    payload = canonical_state_payload(
+        project,
+        objective=args.objective or "",
+        mode=args.mode,
+        fast_mvp=review_profile(project) == "fast-mvp",
+        global_learnings_opt_in=bool(getattr(args, "global_learnings", False)),
+    )
     if getattr(args, "no_hooks", False):
         payload["hook_trust_notice"] = {
             **(payload.get("hook_trust_notice") or {}),
@@ -7137,6 +7189,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-auto-init", action="store_true")
     p.add_argument("--no-hooks", action="store_true", help="Suppress optional hook trust prompts for this run")
     p.add_argument("--no-agents", action="store_true", help="Do not generate project-local agent profiles during auto-init")
+    p.add_argument(
+        "--global-learnings",
+        action="store_true",
+        help="Opt in to reading validated global learnings for this run",
+    )
     p.set_defaults(func=cmd_run)
 
     p = sub.add_parser("init", help="Initialize Star Forge artifacts")
@@ -7349,13 +7406,35 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--write-summary", action="store_true")
     p.set_defaults(func=cmd_done)
 
-    p = sub.add_parser("learn", help="Write a durable learning to ~/.star-forge/learnings")
+    p = sub.add_parser(
+        "learn",
+        help="Write a validated global learning after explicit opt-in",
+    )
+    p.add_argument("--project", default=".")
     p.add_argument("--title", required=True)
     p.add_argument("--rule", required=True)
     p.add_argument("--trigger", action="append")
-    p.add_argument("--category", default="general")
+    p.add_argument(
+        "--category",
+        default="general",
+        choices=sorted(global_learnings.ALLOWED_CATEGORIES),
+    )
     p.add_argument("--detail", default="")
-    p.add_argument("--source", default="manual")
+    p.add_argument(
+        "--source",
+        default="manual",
+        choices=sorted(global_learnings.ALLOWED_ORIGINS),
+    )
+    p.add_argument(
+        "--confidence",
+        default="medium",
+        choices=sorted(global_learnings.ALLOWED_CONFIDENCE),
+    )
+    p.add_argument(
+        "--global-learnings",
+        action="store_true",
+        help="Opt in to writing this validated global learning",
+    )
     p.set_defaults(func=cmd_learn)
 
     p = sub.add_parser("agents-install", help="Install Star Forge roles as native Codex agents (.codex/agents/*.toml)")
