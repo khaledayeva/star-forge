@@ -566,16 +566,23 @@ def _diff_since(project: Path, head: str | None) -> list[str]:
 def cmd_done(args: argparse.Namespace) -> int:
     project = resolve_project(args.project)
     payload = done_payload(project)
-    proof_head = str((payload.get("snapshot") or {}).get("git_head") or "")
-    final_status = source_dirty_entries(git_status(project))
-    final_head = git_head(project) if is_git_repo(project) else None
-    if payload["is_complete"] and (not proof_head or final_head != proof_head or final_status):
-        payload["problems"].append({"severity": "high", "rule": "git-proof-binding", "message": "Git state changed before final proof publication."})
-        payload.update(is_complete=False, verdict=REVIEW_POLICY["done_verdicts"]["blocked"])
+    gated_snapshot = payload.get("snapshot") or {}
+    proof_head = str(gated_snapshot.get("git_head") or "")
+    proof_source_hash = str(gated_snapshot.get("source_hash") or "")
+    if payload["is_complete"]:
+        final_repository = is_git_repo(project)
+        final_status = source_dirty_entries(git_status(project))
+        final_head = git_head(project) if final_repository else None
+        final_source_hash, final_hash_problem = try_source_hash(project)
+        if (not final_repository or not proof_head or not proof_source_hash
+                or final_head != proof_head or final_status or final_hash_problem
+                or final_source_hash != proof_source_hash):
+            payload["problems"].append({"severity": "high", "rule": "git-proof-binding", "message": "Git state changed before final proof publication."})
+            payload.update(is_complete=False, verdict=REVIEW_POLICY["done_verdicts"]["blocked"])
     if payload["is_complete"]:
         ensure_state_dirs(project)
         write_json(project / PROOF_FILE, policy_record(
-            "proof", created_at=now_utc(), head=proof_head, source_hash=source_hash(project),
+            "proof", created_at=now_utc(), head=proof_head, source_hash=proof_source_hash,
             scope_hash=scope_hash(project) or "noscope", verdict=payload["verdict"]))
         if args.write_summary:
             write_text(project / FINAL_SUMMARY, done_summary_markdown(payload))
