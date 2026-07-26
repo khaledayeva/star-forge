@@ -1,15 +1,12 @@
 """Shared live artifact helpers for Star Forge collectors.
-
 Collectors are suppliers only. They write task-scoped files under
 `.starforge/live/<task-id>/<collector>/` and hand the manifest to the existing
 proof command surfaces in `scripts/star_forge.py`.
 """
-
 from __future__ import annotations
-
 from live_collectors.policy_data import policy_bindings
 from live_collectors.provider_engine import failed_checks, render_descriptor
-
+from starforge import safe_io
 import datetime as dt
 import hashlib
 import json
@@ -21,8 +18,6 @@ import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Sequence
-
-
 LIVE_ROOT = Path(".starforge") / "live"
 RUNTIME_DIR = Path(".starforge") / "runtime"
 globals().update(policy_bindings(
@@ -35,17 +30,13 @@ globals().update(CONSTANTS)
 VCS_INTERNAL_PARTS = {".git", ".hg", ".svn"}
 STAR_FORGE_STATE_PARTS = {".starforge", "the-loop"}
 SOURCE_HASH_EXCLUDED_PARTS = VCS_INTERNAL_PARTS | STAR_FORGE_STATE_PARTS
-
 SECRET_RE = re.compile(REDACTION_PATTERNS["secret"], re.IGNORECASE)
 AUTH_CREDENTIAL_RE = re.compile(REDACTION_PATTERNS["auth"], re.IGNORECASE)
 JWT_LIKE_RE = re.compile(REDACTION_PATTERNS["jwt"])
 GENERIC_TOKEN_ASSIGNMENT_RE = re.compile(REDACTION_PATTERNS["generic_token"], re.IGNORECASE)
 URL_RE = re.compile(REDACTION_PATTERNS["url"], re.IGNORECASE)
 URL_TRAILING_PUNCTUATION = ".,;)]}"
-
 NORMALIZED_SENSITIVE_KEYS = {re.sub(r"[^a-z0-9]+", "", key.lower()) for key in SENSITIVE_KEYS}
-
-
 @dataclass(frozen=True)
 class LiveProblem:
     severity: str
@@ -53,23 +44,14 @@ class LiveProblem:
     rule: str = "live-artifact"
     path: str = ""
     blocking: bool = True
-
     def to_dict(self) -> dict[str, Any]:
         return problem(**vars(self))
-
-
 def now_utc() -> str:
     return dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
-
-
 def read_json(path: Path, default: Any = None) -> Any:
     return json.loads(path.read_text(encoding="utf-8")) if path.exists() else default
-
-
 def read_text(path: Path, default: str = "") -> str:
     return path.read_text(encoding="utf-8", errors="replace") if path.exists() else default
-
-
 def write_json(
     path: Path,
     payload: Any,
@@ -82,18 +64,10 @@ def write_json(
         output.update({field: payload[field] for field in preserve_fields if field in payload})
     write_text(path, json.dumps(output, indent=2, sort_keys=True) + "\n", redact=False)
     return path, report
-
-
 def write_text(path: Path, text: str, *, redact: bool = True) -> tuple[Path, dict[str, Any]]:
     output, report = redact_sensitive_values(text) if redact else (text, {})
-    path.parent.mkdir(parents=True, exist_ok=True)
-    for candidate in (path, *path.parents):
-        if candidate.is_symlink():
-            raise ValueError(f"refusing to write through symlink: {candidate}")
-    path.write_text(str(output), encoding="utf-8")
+    safe_io.atomic_write_text(safe_io.infer_root(path), path, str(output))
     return path, report
-
-
 def merge_reports(*reports: Mapping[str, Any]) -> dict[str, int]:
     merged: dict[str, int] = {}
     for report in reports:
@@ -105,8 +79,6 @@ def merge_reports(*reports: Mapping[str, Any]) -> dict[str, int]:
             except (TypeError, ValueError):
                 continue
     return merged
-
-
 def problem(
     message: str,
     *,
@@ -120,38 +92,22 @@ def problem(
     if path or include_empty_path:
         payload["path"] = path
     return payload
-
-
 def sanitize_segment(value: str, *, fallback: str = "artifact") -> str:
     raw = str(value or "").strip()
     cleaned = re.sub(r"[^A-Za-z0-9_.-]+", "-", raw).strip(".-")
     return (fallback if not cleaned or cleaned in {".", ".."} else cleaned)[:90]
-
-
 def assert_collector_project_safe(project: Path) -> Path:
     """Return the resolved project after rejecting unsafe Star Forge state."""
-
     if project.is_symlink():
         raise ValueError(f"refusing symlinked collector project root: {project}")
     project_root = project.resolve()
     if not project_root.is_dir():
         raise ValueError(f"collector project is not a directory: {project}")
-    state_root = project_root / ".starforge"
-    if not state_root.exists() and not state_root.is_symlink():
-        return project_root
-    if state_root.is_symlink():
-        raise ValueError(f"refusing unsafe Star Forge state symlink: {state_root}")
-    if not state_root.is_dir():
-        raise ValueError(f"refusing non-directory Star Forge state root: {state_root}")
     try:
-        for path in state_root.rglob("*"):
-            if path.is_symlink():
-                raise ValueError(f"refusing unsafe Star Forge state symlink: {path}")
+        safe_io.assert_tree_no_symlinks(project_root, ".starforge")
     except OSError as exc:
         raise ValueError(f"cannot safely inspect Star Forge state: {exc}") from exc
     return project_root
-
-
 def live_collector_dir(project: Path, task_id: str, collector: str, *, create: bool = True) -> Path:
     project_root = assert_collector_project_safe(project)
     live_root = project_root / LIVE_ROOT
@@ -159,13 +115,9 @@ def live_collector_dir(project: Path, task_id: str, collector: str, *, create: b
     if root.parent.parent != live_root:
         raise ValueError(f"live collector path escapes {LIVE_ROOT}")
     if create:
-        root.mkdir(parents=True, exist_ok=True)
+        safe_io.make_directory(project_root, root)
         assert_collector_project_safe(project_root)
-    if live_root.is_symlink() or root.is_symlink():
-        raise ValueError(f"refusing unsafe live collector symlink: {root}")
     return root
-
-
 def safe_project_path(project: Path, raw_path: str | Path, *, must_exist: bool = False) -> Path:
     if raw_path is None:
         raise ValueError("missing path")
@@ -178,15 +130,19 @@ def safe_project_path(project: Path, raw_path: str | Path, *, must_exist: bool =
     resolved = (candidate if candidate.is_absolute() else project_root / candidate).resolve()
     if resolved != project_root and project_root not in resolved.parents:
         raise ValueError(f"path escapes project: {raw_text}")
-    if must_exist and not resolved.exists():
-        raise ValueError(f"path does not exist: {raw_text}")
+    if must_exist:
+        try:
+            safe_io.read_bytes(project_root, resolved, limit=0)
+        except OSError:
+            try:
+                exists = safe_io.directory_exists(project_root, resolved)
+            except OSError as exc:
+                raise ValueError(f"path is unsafe: {raw_text}: {exc}") from exc
+            if not exists:
+                raise ValueError(f"path does not exist: {raw_text}")
     return resolved
-
-
 def _lexical_absolute(path: Path) -> Path:
     return Path(os.path.abspath(os.fspath(path)))
-
-
 def project_relative(project: Path, path: Path) -> str:
     project_root = project.resolve()
     try:
@@ -197,88 +153,54 @@ def project_relative(project: Path, path: Path) -> str:
         return str(path.resolve().relative_to(project_root))
     except ValueError:
         return sanitize_external_path(path)
-
-
 def project_cli_arg(project: Path, *, cwd: Path | None = None) -> str:
     """Return a stable value for proof command --project arguments."""
     resolved_project = project.expanduser().resolve()
     resolved_cwd = (cwd or Path.cwd()).expanduser().resolve()
     return "." if resolved_project == resolved_cwd else str(resolved_project)
-
-
 def sanitize_external_path(path: Path) -> str:
     name = sanitize_segment(path.name or "external")
     digest = hashlib.sha256(str(path).encode("utf-8")).hexdigest()[:12]
     return f"[external]/{name}-{digest}"
-
-
-def file_sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
+def file_sha256(path: Path, *, root: Path | None = None) -> str:
+    return safe_io.digest_size(root or safe_io.infer_root(path), path)[0]
 def run_git(args: Sequence[str], cwd: Path) -> tuple[int, str, str]:
     proc = subprocess.run(["git", *args], cwd=str(cwd), text=True, capture_output=True, check=False)
     return proc.returncode, proc.stdout, proc.stderr
-
-
 def is_git_repo(project: Path) -> bool:
     return run_git(["rev-parse", "--is-inside-work-tree"], project)[0] == 0
-
-
 def path_has_source_hash_excluded_part(rel_path: str | Path) -> bool:
     return any(part in SOURCE_HASH_EXCLUDED_PARTS for part in Path(rel_path).parts)
-
-
 def source_hash_dirty_entries(project: Path, entries: Sequence[str]) -> list[str]:
     return [
         line for line in entries
         if (path := git_status_path(line)) and not path_has_source_hash_excluded_part(path)
     ]
-
-
 def git_status_path(line: str) -> str:
     path = line[3:] if len(line) > 3 else line.strip()
     path = path.strip().strip('"')
     return path.split(" -> ", 1)[-1].strip().strip('"')
-
-
 def git_head(project: Path) -> str:
     code, out, _ = run_git(["rev-parse", "HEAD"], project)
     return out.strip() if code == 0 else ""
-
-
 def git_status(project: Path) -> list[str]:
     code, out, _ = run_git(["status", "--short", "--untracked-files=all", "--", "."], project)
     return (
         [line for line in out.splitlines() if line.strip()]
         if code == 0 else ["?? <git status unavailable>"]
     )
-
-
 def source_dirty_entries(project: Path) -> list[str]:
     return source_hash_dirty_entries(project, git_status(project))
-
-
 def source_tree_clean_at_head(project: Path) -> bool:
     return bool(git_head(project)) and not source_dirty_entries(project)
-
-
 def source_snapshot_rel_paths(project: Path) -> set[str]:
     return {project_relative(project, path) for path in snapshot_file_candidates(project)}
-
-
 def dirty_paths_missing_from_source_snapshot(project: Path) -> list[str]:
     snapshot_paths = source_snapshot_rel_paths(project)
     return [
         line for line in source_dirty_entries(project)
         if (git_status_path(line) and git_status_path(line) not in snapshot_paths)
     ]
-
-
 def _source_symlink_component(project: Path, path: Path) -> Path | None:
     project_root = project.resolve()
     candidate = _lexical_absolute(path)
@@ -292,19 +214,14 @@ def _source_symlink_component(project: Path, path: Path) -> Path | None:
         if current.is_symlink():
             return current
     return None
-
-
 def _safe_regular_project_file(project: Path, path: Path) -> bool:
     """Check a source path without following any symlink component."""
-
     if _source_symlink_component(project, path) is not None:
         return False
     try:
         return stat.S_ISREG(_lexical_absolute(path).lstat().st_mode)
     except OSError:
         return False
-
-
 def _validated_source_candidate(project: Path, path: Path) -> Path | None:
     symlink = _source_symlink_component(project, path)
     if symlink is not None:
@@ -312,8 +229,6 @@ def _validated_source_candidate(project: Path, path: Path) -> Path | None:
             f"source snapshot refuses symlink: {project_relative(project, symlink)}"
         )
     return path if _safe_regular_project_file(project, path) else None
-
-
 def snapshot_file_candidates(project: Path) -> list[Path]:
     git_repo = is_git_repo(project)
     if git_repo:
@@ -351,15 +266,11 @@ def snapshot_file_candidates(project: Path) -> list[Path]:
                 if candidate is not None:
                     files.append(candidate)
     return sorted(files, key=lambda item: project_relative(project, item))
-
-
 def source_snapshot_includes(path: Path) -> bool:
     try:
         return not path.is_symlink() and stat.S_ISREG(path.lstat().st_mode)
     except OSError:
         return False
-
-
 def files_fingerprint(project: Path, paths: Sequence[Path]) -> str:
     digest = hashlib.sha256()
     for path in paths:
@@ -369,17 +280,13 @@ def files_fingerprint(project: Path, paths: Sequence[Path]) -> str:
                 f"source fingerprint refuses symlink: {project_relative(project, symlink)}"
             )
         rel = project_relative(project, path)
-        content_hash = file_sha256(path) if _safe_regular_project_file(project, path) else ""
+        content_hash = file_sha256(path, root=project) if _safe_regular_project_file(project, path) else ""
         digest.update(f"{rel}\0{content_hash}\0".encode("utf-8"))
     return digest.hexdigest()
-
-
 def tree_sha256(path: Path | None) -> str:
     return "" if path is None or not path.is_dir() else files_fingerprint(path, sorted(
         item for item in path.glob("**/*") if item.is_file() and not item.is_symlink()
     ))
-
-
 def trusted_python_command(
     command: Sequence[str],
     *,
@@ -391,8 +298,6 @@ def trusted_python_command(
     if len(actual) > 1 and actual[1] == "scripts/star_forge.py":
         actual[1] = str(script_path)
     return actual
-
-
 def run_trusted_command(
     command: Sequence[str],
     *,
@@ -409,8 +314,6 @@ def run_trusted_command(
         "stderr": proc.stderr,
         "command_argv": actual,
     }
-
-
 def hash_artifacts(project: Path, artifacts: Mapping[str, str | Path] | Sequence[str | Path]) -> dict[str, dict[str, Any]]:
     items = artifacts.items() if isinstance(artifacts, Mapping) else enumerate(artifacts)
     records = ((str(name), artifact_record(project, raw)) for name, raw in items)
@@ -419,12 +322,8 @@ def hash_artifacts(project: Path, artifacts: Mapping[str, str | Path] | Sequence
         for name, record in records
         if record.get("exists") and record.get("sha256")
     }
-
-
 def compute_source_hash(project: Path) -> str:
     return files_fingerprint(project, snapshot_file_candidates(project))
-
-
 def compute_runtime_asset_hash(project: Path, *, exclude_paths: Sequence[str | Path] | None = None) -> str:
     excluded: set[Path] = set()
     for raw in exclude_paths or []:
@@ -438,13 +337,7 @@ def compute_runtime_asset_hash(project: Path, *, exclude_paths: Sequence[str | P
         if path.is_file() and not path.is_symlink() and path.resolve() not in excluded
     ]
     return files_fingerprint(project, candidates)
-
-
-def _image_meta(path: Path) -> dict[str, Any]:
-    try:
-        head = path.read_bytes()[:26]
-    except OSError:
-        return {"valid_image": False}
+def _image_meta(head: bytes) -> dict[str, Any]:
     if not head.startswith(b"\x89PNG\r\n\x1a\n"):
         return {"valid_image": True, "image_format": "jpeg"} if head.startswith(b"\xff\xd8\xff") else {"valid_image": False}
     if len(head) < 24 or head[12:16] != b"IHDR":
@@ -452,43 +345,48 @@ def _image_meta(path: Path) -> dict[str, Any]:
     width = int.from_bytes(head[16:20], "big")
     height = int.from_bytes(head[20:24], "big")
     return {"valid_image": width > 0 and height > 0, "image_format": "png", "decoded_width": width, "decoded_height": height}
-
-
 def artifact_record(project: Path, path: str | Path, *, kind: str = "artifact", must_exist: bool = False) -> dict[str, Any]:
     try:
-        resolved = safe_project_path(project, path, must_exist=must_exist)
+        resolved = safe_project_path(project, path)
         rel = project_relative(project, resolved)
-        exists = resolved.exists()
-        entry: dict[str, Any] = {"kind": kind, "path": rel, "exists": exists}
-        if exists and resolved.is_file():
-            entry.update({"sha256": file_sha256(resolved), "bytes": resolved.stat().st_size})
-            if kind in {"screenshot", "image"}:
-                entry.update(_image_meta(resolved))
-        elif exists and resolved.is_dir():
-            entry["directory"] = True
+        try:
+            head, digest, byte_count = safe_io.snapshot(
+                project,
+                resolved,
+                prefix_limit=26 if kind in {"screenshot", "image"} else 0,
+            )
+        except FileNotFoundError:
+            if must_exist:
+                raise ValueError(f"path does not exist: {path}")
+            return {"kind": kind, "path": rel, "exists": False}
+        except OSError:
+            if safe_io.directory_exists(project, resolved):
+                return {"kind": kind, "path": rel, "exists": True, "directory": True}
+            raise
+        entry: dict[str, Any] = {
+            "kind": kind,
+            "path": rel,
+            "exists": True,
+            "sha256": digest,
+            "bytes": byte_count,
+        }
+        if kind in {"screenshot", "image"}:
+            entry.update(_image_meta(head))
         return entry
-    except ValueError as exc:
+    except (OSError, ValueError) as exc:
         return {"kind": kind, "path": sanitize_external_path(Path(str(path))), "exists": False, "problem": str(exc)}
-
-
 def blocking_problem(message: str, *, rule: str = "live-artifact", path: str = "", severity: str = "high") -> dict[str, Any]:
     return problem(message, rule=rule, path=path, severity=severity)
-
-
 def sensitive_key_name(raw: str) -> bool:
     key_norm = re.sub(r"[^a-z0-9]+", "", str(raw or "").lower())
     return key_norm in NORMALIZED_SENSITIVE_KEYS or any(
         marker in key_norm for marker in SENSITIVE_KEY_MARKERS
     )
-
-
 def _redact_params(raw: str) -> tuple[str, int]:
     pairs = urllib.parse.parse_qsl(raw, keep_blank_values=True)
     sensitive = {key for key, _value in pairs if sensitive_key_name(key)}
     redacted = [(key, "[REDACTED_SECRET]" if key in sensitive else value) for key, value in pairs]
     return urllib.parse.urlencode(redacted, doseq=True), sum(key in sensitive for key, _ in pairs)
-
-
 def _redact_url_parts(raw_url: str) -> tuple[str, int]:
     parsed = urllib.parse.urlsplit(raw_url)
     if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
@@ -504,11 +402,8 @@ def _redact_url_parts(raw_url: str) -> tuple[str, int]:
     )
     redactions += query_count + fragment_count
     return urllib.parse.urlunsplit((parsed.scheme, netloc, parsed.path, parsed.query and query, fragment)), redactions
-
-
 def _redact_urls(text: str) -> tuple[str, int]:
     total = 0
-
     def repl(match: re.Match[str]) -> str:
         nonlocal total
         raw = match.group(0)
@@ -517,10 +412,7 @@ def _redact_urls(text: str) -> tuple[str, int]:
         redacted, count = _redact_url_parts(raw)
         total += count
         return redacted + suffix
-
     return URL_RE.sub(repl, text), total
-
-
 def _redact_string(text: str, report: dict[str, int]) -> str:
     out, url_count = _redact_urls(text)
     report["secret_values"] += url_count
@@ -535,11 +427,8 @@ def _redact_string(text: str, report: dict[str, int]) -> str:
         out, count = re.subn(pattern, replacement, out)
         report[counter] += count
     return out
-
-
 def redact_sensitive_values(value: Any) -> tuple[Any, dict[str, Any]]:
     report = {"secret_values": 0, "sensitive_keys": 0, "home_paths": 0, "temp_paths": 0, "env_values": 0}
-
     def clean(item: Any, key_hint: str = "") -> Any:
         if sensitive_key_name(key_hint):
             report["sensitive_keys"] += 1
@@ -552,10 +441,7 @@ def redact_sensitive_values(value: Any) -> tuple[Any, dict[str, Any]]:
             {str(key): clean(child, str(key)) for key, child in item.items()}
             if isinstance(item, dict) else item
         )
-
     return clean(value), dict(report)
-
-
 def _artifact_records_from_input(project: Path, artifacts: Mapping[str, Any] | Sequence[Any]) -> list[dict[str, Any]]:
     def record(name: str, raw: Any) -> dict[str, Any]:
         mapping = raw if isinstance(raw, Mapping) else {}
@@ -565,11 +451,8 @@ def _artifact_records_from_input(project: Path, artifacts: Mapping[str, Any] | S
             artifact_record(project, path, kind=kind) if path is not None else
             {"kind": kind, "path": "", "exists": False, "problem": "missing artifact path"}
         )
-
     items = artifacts.items() if isinstance(artifacts, Mapping) else enumerate(artifacts)
     return [record(str(name), raw) for name, raw in items]
-
-
 def write_live_manifest(
     project: Path,
     *,
@@ -611,8 +494,6 @@ def write_live_manifest(
     redacted["redaction_report"] = report
     path = live_collector_dir(project, task, collector) / sanitize_segment(manifest_name, fallback="manifest.json")
     return write_json(path, redacted, redact=False)[0]
-
-
 def validate_manifest_payload(payload: Any) -> list[dict[str, Any]]:
     if not isinstance(payload, dict):
         return [blocking_problem("manifest must be a JSON object", rule="manifest-shape")]

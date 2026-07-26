@@ -4,19 +4,19 @@ from __future__ import annotations
 from .policy_data import mapping as _policy_mapping, value as _policy_value
 
 import datetime as dt
-import hashlib
 import json
 import re
 from pathlib import Path, PurePosixPath
 from typing import Any, Mapping
-from .changes import _write_atomic_text
+from . import safe_io
 
 EVIDENCE_POLICY = _policy_value("runtime_evidence.POLICY")
 globals().update(EVIDENCE_POLICY["bindings"])
 _PATTERNS = {name: re.compile(pattern, re.IGNORECASE if name in {"secret_value", "sensitive_key"} else 0) for name, pattern in EVIDENCE_POLICY["patterns"].items()}
 _SHA256_RE, _WINDOWS_DRIVE_RE, _SECRET_VALUE_RE, _SENSITIVE_KEY_RE = map(_PATTERNS.__getitem__, ("sha256", "windows_drive", "secret_value", "sensitive_key"))
 
-class EvidenceError(ValueError): pass
+class EvidenceError(ValueError):
+    pass
 
 def _error(name: str, **values: object) -> EvidenceError:
     return EvidenceError(EVIDENCE_POLICY["errors"][name].format(**values))
@@ -89,10 +89,12 @@ def _validate_artifact(artifact: Any, index: int, *, project_root: str | Path | 
     if verify_artifacts:
         _require(project_root is not None, "project_root")
         file_path = Path(project_root).resolve().joinpath(*PurePosixPath(path).parts)
-        _require(file_path.is_file(), "artifact_missing", path=path)
-        actual = hashlib.sha256(file_path.read_bytes()).hexdigest()
+        try:
+            actual, actual_size = safe_io.digest_size(project_root, file_path)
+        except OSError as exc:
+            raise _error("artifact_missing", path=path) from exc
         _require(actual == digest, "artifact_hash", path=path)
-        _require("bytes" not in artifact or file_path.stat().st_size == byte_count,
+        _require("bytes" not in artifact or actual_size == byte_count,
                  "artifact_size", path=path)
 
 def validate_envelope(envelope: Any, *, project_root: str | Path | None = None,
@@ -227,8 +229,9 @@ def read_envelope(path: str | Path, *, allow_v1: bool = True,
                   project_root: str | Path | None = None,
                   verify_artifacts: bool = False) -> dict[str, Any]:
     evidence_path = Path(path)
+    root = Path(project_root) if project_root is not None else safe_io.infer_root(evidence_path)
     try:
-        payload = json.loads(evidence_path.read_text(encoding="utf-8"))
+        payload = json.loads(safe_io.read_text(root, evidence_path))
     except (OSError, json.JSONDecodeError) as exc:
         raise _error("read", path=evidence_path, error=exc) from exc
     _require(isinstance(payload, Mapping), "file_object")
@@ -247,12 +250,20 @@ def write_envelope(path: str | Path, envelope: Mapping[str, Any] | None = None, 
     validate_envelope(payload, project_root=project_root, verify_artifacts=verify_artifacts)
     serialized = json.dumps(payload, **EVIDENCE_POLICY["json_format"]) + "\n"
     evidence_path = Path(path)
-    evidence_path.parent.mkdir(parents=True, exist_ok=True)
     try:
-        _write_atomic_text(evidence_path, serialized)
+        safe_io.atomic_write_text(
+            Path(project_root) if project_root is not None
+            else safe_io.infer_root(evidence_path),
+            evidence_path,
+            serialized,
+        )
     except OSError as exc:
         raise _error("write", path=evidence_path, error=exc) from exc
     return json.loads(serialized)
 
-globals().update({alias: globals()[target] for alias, target in EVIDENCE_POLICY["aliases"].items()})
-for name, text in EVIDENCE_POLICY["docs"].items(): globals()[name].__doc__ = text
+globals().update({
+    alias: globals()[target]
+    for alias, target in EVIDENCE_POLICY["aliases"].items()
+})
+for name, text in EVIDENCE_POLICY["docs"].items():
+    globals()[name].__doc__ = text

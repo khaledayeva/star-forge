@@ -7,13 +7,12 @@ the source hash when Git tracks it.
 
 from __future__ import annotations
 from .policy_data import mapping as _policy_mapping, value as _policy_value
+from .safe_io import read_bytes
 
 import ast
-import io
 import json
 import os
 import re
-import tokenize
 from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -67,16 +66,14 @@ class SourceClassification:
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
-def _relative_parts(path: Path, project: Path | None) -> tuple[Path, tuple[str, ...]]:
-    candidate = path
-    if project is not None:
-        project = project.resolve()
-        if path.is_absolute():
-            try:
-                candidate = path.resolve().relative_to(project)
-            except (OSError, ValueError):
-                candidate = Path(path.name)
-    return candidate, tuple(part for part in candidate.parts if part not in {"", "."})
+def _relative_parts(path: Path, project: Path | None) -> tuple[Path, tuple[str, ...], str | None]:
+    lexical_root = Path(os.path.abspath(project or Path.cwd()))
+    lexical_path = Path(os.path.abspath(path if path.is_absolute() else lexical_root / path))
+    relative = next((lexical_path.relative_to(root) for root in (lexical_root, (project or Path.cwd()).resolve())
+                     if lexical_path.is_relative_to(root)), None)
+    if relative is None:
+        return Path(path.name), (), "outside project"
+    return relative, tuple(part for part in relative.parts if part not in {"", "."}), None
 
 def _language(path: Path) -> str | None:
     suffix = path.suffix.lower()
@@ -89,8 +86,9 @@ def _workspace_artifact_position(parts: Sequence[str], index: int) -> bool:
 
 def exclusion_reason(path: Path, project: Path | None = None) -> str | None:
     """Return a precise generated/vendor/build exclusion reason, if any."""
-    relative, parts = _relative_parts(path, project)
-    physical_path = (project.resolve() / relative if project is not None and not path.is_absolute() else path)
+    relative, parts, unsafe = _relative_parts(path, project)
+    if unsafe:
+        return unsafe
     for index, part in enumerate(parts[:-1]):
         if part in ALWAYS_EXCLUDED_DIRS:
             return ALWAYS_EXCLUDED_DIRS[part]
@@ -104,27 +102,40 @@ def exclusion_reason(path: Path, project: Path | None = None) -> str | None:
             return "generated source directory"
     if any(pattern.search(relative.name) for pattern in GENERATED_FILE_PATTERNS):
         return "generated filename"
-    if (physical_path.exists() and physical_path.is_file() and physical_path.suffix.lower() in SOURCE_SUFFIXES):
-        try:
-            header = physical_path.read_text(encoding="utf-8", errors="ignore")[
-                :_POLICY["generated_header_limit"]]
-        except OSError:
-            header = ""
-        if GENERATED_HEADER_RE.search(header):
-            return "generated-file header"
+    root = (project or Path.cwd()).resolve()
+    try:
+        header = read_bytes(root, root / relative, limit=(
+            _POLICY["generated_header_limit"] if relative.suffix.lower() in SOURCE_SUFFIXES else 0))
+    except FileNotFoundError:
+        return None
+    except OSError:
+        return "unsafe path"
+    if header and GENERATED_HEADER_RE.search(header.decode("utf-8", errors="ignore")):
+        return "generated-file header"
     return None
 
 def is_generated_or_vendored(path: Path, project: Path | None = None) -> bool:
     return exclusion_reason(path, project) is not None
 
-def _json_object(path: Path) -> dict[str, Any]:
-    if not path.is_file():
-        return {}
+def _json_object(path: Path, project: Path) -> dict[str, Any]:
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload = json.loads(read_bytes(project, path).decode("utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError):
         return {}
     return payload if isinstance(payload, dict) else {}
+
+def _regular_project_file(path: Path, project: Path) -> bool:
+    try:
+        return read_bytes(project, path, limit=0) == b""
+    except OSError:
+        return False
+
+def _directories(path: Path) -> list[Path]:
+    try:
+        with os.scandir(path) as entries:
+            return sorted((Path(item.path) for item in entries if item.is_dir(follow_symlinks=False)), key=lambda item: item.name)
+    except OSError:
+        return []
 
 def _add_declared_roots(roots: set[Path], values: Any, *, file_value: bool = False) -> None:
     values = values if isinstance(values, list) else [values]
@@ -137,22 +148,22 @@ def _add_declared_roots(roots: set[Path], values: Any, *, file_value: bool = Fal
 
 def _manifest_source_roots(project: Path) -> set[Path]:
     roots: set[Path] = set()
-    profile = _json_object(project / "StarForge.profile.json")
+    profile = _json_object(project / "StarForge.profile.json", project)
     quality = profile.get("quality")
     for source in (profile, quality if isinstance(quality, dict) else {}):
         for key in _POLICY["profile_root_keys"]:
             if key in source:
                 _add_declared_roots(roots, source[key])
     pyproject = project / "pyproject.toml"
-    if tomllib is not None and pyproject.is_file():
+    if tomllib is not None:
         try:
-            payload = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+            payload = tomllib.loads(read_bytes(project, pyproject).decode("utf-8"))
         except (OSError, UnicodeError, tomllib.TOMLDecodeError):
             payload = {}
         package_dir = (payload.get("tool", {}).get("setuptools", {}).get("package-dir", {}) if isinstance(payload, dict) else {})
         if isinstance(package_dir, dict):
             _add_declared_roots(roots, list(package_dir.values()))
-    package = _json_object(project / "package.json")
+    package = _json_object(project / "package.json", project)
     for key in _POLICY["package_root_keys"]:
         if key in package:
             _add_declared_roots(roots, package[key], file_value=True)
@@ -162,25 +173,14 @@ def discover_source_roots(project: Path) -> tuple[str, ...]:
     """Discover conventional and repository-declared roots deterministically."""
     project = project.resolve()
     roots = _manifest_source_roots(project)
-    try:
-        children = sorted((path for path in project.iterdir() if path.is_dir()),
-                          key=lambda item: item.name)
-    except OSError:
-        children = []
-    for child in children:
+    for child in _directories(project):
         if child.name in SOURCE_ROOT_NAMES:
             roots.add(Path(child.name))
             if child.name in WORKSPACE_CONTAINER_NAMES:
-                try:
-                    units = sorted((path for path in child.iterdir() if path.is_dir()),
-                                   key=lambda item: item.name)
-                except OSError:
-                    units = []
-                for unit in units:
-                    for nested in SOURCE_ROOT_NAMES:
-                        if (unit / nested).is_dir():
-                            roots.add(Path(child.name) / unit.name / nested)
-    if any((project / name).is_file() for name in _POLICY["root_markers"]):
+                for unit in _directories(child):
+                    roots.update(Path(child.name) / unit.name / nested.name
+                                 for nested in _directories(unit) if nested.name in SOURCE_ROOT_NAMES)
+    if any(_regular_project_file(project / name, project) for name in _POLICY["root_markers"]):
         roots.add(Path("."))
     return tuple(sorted({root.as_posix() for root in roots}))
 
@@ -205,8 +205,8 @@ def classify_source_path(
 ) -> SourceClassification:
     """Classify a path as production, test, docs, config, other, or excluded."""
     candidate = Path(path)
-    root = Path(project).resolve() if project is not None else None
-    relative, parts = _relative_parts(candidate, root)
+    root = Path(project) if project is not None else None
+    relative, parts, _unsafe = _relative_parts(candidate, root)
     rel = relative.as_posix()
     reason = exclusion_reason(candidate, root)
     language = _language(relative) if relative.suffix.lower() in SOURCE_SUFFIXES else None
@@ -258,8 +258,7 @@ def _walk_project(project: Path) -> Iterator[tuple[Path, str | None, bool]]:
 def iter_project_files(project: Path) -> Iterator[Path]:
     """Yield quality-scannable files, excluding only explained artifacts."""
     for path, reason, is_directory in _walk_project(project):
-        if (not is_directory and not reason and not path.is_symlink()
-                and path.is_file() and is_text_file(path)):
+        if not is_directory and not reason and is_text_file(path):
             yield path
 
 def excluded_artifacts(project: Path) -> list[dict[str, str]]:
@@ -273,9 +272,9 @@ def classify_project(project: Path) -> list[SourceClassification]:
     roots = discover_source_roots(project)
     return [classify_source_path(path, project, source_roots=roots) for path in iter_project_files(project)]
 
-def _line_count(path: Path) -> tuple[int, str] | None:
+def _line_count(path: Path, project: Path) -> tuple[int, str] | None:
     try:
-        text = path.read_text(encoding="utf-8")
+        text = read_bytes(project, path).decode("utf-8")
     except (OSError, UnicodeError):
         return None
     return len(text.splitlines()), text
@@ -388,12 +387,12 @@ def _top_level_functions(text: str) -> set[str]:
     return {node.name for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and CONTROL_PLANE_FUNCTION_RE.match(node.name)}
 
 def _packed_statement_lines(text: str) -> set[int]:
-    """Return Python lines containing a real semicolon token."""
+    """Return physical lines that contain multiple Python statements."""
     try:
-        tokens = tokenize.generate_tokens(io.StringIO(text).readline)
-        return {token.start[0] for token in tokens if token.type == tokenize.OP and token.string == ";"}
-    except (IndentationError, tokenize.TokenError):
+        counts = Counter(node.lineno for node in ast.walk(ast.parse(text)) if isinstance(node, ast.stmt))
+    except SyntaxError:
         return set()
+    return {line for line, count in counts.items() if count > 1}
 
 def _module_findings(rel: str, path: Path, count: int, text: str) -> list[dict[str, Any]]:
     findings: list[dict[str, Any]] = []
@@ -460,7 +459,7 @@ def architecture_debt_findings(
         classification = classify_source_path(path, project, source_roots=roots)
         if classification.category != "production":
             continue
-        counted = _line_count(path)
+        counted = _line_count(path, project)
         if counted is None:
             continue
         count, text = counted

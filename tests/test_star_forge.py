@@ -15,10 +15,12 @@ import importlib.util
 import io
 import json
 import os
+import shlex
 import sys
 import tempfile
 import traceback
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "star_forge.py"
@@ -29,6 +31,7 @@ SPEC.loader.exec_module(star_forge)
 
 from live_collectors import browser_playwright
 from live_collectors import common as live_common
+from starforge import runtime_records
 from starforge import runtime_review
 
 # Isolate learnings from the real home for the whole suite (item: setup detail).
@@ -630,6 +633,98 @@ def test_verify_pass_records_stdout_tail() -> None:
         artifact = project / payload["artifact"]
         assert artifact.exists()
         assert json.loads(artifact.read_text(encoding="utf-8"))["kind"] == "verify-run"
+
+
+def test_verify_redacts_terminal_and_stored_payload_while_command_digest_matches() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        init_project(project)
+        command_secret = "commandvalue123456789"
+        stdout_secret = REAL_SK_KEY
+        summary_secret = REAL_AKIA_KEY
+        signed_value = "amzsig123456789"
+        stderr_text = (
+            f"https://cdn.example.test/build?X-Amz-Signature={signed_value} "
+            f"path={Path.home() / 'private' / 'token.txt'}"
+        )
+        script = (
+            f"import sys; print({stdout_secret!r}); "
+            f"print({stderr_text!r}, file=sys.stderr)"
+        )
+        command = (
+            f"GITHUB_TOKEN={command_secret} python3 -c {shlex.quote(script)}"
+        )
+        write_plan(project, [
+            f"| SF-1 | Verify secret handling | ready | solo | src/hello.py | - | {command} | - |"
+        ])
+        source = project / "src" / "hello.py"
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_text("print('safe')\n", encoding="utf-8")
+
+        code, out, err = run_cli([
+            "verify", "--project", str(project), "--task", "SF-1",
+            "--command", command, "--summary", f"summary {summary_secret}",
+            "--strict",
+        ])
+        assert code == 0, err or out
+        payload = json.loads(out)
+        artifact = project / payload["artifact"]
+        stored = json.loads(artifact.read_text(encoding="utf-8"))
+        terminal_blob = out + err
+        stored_blob = artifact.read_text(encoding="utf-8")
+        state_blob = "\n".join(
+            path.read_text(encoding="utf-8", errors="replace")
+            for path in (project / ".starforge").rglob("*") if path.is_file()
+        )
+        for secret in (
+            command_secret, stdout_secret, summary_secret, signed_value,
+            str(Path.home()),
+        ):
+            assert secret not in terminal_blob
+            assert secret not in stored_blob
+            assert secret not in state_blob
+        assert stored == payload
+        assert payload["redaction_report"]["secret_values"] >= 3
+        assert payload["redaction_report"]["home_paths"] >= 1
+        assert payload["command_digest"] == runtime_records.command_identity_digest(command)
+        task = star_forge.parse_tasks(project / "Plan.md")[0]
+        assert star_forge.fresh_passing_verify(project, task) is True
+
+
+def test_verify_redacts_problem_before_terminal_and_storage() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        init_project(project)
+        problem_secret = REAL_SK_KEY
+        problem = {
+            "severity": "high",
+            "rule": "source-snapshot",
+            "message": f"api-key={problem_secret}",
+            "blocking": True,
+        }
+        snapshot = {"source_hash": star_forge.source_hash(project)}
+        with mock.patch.object(
+            runtime_records, "safe_release_snapshot",
+            return_value=(snapshot, problem),
+        ):
+            code, out, err = run_cli([
+                "verify", "--project", str(project), "--task", "SF-1",
+                "--command", REAL_VERIFY, "--strict",
+            ])
+        assert code == 1, err or out
+        payload = json.loads(out)
+        stored = (project / payload["artifact"]).read_text(encoding="utf-8")
+        assert problem_secret not in out + err
+        assert problem_secret not in stored
+        assert all(
+            problem_secret not in path.read_text(
+                encoding="utf-8", errors="replace"
+            )
+            for path in (project / ".starforge").rglob("*") if path.is_file()
+        )
+        assert "[REDACTED_SECRET]" in payload["problems"][0]["message"]
+        assert payload["redaction_report"]["secret_values"] >= 1
+        assert json.loads(stored) == payload
 
 
 def test_verify_fail_returns_nonzero_in_strict_mode() -> None:
@@ -2116,7 +2211,7 @@ def test_reviewers_agreeing_findings_dedup_into_one() -> None:
         assert len(merged["fix_queue"]) == 1
 
 
-def test_role_specific_duplicate_variants_dedup_into_one_queue_item() -> None:
+def test_role_specific_duplicate_variants_share_a_presentation_group() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         project = Path(tmp).resolve()
         reviewable_project(project)
@@ -2147,9 +2242,10 @@ def test_role_specific_duplicate_variants_dedup_into_one_queue_item() -> None:
             write_reviewer_findings(project, role, [finding])
         scope = star_forge.scope_hash(project) or "noscope"
         merged = star_forge.merge_review(project, scope)
-        assert len(merged["findings"]) == 1
-        assert merged["findings"][0]["agreed_by"] == ["architecture", "correctness", "security"]
-        assert len(merged["fix_queue"]) == 1
+        assert len(merged["findings"]) == 3
+        assert len(merged["fix_queue"]) == 3
+        assert len({item["fingerprint"] for item in merged["findings"]}) == 3
+        assert len({item["presentation_group"] for item in merged["findings"]}) == 1
 
 
 def test_review_dedupe_preserves_max_severity_for_later_blocking_duplicate() -> None:
@@ -2166,8 +2262,8 @@ def test_review_dedupe_preserves_max_severity_for_later_blocking_duplicate() -> 
         high = {
             "severity": "high",
             "file": "src/hello.py",
-            "line": 13,
-            "title": "Greeting missing input guard blocks release",
+            "line": 12,
+            "title": "Greeting empty user guard is missing",
             "detail": "Null user path raises AttributeError before rendering.",
         }
         write_reviewer_findings(project, "correctness", [low], agent_id="review-low")
@@ -2182,6 +2278,59 @@ def test_review_dedupe_preserves_max_severity_for_later_blocking_duplicate() -> 
         assert {"role": "security", "agent_id": "review-high", "severity": "high"} in finding["role_details"]
         assert len(merged["fix_queue"]) == 1
         assert merged["fix_queue"][0]["severity"] == "high"
+
+
+def test_simultaneous_fuzzy_findings_require_independent_waivers() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        reviewable_project(project)
+        findings = [
+            {
+                "severity": "high",
+                "file": "src/hello.py",
+                "line": 1,
+                "title": "Hardcoded API token",
+                "detail": "A production token is embedded in the request client",
+            },
+            {
+                "severity": "high",
+                "file": "src/hello.py",
+                "line": 2,
+                "title": "Credential exposed in debug output",
+                "detail": "A password is printed by the debug logger",
+            },
+        ]
+        write_reviewer_findings(project, "correctness", findings)
+        write_reviewer_findings(project, "security", [])
+        write_reviewer_findings(project, "architecture", [])
+        code, out, err = run_cli([
+            "review", "--project", str(project), "--strict",
+        ])
+        assert code == 1, err or out
+        merged = json.loads(out)
+        assert len(merged["fix_queue"]) == 2
+        assert len({item["fingerprint"] for item in merged["fix_queue"]}) == 2
+        assert len({item["presentation_group"] for item in merged["fix_queue"]}) == 1
+
+        first = next(
+            item for item in merged["fix_queue"]
+            if item["title"] == findings[0]["title"]
+        )
+        code, out, err = run_cli([
+            "waive", "--project", str(project), "--finding", first["id"],
+            "--reason", "accept API test token only",
+        ])
+        assert code == 0, err or out
+        assert json.loads(out)["open_findings"] == 1
+        after = star_forge.merge_review(
+            project, star_forge.scope_hash(project) or "noscope"
+        )
+        remaining = [
+            item for item in after["fix_queue"]
+            if item["title"] == findings[1]["title"]
+        ]
+        assert len(remaining) == 1
+        assert remaining[0]["waived"] is False
 
 
 # ----------------------------------------------- 7. done + proof + amend loop
@@ -2291,6 +2440,89 @@ def test_done_requires_change_packet_for_post_proof_drift_without_run() -> None:
         code, payload = run_done(project)
         assert code == 1, payload
         assert payload["drift"]["detected"] is True
+        assert payload["drift"]["actionable"] is True
+        assert any(
+            item.get("rule") == "post-proof-change-packet-required"
+            for item in payload["problems"]
+        )
+
+
+def test_done_rejects_reusing_historical_legacy_amend_for_new_drift() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        init_project(project)
+        write_blueprint(project)
+        write_plan(project, [
+            f"| SF-1 | Build the greeter module | ready | solo | src/hello.py | - | {REAL_VERIFY} | - |",
+            f"| AMEND-1 | Historical greeting fix | ready | solo | src/hello.py | SF-1 | {REAL_VERIFY} | - |",
+        ])
+        source = project / "src" / "hello.py"
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_text("print('hello forge')\n", encoding="utf-8")
+
+        record_verify(project, "SF-1")
+        code, out, err = run_cli([
+            "complete-task", "--project", str(project), "--task", "SF-1",
+            "--changed-file", "src/hello.py",
+        ])
+        assert code == 0, err or out
+        record_verify(project, "AMEND-1")
+        code, out, err = run_cli([
+            "complete-task", "--project", str(project), "--task", "AMEND-1",
+            "--changed-file", "src/hello.py",
+        ])
+        assert code == 0, err or out
+        for task_id in ("SF-1", "AMEND-1"):
+            record_verify(project, task_id)
+        write_clean_review_wave(project)
+        code, out, err = run_cli([
+            "review", "--project", str(project), "--strict",
+        ])
+        assert code == 0, err or out
+        commit_all(project, "complete legacy project with historical amendment")
+        code, payload = run_done(project)
+        assert code == 0, payload
+        assert payload["is_complete"] is True
+        proof = star_forge.read_json(project / star_forge.PROOF_FILE)
+        history_code, historical_plan, history_error = star_forge.run_git(
+            ["show", f"{proof['head']}:{star_forge.PLAN_FILE}"], project
+        )
+        assert history_code == 0, history_error
+        assert "AMEND-1" in historical_plan
+        assert "AMEND-1" in {
+            task["id"] for task in star_forge.parse_tasks(project / "Plan.md")
+        }
+
+        source.write_text("print('changed after historical amendment')\n", encoding="utf-8")
+        plan = project / "Plan.md"
+        plan.write_text(
+            plan.read_text(encoding="utf-8").replace(
+                "| AMEND-1 | Historical greeting fix | complete |",
+                "| AMEND-1 | Historical greeting fix | ready |",
+            ),
+            encoding="utf-8",
+        )
+        record_verify(project, "AMEND-1")
+        code, out, err = run_cli([
+            "complete-task", "--project", str(project), "--task", "AMEND-1",
+            "--changed-file", "src/hello.py",
+        ])
+        assert code == 0, err or out
+        for task_id in ("SF-1", "AMEND-1"):
+            record_verify(project, task_id)
+        write_clean_review_wave(project)
+        code, out, err = run_cli([
+            "review", "--project", str(project), "--strict",
+        ])
+        assert code == 0, err or out
+        commit_all(project, "attempt to reuse historical amendment")
+
+        code, payload = run_done(project)
+        assert code == 1, payload
+        assert payload["is_complete"] is False
+        assert payload["drift"]["detected"] is True
+        assert payload["drift"]["covered_by_completed_amendment"] is None
+        assert payload["drift"]["covered_by_completed_change_packet"] is None
         assert payload["drift"]["actionable"] is True
         assert any(
             item.get("rule") == "post-proof-change-packet-required"

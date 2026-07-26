@@ -1,39 +1,37 @@
 """Acyclic persistence primitives shared by runtime proof commands."""
 
 from __future__ import annotations
+import json
 import time
 from pathlib import Path
 from typing import Any
 from .policy_data import mapping as policy_mapping, value as policy_value
-from .runtime_support import LEDGER_FILE, RUNS_DIR, append_jsonl, now_utc, read_json, redact, relative_to_project, slugify, stable_json_hash, timestamp_slug, write_json
+from .runtime_support import LEDGER_FILE, RUNS_DIR, append_jsonl, now_utc, read_json, redact, relative_to_project, slugify, stable_json_hash, timestamp_slug, write_text
 from .runtime_project import ensure_state_dirs
 
 STORE_POLICY = policy_value("runtime_records.POLICY")
 
-def run_record_path(project: Path, *, kind: str, task: str | None = None,
-                    digest: str | None = None) -> Path:
-    parts = [timestamp_slug(), slugify(kind)]
-    if task:
-        parts.append(slugify(task))
-    if digest:
-        parts.append(slugify(digest[:12]))
-    return project / RUNS_DIR / ("-".join(parts) + ".json")
-
-def write_run_record(project: Path, payload: dict[str, Any]) -> Path:
+def write_run_record(project: Path, payload: dict[str, Any], *,
+                     sanitized: bool = False) -> Path:
     ensure_state_dirs(project)
-    payload = dict(payload)
-    payload.setdefault("created_at", now_utc())
-    payload.setdefault("recorded_ns", time.time_ns())
-    payload.setdefault("project", str(project))
-    kind = str(payload.get("kind") or payload.get("schema") or STORE_POLICY["kinds"]["run_default"])
-    task = str(payload.get("task") or "") or None
-    digest = stable_json_hash(redact({key: value for key, value in payload.items() if key != "artifact"}))
-    path = run_record_path(project, kind=kind, task=task, digest=digest)
-    write_json(path, payload)
+    record = payload if sanitized else dict(payload)
+    record.setdefault("created_at", now_utc())
+    record.setdefault("recorded_ns", time.time_ns())
+    record.setdefault("project", str(project))
+    output = record if sanitized else redact(record)
+    kind = str(output.get("kind") or output.get("schema") or STORE_POLICY["kinds"]["run_default"])
+    task = str(output.get("task") or "") or None
+    digest = stable_json_hash({key: value for key, value in output.items() if key != "artifact"})
+    parts = [timestamp_slug(), slugify(kind)]
+    parts.extend(slugify(item) for item in (task, digest[:12]) if item)
+    path = project / RUNS_DIR / ("-".join(parts) + ".json")
+    if sanitized:
+        output["artifact"] = relative_to_project(path, project)
+    write_text(path, json.dumps(output, indent=2, sort_keys=True) + "\n")
     append_jsonl(project / LEDGER_FILE, policy_mapping(
         "ledger_event", schema=STORE_POLICY["schemas"]["ledger"],
         timestamp=now_utc(), event=kind, task=task,
-        verdict=payload.get("verdict"), summary=payload.get("summary") or "",
+        verdict=output.get("verdict"), summary=output.get("summary") or "",
         artifacts=[relative_to_project(path, project)]))
     return path
 

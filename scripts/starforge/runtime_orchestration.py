@@ -14,6 +14,7 @@ from starforge import learnings as global_learnings
 from starforge import lifecycle as project_lifecycle
 from starforge import quality as project_quality
 from starforge import review_policy as adaptive_review_policy
+from starforge import safe_io
 from .policy_data import mapping as policy_mapping, project as project_record, record as policy_record, value as _policy_value
 from .runtime_support import AGENT_NAME_PREFIX, BLOCKING_SEVERITIES, BLUEPRINT_FILE, CANONICAL_STATE, HOOK_EVENTS, HOOK_TRUST_NOTICE_FILE, INCIDENTS_FILE, LEDGER_FILE, PLAN_FILE, PROJECT_MANIFEST, REVIEW_ROLE_LENSES, SF_VERSION, SOURCE_PROFILE_FILE, ForgeError, append_jsonl, blocking_items, ensure_git_repo, ensure_gitignore_entries, file_sha256, git_status, git_status_path, is_git_repo, jsonl_payloads, now_utc, plugin_root, read_json, read_text, relative_to_project, slugify, snapshot_file_candidates, template_text, write_json, write_json_stable, write_text
 from .runtime_project import enforcement_mode, ensure_project_manifest, ensure_state_dirs, fast_mvp_profile_lock_state, fast_mvp_profile_selected_before_gates, find_star_forge_project_root, hooks_liveness, normalize_project_profile, profile_downgrade_lock_reasons, project_profile, required_review_policy, resolve_project, review_profile, root_needs_product_isolation, setup_ledger_records_fast_mvp_before_gates, source_hash_exception_problem, source_hash_unavailable_problem, source_hash_unavailable_state, source_profile_path, try_source_hash
@@ -127,11 +128,11 @@ def render_agent_toml(role: str) -> str:
             f"developer_instructions = {toml_multiline(body.rstrip())}\n")
 
 def install_agents(project: Path, target: Path) -> list[str]:
-    target.mkdir(parents=True, exist_ok=True)
+    safe_io.make_directory(project, target)
     installed: list[str] = []
     for role in agent_role_names():
         path = target / f"{AGENT_NAME_PREFIX}{role}.toml"
-        write_text(path, render_agent_toml(role))
+        write_text(path, render_agent_toml(role), root=project)
         installed.append(relative_to_project(path, project))
     return installed
 
@@ -158,13 +159,17 @@ def resolve_isolation(raw_project: Path, *, product_slug: str, adopt_root: bool)
         # The nested manifest must exist before the redirect to prevent the target
         # from resolving back to the foreign root while it has no markers.
         ensure_project_manifest(project, product_slug=slug)
-        write_json(raw_project / PROJECT_MANIFEST, policy_record("project_redirect", project_root=str(project)))
+        write_json(
+            raw_project / PROJECT_MANIFEST,
+            policy_record("project_redirect", project_root=str(project)),
+            root=raw_project,
+        )
         if (raw_project / ".git").exists():
             ensure_gitignore_entries(raw_project, [".starforge/", "work/"])
         for carried in ORCHESTRATION["carried_project_files"]:
             src, dst = raw_project / carried, project / carried
             if src.exists() and not dst.exists():
-                write_text(dst, read_text(src))
+                write_text(dst, read_text(src, root=raw_project), root=project)
         return project, None
     if adopt_root:
         ensure_project_manifest(raw_project, root_mode="adopted-root")
@@ -194,7 +199,7 @@ def cmd_init(args: argparse.Namespace) -> int:
     for template_name, target_name in ORCHESTRATION["init_templates"]:
         target = project / target_name
         if args.force or not target.exists():
-            write_text(target, template_text(template_name))
+            write_text(target, template_text(template_name), root=project)
             created.append(target_name)
         else:
             skipped.append(f"{target_name} already exists")
@@ -208,7 +213,7 @@ def cmd_init(args: argparse.Namespace) -> int:
     profile_path = source_profile_path(project)
     descriptor = "ledger_setup_profile" if profile_path.exists() else "ledger_setup"
     if profile_path.exists():
-        setup_values["source_profile_sha256"] = file_sha256(profile_path)
+        setup_values["source_profile_sha256"] = file_sha256(profile_path, root=project)
     append_jsonl(project / LEDGER_FILE, policy_record(descriptor, **setup_values))
     _print_record("init", created=created, skipped=skipped, project=str(project))
     return 0

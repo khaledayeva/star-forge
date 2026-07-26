@@ -11,7 +11,7 @@ from starforge import changes as project_changes
 from starforge import contracts as project_contracts
 from .runtime_support import BLOCKING_SEVERITIES, FINAL_SUMMARY, FINDING_SEVERITIES, FINDING_SEVERITY_RANK, INCIDENTS_FILE, KNOWN_REVIEW_ROLES, LEDGER_FILE, PLAN_FILE, PROOF_FILE, REVIEWS_DIR, REVIEW_PROFILE_ROLES, STATE_SUBDIR, SUBAGENT_EVENTS, WAIVES_FILE, ForgeError, append_jsonl, architecture_debt_findings, blocking_items, finding_problem, git_head, git_status, is_git_repo, iter_project_files, jsonl_payloads, now_utc, read_json, read_text, relative_to_project, run_git, scan_paths, slugify, source_dirty_entries, source_hash, write_json, write_text
 from .runtime_project import enforcement_mode, ensure_state_dirs, fast_mvp_profile_lock_state, hooks_liveness, project_profile, read_source_profile, required_review_policy, required_review_roles, resolve_project, review_profile, safe_release_snapshot, source_hash_exception_problem, source_hash_unavailable_problem, source_hash_unavailable_state, try_source_hash
-from .runtime_plan import all_tasks_complete, blueprint_is_approved, blueprint_lifecycle_contract, lifecycle_gate_state, parse_depends, parse_tasks, parse_tasks_from_text, plan_is_placeholder, plan_parse_problem, scope_hash, task_allows_noop_verification, task_counts, task_is_visual, task_plan, task_requires_real_workers, update_plan_task_row, validate_project_plan_contract, validate_tasks
+from .runtime_plan import all_tasks_complete, blueprint_is_approved, blueprint_lifecycle_contract, lifecycle_gate_state, parse_depends, parse_tasks, plan_is_placeholder, plan_parse_problem, scope_hash, task_allows_noop_verification, task_counts, task_is_visual, task_plan, task_requires_real_workers, update_plan_task_row, validate_project_plan_contract, validate_tasks
 from .runtime_records import browser_findings, fresh_passing_verify, has_noop_verify, passing_browser_runs, verify_findings
 REVIEW_POLICY = _policy_value("runtime_review.POLICY")
 def reviews_scope_dir(project: Path, scope: str) -> Path:
@@ -129,13 +129,27 @@ def merge_duplicate_finding(existing: dict[str, Any], candidate: dict[str, Any])
 def assign_finding_ids(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for finding in findings:
-        existing = next((item for item in out if findings_are_duplicate_variants(item, finding)), None)
-        if existing is not None:
-            merge_duplicate_finding(existing, finding)
-            continue
         finding = dict(finding)
-        finding["id"] = finding.get("id") or f"F-{len(out) + 1}"
         finding["fingerprint"] = finding_fingerprint(finding)
+        exact = next((item for item in out
+                      if item.get("fingerprint") == finding["fingerprint"]), None)
+        if exact is not None:
+            merge_duplicate_finding(exact, finding)
+            continue
+        related = next((item for item in out
+                        if findings_are_duplicate_variants(item, finding)), None)
+        if related is not None:
+            group = str(related.get("presentation_group") or
+                        f"PG-{str(related['fingerprint']).removeprefix('sha256:')[:12]}")
+            related["presentation_group"] = group
+            finding["presentation_group"] = group
+        used_ids = {str(item.get("id") or "") for item in out}
+        requested_id = str(finding.get("id") or "")
+        if not requested_id or requested_id in used_ids:
+            number = 1
+            while f"F-{number}" in used_ids:
+                number += 1
+            finding["id"] = f"F-{number}"
         out.append(finding)
     return out
 def load_waives(project: Path, scope: str, *,
@@ -472,33 +486,6 @@ def completed_task_matches_source(project: Path, task_id: str, current: str, *, 
                 and snapshot.get("source_hash") == current
                 and (not attest_task or payload.get("task") == task_id))
 def completed_amendment_covering_drift(project: Path, tasks: Sequence[dict[str, Any]], drift: dict[str, Any]) -> str | None:
-    if not drift.get("detected"):
-        return None
-    if not tasks or any(task.get("plan_version") != "legacy" for task in tasks):
-        return None
-    if any(task.get("id", "").startswith("AMEND-") and task.get("status") != "complete" for task in tasks):
-        return None
-    proof = load_proof(project)
-    head = str((proof or {}).get("head") or "")
-    if not head or not is_git_repo(project):
-        return None
-    code, historical_plan, _ = run_git(["show", f"{head}:{PLAN_FILE}"], project)
-    if code:
-        return None
-    historical_tasks = parse_tasks_from_text(historical_plan)
-    if not historical_tasks or any(task.get("plan_version") != "legacy" for task in historical_tasks):
-        return None
-    historical_amends = {
-        str(task.get("id") or "") for task in historical_tasks
-        if task.get("plan_version") == "legacy" and task.get("status") == "complete"
-        and str(task.get("id") or "").startswith("AMEND-")
-    }
-    current = source_hash(project)
-    completed_amends = (task for task in tasks if str(task.get("id", "")).startswith("AMEND-") and task.get("status") == "complete")
-    for task in sorted(completed_amends, key=lambda item: str(item.get("id") or ""), reverse=True):
-        task_id = str(task.get("id") or "")
-        if task_id in historical_amends and completed_task_matches_source(project, task_id, current, attest_task=True):
-            return task_id
     return None
 def change_scope_files(drift: Mapping[str, Any]) -> list[str]:
     paths = project_changes.normalize_changed_files(drift.get("changed_files") or [])

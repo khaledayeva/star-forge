@@ -1,5 +1,4 @@
 """Cohesive Star Forge runtime extracted from the CLI facade."""
-
 from __future__ import annotations
 from .policy_data import record as policy_record, value as _policy_value
 import datetime as dt
@@ -12,15 +11,14 @@ from typing import Any, Iterable, Sequence
 from live_collectors import common as live_common
 from starforge import quality as project_quality
 from starforge import review_policy as adaptive_review_policy
+from starforge import safe_io
 SCRIPT_DIR = Path(__file__).resolve().parents[1]
-
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 SUPPORT_POLICY = _policy_value("runtime_support.POLICY")
 _POLICY_EXPORT_GROUPS = {group: frozenset(SUPPORT_POLICY[group]) for group in ("constants", "paths", "sets")}
 _ALIAS_PROVIDERS = {"live_common": live_common, "project_quality": project_quality, "review_policy": adaptive_review_policy}
 _PROVIDER_EXPORTS = {_ALIAS_PROVIDERS[group]: exports for group, exports in SUPPORT_POLICY["aliases"].items()}
-
 BLUEPRINT_FILE = SUPPORT_POLICY["constants"]["BLUEPRINT_FILE"]
 PLAN_FILE = SUPPORT_POLICY["constants"]["PLAN_FILE"]
 BLOCKING_SEVERITIES = SUPPORT_POLICY["sets"]["BLOCKING_SEVERITIES"]
@@ -30,7 +28,6 @@ TEXT_SUFFIXES = set(SUPPORT_POLICY["text_suffixes"])
 AI_RESIDUAL_PATTERNS = [(re.compile(pattern, re.IGNORECASE), rule, severity) for pattern, rule, severity in SUPPORT_POLICY["ai_residual_patterns"]]
 PNG_MAGIC = bytes.fromhex(SUPPORT_POLICY["image_magic_hex"]["png"])
 JPEG_MAGIC = bytes.fromhex(SUPPORT_POLICY["image_magic_hex"]["jpeg"])
-
 def __getattr__(name: str) -> Any:
     """Resolve explicitly declared compatibility names from their owner."""
     for group, names in _POLICY_EXPORT_GROUPS.items():
@@ -41,7 +38,6 @@ def __getattr__(name: str) -> Any:
         if name in exports:
             return getattr(provider, exports[name])
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-
 STOPWORDS = _policy_value('runtime_support.STOPWORDS')
 SECRET_RE = re.compile(
     r"("
@@ -62,50 +58,43 @@ SECRET_RE = re.compile(
     r")",
     re.IGNORECASE,
 )
-
 class ForgeError(Exception):
     """A deterministic Star Forge helper error."""
-
 def _error(name: str, **values: object) -> ForgeError:
     return ForgeError(SUPPORT_POLICY["messages"][name].format(**values))
-
 def timestamp_slug() -> str:
     return dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-
 def slugify(value: str) -> str:
     slug = re.sub(r"[^A-Za-z0-9_.-]+", "-", value.strip()).strip("-")
     return slug[:90] or "artifact"
-
 def plugin_root() -> Path:
     return Path(__file__).resolve().parents[2]
-
-def read_text(path: Path) -> str:
-    return path.read_text(encoding="utf-8")
-
-def write_text(path: Path, text: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8")
-
+def read_text(path: Path, *, root: Path | None = None) -> str:
+    return safe_io.read_text(root or safe_io.infer_root(path), path)
+def write_text(path: Path, text: str, *, root: Path | None = None) -> None:
+    safe_io.atomic_write_text(root or safe_io.infer_root(path), path, text)
 def read_json(path: Path) -> dict[str, Any]:
     payload = json.loads(read_text(path))
     if not isinstance(payload, dict):
         raise _error("json_object", path=path)
     return payload
-
-def write_json(path: Path, payload: dict[str, Any]) -> None:
-    write_text(path, json.dumps(redact(payload), **SUPPORT_POLICY["json_format"]) + "\n")
-
-def write_json_if_changed(path: Path, payload: dict[str, Any]) -> bool:
+def write_json(path: Path, payload: dict[str, Any], *, root: Path | None = None) -> None:
+    write_text(path, json.dumps(redact(payload), **SUPPORT_POLICY["json_format"]) + "\n", root=root)
+def write_json_if_changed(
+    path: Path,
+    payload: dict[str, Any],
+    *,
+    root: Path | None = None,
+) -> bool:
     text = json.dumps(redact(payload), **SUPPORT_POLICY["json_format"]) + "\n"
     if path.exists():
         try:
-            if read_text(path) == text:
+            if read_text(path, root=root) == text:
                 return False
         except OSError:
             pass
-    write_text(path, text)
+    write_text(path, text, root=root)
     return True
-
 def strip_volatile(value: Any) -> Any:
     if isinstance(value, dict):
         return {key: strip_volatile(item) for key, item in value.items()
@@ -113,7 +102,6 @@ def strip_volatile(value: Any) -> Any:
     if isinstance(value, list):
         return [strip_volatile(item) for item in value]
     return value
-
 def write_json_stable(path: Path, payload: dict[str, Any]) -> bool:
     """Write payload only when it differs from the existing file ignoring timestamps."""
     if path.exists():
@@ -125,17 +113,14 @@ def write_json_stable(path: Path, payload: dict[str, Any]) -> bool:
             return False
     write_json(path, payload)
     return True
-
 def stable_json_hash(payload: Any) -> str:
     return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")).hexdigest()
-
 def append_jsonl(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if path.exists() and path.is_symlink():
-        raise _error("symlink_append", path=path)
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(redact(payload), sort_keys=True) + "\n")
-
+    safe_io.append_text(
+        safe_io.infer_root(path),
+        path,
+        json.dumps(redact(payload), sort_keys=True) + "\n",
+    )
 def jsonl_payloads(path: Path) -> list[dict[str, Any]]:
     if not path.exists():
         return []
@@ -144,7 +129,6 @@ def jsonl_payloads(path: Path) -> list[dict[str, Any]]:
                 for payload in [json.loads(line)] if isinstance(payload, dict)]
     except Exception:
         return []
-
 def redact(value: Any) -> Any:
     if isinstance(value, str):
         return SECRET_RE.sub("[REDACTED_SECRET]", value)
@@ -159,12 +143,10 @@ def redact(value: Any) -> Any:
                 cleaned[str(key)] = redact(item)
         return cleaned
     return value
-
 def decode_image_meta(path: Path) -> dict[str, Any]:
     """Cheap image validation: magic bytes plus PNG IHDR dimensions."""
     try:
-        with path.open("rb") as handle:
-            head = handle.read(26)
+        head = safe_io.read_bytes(safe_io.infer_root(path), path, limit=26)
     except OSError:
         return {"valid_image": False}
     if head.startswith(PNG_MAGIC):
@@ -176,22 +158,18 @@ def decode_image_meta(path: Path) -> dict[str, Any]:
     if head.startswith(JPEG_MAGIC):
         return {"valid_image": True, "image_format": "jpeg"}
     return {"valid_image": False}
-
 def _run_git(command: str, project: Path) -> tuple[int, str, str]:
     return live_common.run_git(SUPPORT_POLICY["git_commands"][command], project)
-
 def git_head(project: Path) -> str | None:
     if not live_common.is_git_repo(project):
         return None
     code, out, _ = _run_git("head", project)
     return out.strip() if code == 0 and out.strip() else None
-
 def repo_root(cwd: Path) -> Path:
     code, out, _ = _run_git("root", cwd)
     if code == 0 and out.strip():
         return Path(out.strip()).resolve()
     return cwd.resolve()
-
 def ensure_git_repo(project: Path) -> bool:
     # A project nested inside a PARENT repo (work/<slug> isolation) must get its
     # own repository; otherwise every git-backed gate points at the user's repo.
@@ -201,7 +179,6 @@ def ensure_git_repo(project: Path) -> bool:
     if code != 0:
         raise _error("git_init", error=err.strip())
     return True
-
 def git_status(project: Path) -> list[str]:
     if not live_common.is_git_repo(project):
         return []
@@ -209,11 +186,9 @@ def git_status(project: Path) -> list[str]:
     if code != 0:
         return []
     return [line for line in out.splitlines() if line.strip()]
-
 def source_dirty_entries(entries: Sequence[str]) -> list[str]:
     """Filter Star Forge's own state writes out of dirty-tree checks."""
     return live_common.source_hash_dirty_entries(Path.cwd(), entries)
-
 def git_changed_files(project: Path) -> list[Path]:
     if not live_common.is_git_repo(project):
         return []
@@ -230,16 +205,17 @@ def git_changed_files(project: Path) -> list[Path]:
             seen.add(resolved)
             unique.append(path)
     return unique
-
 def relative_to_project(path: Path, project: Path) -> str:
     try:
         return str(path.resolve().relative_to(project.resolve()))
     except ValueError:
         return str(path)
-
 def ensure_gitignore_entries(project: Path, entries: Sequence[str]) -> list[str]:
     path = project / ".gitignore"
-    lines = read_text(path).splitlines() if path.exists() else []
+    try:
+        lines = read_text(path, root=project).splitlines()
+    except FileNotFoundError:
+        lines = []
     changed: list[str] = []
     for entry in entries:
         if entry in lines:
@@ -249,26 +225,22 @@ def ensure_gitignore_entries(project: Path, entries: Sequence[str]) -> list[str]
         lines.append(entry)
         changed.append(entry)
     if changed:
-        write_text(path, "\n".join(lines) + "\n")
+        write_text(path, "\n".join(lines) + "\n", root=project)
     return changed
-
 def template_text(name: str) -> str:
     path = plugin_root() / "templates" / name
     if not path.exists():
         raise _error("template_missing", path=path)
     return read_text(path)
-
 def is_text_file(path: Path) -> bool:
     dotenv = path.name == ".env" or path.name.startswith(".env.")
     return (path.name in SUPPORT_POLICY["text_names"] or dotenv or path.suffix.lower() in TEXT_SUFFIXES or
             path.suffix.lower() in SECRET_PRONE_SUFFIXES)
-
 def iter_project_files(project: Path, *, all_files: bool = False) -> Iterable[Path]:
     if all_files:
         yield from project_quality.iter_project_files(project)
     else:
         yield from git_changed_files(project)
-
 def scan_paths(paths: Iterable[Path], project: Path) -> list[dict[str, Any]]:
     findings: list[dict[str, Any]] = []
     for path in paths:
@@ -288,14 +260,11 @@ def scan_paths(paths: Iterable[Path], project: Path) -> list[dict[str, Any]]:
                 if pattern.search(line):
                     findings.append({"severity": severity, "rule": rule, "file": rel, "line": idx, "evidence": line.strip()[:160]})
     return findings
-
 def tree_clean_for_commit_binding(project: Path) -> bool:
     return not source_dirty_entries(git_status(project))
-
 def _release_hashes(project: Path) -> dict[str, str | None]:
     paths = {"blueprint_hash": project / BLUEPRINT_FILE, "plan_hash": project / PLAN_FILE}
-    return {name: live_common.file_sha256(path) if path.exists() else None for name, path in paths.items()}
-
+    return {name: live_common.file_sha256(path, root=project) if path.exists() else None for name, path in paths.items()}
 def release_snapshot(project: Path) -> dict[str, Any]:
     source_files = live_common.snapshot_file_candidates(project)
     return policy_record(
@@ -306,7 +275,6 @@ def release_snapshot(project: Path) -> dict[str, Any]:
         source_files=[relative_to_project(path, project) for path in source_files],
         **_release_hashes(project),
     )
-
 def release_snapshot_unavailable(project: Path, problems: Sequence[dict[str, Any]]) -> dict[str, Any]:
     return policy_record(
         "release_snapshot_unavailable",
@@ -318,22 +286,10 @@ def release_snapshot_unavailable(project: Path, problems: Sequence[dict[str, Any
         source_files=[],
         **_release_hashes(project),
     )
-
 def artifact_entry(project: Path, path: Path, *, kind: str) -> dict[str, Any]:
-    candidate = path if path.is_absolute() else project / path
-    entry: dict[str, Any] = {"kind": kind, "path": relative_to_project(candidate, project), "exists": candidate.exists()}
-    if candidate.exists() and candidate.is_file():
-        entry.update({
-            "sha256": live_common.file_sha256(candidate),
-            "bytes": candidate.stat().st_size,
-        })
-        if kind == "screenshot":
-            entry.update(decode_image_meta(candidate))
-    return entry
-
+    return live_common.artifact_record(project, path, kind=kind)
 def blocking_items(items: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
     return [item for item in items if str(item.get("severity", "")).lower() in BLOCKING_SEVERITIES]
-
 def finding_problem(finding: dict[str, Any]) -> dict[str, Any]:
     location = finding.get("file", "unknown")
     rule = finding.get("rule", "finding")

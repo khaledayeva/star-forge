@@ -155,6 +155,18 @@ def test_writer_is_atomic_validated_and_leaves_no_temporary_file() -> None:
         assert target.read_bytes() == original
 
 
+def test_reader_rejects_symlinked_envelopes_without_reading_the_target() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        project = root / "project"
+        project.mkdir()
+        outside = root / "outside.json"
+        outside.write_text(json.dumps(fixture()), encoding="utf-8")
+        linked = project / "proof.json"
+        linked.symlink_to(outside)
+        raises("cannot read evidence", evidence.read_envelope, linked, project_root=project)
+
+
 def test_v1_reader_adapts_without_rewriting_the_legacy_manifest() -> None:
     source = FIXTURES / "live-manifest-v1.json"
     original = source.read_bytes()

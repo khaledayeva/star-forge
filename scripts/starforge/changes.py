@@ -1,21 +1,13 @@
 """Isolated v0.4 change packets and read-only amendment history."""
-
 from __future__ import annotations
-
 import datetime as dt
 import json
-import os
 import re
-import shutil
-import stat
-import tempfile
 from pathlib import Path, PurePosixPath
 from typing import Any, Mapping, Sequence
-
-from . import change_derivation
+from . import change_derivation, safe_io
 from .contracts import parse_plan_tasks_text, serialize_plan_tasks
 from .policy_data import value as _policy_value
-
 _POLICY = _policy_value("changes.POLICY")
 CHANGE_ROOT = Path(".starforge") / "changes"
 CHANGE_FILE = "change.md"
@@ -28,7 +20,6 @@ CHANGE_IMPACT_SCHEMA = change_derivation.CHANGE_IMPACT_SCHEMA
 CHANGE_APPROVAL_STATES = frozenset(_POLICY["approval_states"])
 CHANGE_TEMPLATE_FILE = "Change.md"
 CHANGE_PLAN_TEMPLATE_FILE = "ChangePlan.md"
-
 _CHANGE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _AC_ID_RE = re.compile(r"AC-[1-9][0-9]*")
@@ -39,7 +30,6 @@ _FIELD_RE = re.compile(
 _SECTION_RE = re.compile(r"^\s*##\s+(?P<title>.+?)\s*$", re.MULTILINE)
 _PLACEHOLDER_RE = re.compile(r"\{\{[A-Z][A-Z0-9_]*\}\}")
 _LEGACY_AMEND_RE = re.compile(r"^AMEND-(?P<number>[1-9][0-9]*)$", re.IGNORECASE)
-
 class ChangePacketError(ValueError):
     """A change packet could not be read or safely updated."""
 def _now_utc() -> str:
@@ -50,7 +40,6 @@ def _valid_iso8601(value: str) -> bool:
     except (TypeError, ValueError):
         return False
     return parsed.tzinfo is not None and parsed.utcoffset() is not None
-
 def validate_change_id(change_id: str) -> str:
     """Return a safe packet identifier or raise ``ChangePacketError``."""
     if not isinstance(change_id, str) or not _CHANGE_ID_RE.fullmatch(change_id):
@@ -67,26 +56,6 @@ def _packet_root(project: Path, change_id: str) -> Path:
     except ValueError as exc:
         raise ChangePacketError("change packet escapes the project") from exc
     return packet
-def _lstat_problem(path: Path, *, kind: str) -> str:
-    try:
-        mode = path.lstat().st_mode
-    except FileNotFoundError:
-        return ""
-    except OSError as exc:
-        return f"{path} cannot be inspected: {exc}"
-    problems = ((stat.S_ISLNK(mode), "symlink"),
-                (kind == "directory" and not stat.S_ISDIR(mode), "directory"),
-                (kind == "file" and not stat.S_ISREG(mode), "regular file"))
-    for invalid, expected in problems:
-        if invalid:
-            return f"{path} must not be a symlink" if expected == "symlink" else f"{path} must be a {expected}"
-    return ""
-def _require_path(path: Path, kind: str, missing: str) -> None:
-    problem = _lstat_problem(path, kind=kind)
-    if problem:
-        raise ChangePacketError(problem)
-    if not path.exists():
-        raise ChangePacketError(missing)
 def _validate_packet_relative_path(raw_path: str, *, label: str) -> str:
     if not isinstance(raw_path, str) or not raw_path.strip():
         raise ChangePacketError(f"{label} must be a non-empty packet-relative path")
@@ -161,9 +130,10 @@ def _validate_delivery_impact(value: str) -> str:
         raise ChangePacketError("delivery_impact must be a single-line string")
     return cleaned
 def _read_template(path: Path) -> str:
-    _require_path(path, "file", f"template is missing: {path}")
     try:
-        return path.read_text(encoding="utf-8")
+        return safe_io.read_text(path.parent, path)
+    except FileNotFoundError as exc:
+        raise ChangePacketError(f"template is missing: {path}") from exc
     except UnicodeDecodeError as exc:
         raise ChangePacketError(f"template is not valid UTF-8: {path}") from exc
     except OSError as exc:
@@ -182,7 +152,6 @@ def normalize_changed_files(changed_files: Sequence[str]) -> list[str]:
         return change_derivation.normalize_changed_files(changed_files)
     except change_derivation.ChangeDerivationError as exc:
         raise ChangePacketError(str(exc)) from exc
-
 def derive_change_impact(
     *,
     changed_files: Sequence[str],
@@ -202,7 +171,6 @@ def derive_change_impact(
         )
     except change_derivation.ChangeDerivationError as exc:
         raise ChangePacketError(str(exc)) from exc
-
 def derive_change_impact_for_project(
     project: Path,
     changed_files: Sequence[str],
@@ -212,15 +180,15 @@ def derive_change_impact_for_project(
     """Load the root contracts and derive one change impact without mutation."""
     root = project.resolve()
     try:
-        plan_text = (root / "Plan.md").read_text(encoding="utf-8")
-        blueprint_text = (root / "Blueprint.md").read_text(encoding="utf-8")
+        plan_text = safe_io.read_text(root, root / "Plan.md")
+        blueprint_text = safe_io.read_text(root, root / "Blueprint.md")
     except (OSError, UnicodeError) as exc:
         raise ChangePacketError(f"root contracts cannot be read: {exc}") from exc
     delivery_contract: dict[str, Any] = {}
     delivery_path = root / ".starforge" / "contracts" / "delivery.json"
     if delivery_path.exists():
         try:
-            parsed = json.loads(delivery_path.read_text(encoding="utf-8"))
+            parsed = json.loads(safe_io.read_text(root, delivery_path))
         except (OSError, UnicodeError, json.JSONDecodeError) as exc:
             raise ChangePacketError(f"delivery contract cannot be read: {exc}") from exc
         if isinstance(parsed, dict):
@@ -243,7 +211,6 @@ def derive_change_impact_for_project(
         delivery_contract=delivery_contract,
         profile=profile,
     )
-
 def validate_change_packet(payload: Any) -> list[str]:
     """Return deterministic schema problems for a parsed change packet."""
     if not isinstance(payload, Mapping):
@@ -290,7 +257,6 @@ def _parsed_value(text: str, fields: Mapping[str, str], kind: str, label: str) -
     if kind == "state":
         return value.casefold()
     return None if kind == "approved" and value in _POLICY["parser"]["empty_approved_at"] else value
-
 def parse_change_text(text: str) -> dict[str, Any]:
     """Parse a v0.4 ``change.md`` document without accepting ambiguous fields."""
     if not isinstance(text, str):
@@ -305,24 +271,28 @@ def parse_change_text(text: str) -> dict[str, Any]:
     payload["affected_acs"] = _clean_affected_acs(payload["affected_acs"])
     return payload
 def _assert_packet_contents(packet: Path, payload: Mapping[str, Any]) -> None:
-    resolved_packet = packet.resolve()
+    project = safe_io.infer_root(packet)
     for field, _expected, kind in _POLICY["packet_paths"]:
         relative = _validate_packet_relative_path(str(payload[field]), label=field)
         path = packet / relative
-        _require_path(path, kind, f"{field} is missing: {relative}")
         try:
-            path.resolve().relative_to(resolved_packet)
-        except ValueError as exc:
-            raise ChangePacketError(f"{field} escapes the change packet") from exc
-
+            valid = (
+                safe_io.directory_exists(project, path)
+                if kind == "directory"
+                else not safe_io.read_bytes(project, path, limit=0)
+            )
+        except OSError as exc:
+            raise ChangePacketError(f"{field} is unsafe: {relative}: {exc}") from exc
+        if kind == "directory" and not valid:
+            raise ChangePacketError(f"{field} is missing: {relative}")
 def read_change_packet(project: Path, change_id: str) -> dict[str, Any]:
     """Read and validate one packet, including its packet-local paths."""
     packet = _packet_root(project, change_id)
-    _require_path(packet, "directory", f"change packet does not exist: {change_id}")
     change_path = packet / CHANGE_FILE
-    _require_path(change_path, "file", f"{CHANGE_FILE} is missing for {change_id}")
     try:
-        text = change_path.read_text(encoding="utf-8")
+        text = safe_io.read_text(project.resolve(), change_path)
+    except FileNotFoundError as exc:
+        raise ChangePacketError(f"change packet does not exist: {change_id}") from exc
     except UnicodeDecodeError as exc:
         raise ChangePacketError(f"{CHANGE_FILE} is not valid UTF-8") from exc
     except OSError as exc:
@@ -339,11 +309,8 @@ def read_change_packet(project: Path, change_id: str) -> dict[str, Any]:
     }
     impact_path = packet / CHANGE_IMPACT_FILE
     if impact_path.exists() or impact_path.is_symlink():
-        problem = _lstat_problem(impact_path, kind="file")
-        if problem:
-            raise ChangePacketError(problem)
         try:
-            impact = json.loads(impact_path.read_text(encoding="utf-8"))
+            impact = json.loads(safe_io.read_text(project.resolve(), impact_path))
         except (OSError, UnicodeError, json.JSONDecodeError) as exc:
             raise ChangePacketError(f"{CHANGE_IMPACT_FILE} cannot be read: {exc}") from exc
         if not isinstance(impact, dict) or impact.get("schema") != CHANGE_IMPACT_SCHEMA:
@@ -352,7 +319,6 @@ def read_change_packet(project: Path, change_id: str) -> dict[str, Any]:
             raise ChangePacketError(f"{CHANGE_IMPACT_FILE} does not match packet {change_id}")
         record["impact"] = impact
     return record
-
 def create_change_packet(
     project: Path,
     *,
@@ -374,11 +340,6 @@ def create_change_packet(
     timestamp = created_at or _now_utc()
     if not _valid_iso8601(timestamp):
         raise ChangePacketError("created_at must be an ISO-8601 timestamp with a timezone")
-    changes_root = root / CHANGE_ROOT
-    for directory in (root / ".starforge", changes_root):
-        problem = _lstat_problem(directory, kind="directory")
-        if problem:
-            raise ChangePacketError(problem)
     if packet.exists() or packet.is_symlink():
         raise ChangePacketError(f"change packet already exists: {change_id}")
     templates = (template_dir.resolve() if template_dir is not None
@@ -400,66 +361,21 @@ def create_change_packet(
     if parsed["change_id"] != change_id:
         raise ChangePacketError("rendered template changed the packet id")
     try:
-        changes_root.mkdir(parents=True, exist_ok=True)
-    except OSError as exc:
-        raise ChangePacketError(f"could not create {CHANGE_ROOT}: {exc}") from exc
-    temp_path: Path | None = None
-    try:
-        temp_path = Path(tempfile.mkdtemp(prefix=f".{change_id}.", suffix=".tmp", dir=changes_root))
-        (temp_path / CHANGE_EVIDENCE_DIR).mkdir()
-        (temp_path / CHANGE_REVIEW_DIR).mkdir()
-        _write_new_file(temp_path / CHANGE_FILE, change_text)
-        _write_new_file(temp_path / CHANGE_PLAN_FILE, plan_text)
-        _fsync_directory(temp_path)
-        os.replace(temp_path, packet)
-        temp_path = None
-        _fsync_directory(changes_root)
+        safe_io.atomic_create_bundle(
+            root,
+            packet,
+            directories=(CHANGE_EVIDENCE_DIR, CHANGE_REVIEW_DIR),
+            files={CHANGE_FILE: change_text, CHANGE_PLAN_FILE: plan_text},
+        )
     except OSError as exc:
         raise ChangePacketError(f"could not create change packet {change_id}: {exc}") from exc
-    finally:
-        if temp_path is not None:
-            shutil.rmtree(temp_path, ignore_errors=True)
     return read_change_packet(root, change_id)
-def _write_new_file(path: Path, text: str) -> None:
-    with path.open("x", encoding="utf-8", newline="\n") as handle:
-        handle.write(text)
-        handle.flush()
-        os.fsync(handle.fileno())
-def _fsync_directory(path: Path) -> None:
-    descriptor = os.open(path, os.O_RDONLY)
-    try:
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
 def _write_atomic_text(path: Path, text: str) -> None:
-    temporary: str | None = None
-    try:
-        with tempfile.NamedTemporaryFile(
-                mode="w",
-                encoding="utf-8",
-                newline="\n",
-                dir=path.parent,
-                prefix=f".{path.name}.",
-                suffix=".tmp",
-                delete=False,
-        ) as handle:
-            temporary = handle.name
-            handle.write(text)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
-        temporary = None
-        _fsync_directory(path.parent)
-    finally:
-        if temporary:
-            try:
-                Path(temporary).unlink(missing_ok=True)
-            except OSError:
-                pass
+    safe_io.atomic_write_text(safe_io.infer_root(path), path, text)
 def _read_packet_plan(project: Path, change_id: str) -> tuple[Path, str]:
     path = _packet_root(project, change_id) / CHANGE_PLAN_FILE
     try:
-        return path, path.read_text(encoding="utf-8")
+        return path, safe_io.read_text(project.resolve(), path)
     except (OSError, UnicodeError) as exc:
         raise ChangePacketError(f"packet Plan.md cannot be read: {exc}") from exc
 def _replace_plan_table(text: str, tasks: Sequence[Mapping[str, Any]]) -> str:
@@ -494,7 +410,6 @@ def _packet_plan_tasks(impact: Mapping[str, Any], change_id: str) -> list[dict[s
     if not tasks:
         raise ChangePacketError("derived change impact has no affected tasks")
     return tasks
-
 def plan_change_packet(
     project: Path,
     change_id: str,
@@ -519,7 +434,6 @@ def plan_change_packet(
     _write_atomic_text(packet_root / CHANGE_IMPACT_FILE,
                        json.dumps(impact_payload, indent=2, sort_keys=True, ensure_ascii=False) + "\n")
     return read_change_packet(project, change_id)
-
 def activate_change_plan(project: Path, change_id: str) -> list[dict[str, Any]]:
     """Make an approved packet's dependency-free task rows ready."""
     packet = read_change_packet(project, change_id)
@@ -541,12 +455,10 @@ def activate_change_plan(project: Path, change_id: str) -> list[dict[str, Any]]:
         raise ChangePacketError("packet Plan.md status is missing or ambiguous")
     _write_atomic_text(plan_path, updated)
     return parse_plan_tasks_text(updated)
-
 def change_plan_tasks(project: Path, change_id: str) -> list[dict[str, Any]]:
     """Read packet-local Plan v2 tasks without consulting the root Plan."""
     read_change_packet(project, change_id)
     return parse_plan_tasks_text(_read_packet_plan(project, change_id)[1])
-
 def next_change_id(project: Path) -> str:
     """Return the next collision-free numeric v0.4 packet id."""
     highest = 0
@@ -555,7 +467,6 @@ def next_change_id(project: Path) -> str:
         if match:
             highest = max(highest, int(match.group(1)))
     return f"CHANGE-{highest + 1}"
-
 def create_or_select_change_packet(
     project: Path,
     *,
@@ -594,7 +505,6 @@ def create_or_select_change_packet(
         template_dir=template_dir,
     )
     return plan_change_packet(project, packet["change_id"], impact)
-
 def approve_change_packet(
     project: Path,
     change_id: str,
@@ -613,7 +523,7 @@ def approve_change_packet(
         raise ChangePacketError("approved_at must be an ISO-8601 timestamp with a timezone")
     packet = _packet_root(project, change_id)
     path = packet / CHANGE_FILE
-    original = path.read_text(encoding="utf-8")
+    original = safe_io.read_text(project.resolve(), path)
     updated, state_count = re.subn(*_POLICY["transitions"]["approval_state"], original)
     approved_transition = _POLICY["transitions"]["approved_at"]
     updated, approved_count = re.subn(
@@ -631,16 +541,16 @@ def approve_change_packet(
     except OSError as exc:
         raise ChangePacketError(f"could not approve change packet {change_id}: {exc}") from exc
     return read_change_packet(project, change_id)
-
 def list_change_packets(project: Path) -> list[dict[str, Any]]:
     """Return all valid packet records in deterministic chronological order."""
     root = project.resolve()
     changes_root = root / CHANGE_ROOT
-    problem = _lstat_problem(changes_root, kind="directory")
-    if problem:
-        raise ChangePacketError(problem)
-    if not changes_root.exists():
-        return []
+    try:
+        safe_io.assert_tree_no_symlinks(root, changes_root)
+        if not safe_io.directory_exists(root, changes_root):
+            return []
+    except OSError as exc:
+        raise ChangePacketError(f"could not inspect {CHANGE_ROOT}: {exc}") from exc
     records: list[dict[str, Any]] = []
     try:
         entries = sorted(changes_root.iterdir(), key=lambda path: path.name)
@@ -649,23 +559,18 @@ def list_change_packets(project: Path) -> list[dict[str, Any]]:
     for entry in entries:
         if entry.name.startswith("."):
             continue
-        problem = _lstat_problem(entry, kind="directory")
-        if problem:
-            raise ChangePacketError(problem)
-        if not entry.is_dir():
+        if not safe_io.directory_exists(root, entry):
             raise ChangePacketError(f"unexpected entry in {CHANGE_ROOT}: {entry.name}")
         validate_change_id(entry.name)
         records.append(read_change_packet(root, entry.name))
     return sorted(records, key=lambda record: (
         str(record.get("created_at") or ""), str(record.get("change_id") or "")))
-
 def lookup_change_packet(project: Path, change_id: str) -> dict[str, Any] | None:
     """Look up one packet safely, returning ``None`` when it does not exist."""
     packet = _packet_root(project, change_id)
     if not packet.exists():
         return None
     return read_change_packet(project, change_id)
-
 def find_change_packets(
     project: Path,
     *,
@@ -685,17 +590,13 @@ def find_change_packets(
             if (original_completed_source_hash is None or record["original_completed_source_hash"] == original_completed_source_hash)
             and (affected_ac is None or affected_ac in record["affected_acs"])
             and (approval_state is None or record["approval_state"] == approval_state)]
-
 def legacy_amendment_history(project: Path) -> list[dict[str, Any]]:
     """Read v0.3 AMEND rows from root Plan.md without rewriting them."""
     plan = project.resolve() / "Plan.md"
-    problem = _lstat_problem(plan, kind="file")
-    if problem:
-        raise ChangePacketError(problem)
     if not plan.exists():
         return []
     try:
-        text = plan.read_text(encoding="utf-8")
+        text = safe_io.read_text(project.resolve(), plan)
     except UnicodeDecodeError as exc:
         raise ChangePacketError("root Plan.md is not valid UTF-8") from exc
     except OSError as exc:
@@ -713,7 +614,6 @@ def legacy_amendment_history(project: Path) -> list[dict[str, Any]]:
             "path": "Plan.md"}
         records.append(record)
     return sorted(records, key=lambda item: (item["legacy_number"], item["line"]))
-
 def change_history(project: Path) -> dict[str, Any]:
     """Return deterministic v0.4 packet history plus preserved v0.3 rows."""
     packets = list_change_packets(project)
@@ -726,7 +626,6 @@ def change_history(project: Path) -> dict[str, Any]:
         "packet_count": len(packets),
         "legacy_amendment_count": len(legacy),
     }
-
 def lookup_change_history(project: Path, change_id: str) -> dict[str, Any] | None:
     """Look up either a v0.4 packet or one preserved v0.3 amendment row."""
     packet = lookup_change_packet(project, change_id)

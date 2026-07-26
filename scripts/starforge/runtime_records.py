@@ -1,6 +1,7 @@
 """Cohesive Star Forge runtime extracted from the CLI facade."""
 from __future__ import annotations
 import argparse
+import hashlib
 import json
 import re
 import socket
@@ -10,17 +11,20 @@ from pathlib import Path
 from typing import Any, Sequence
 from live_collectors import common as live_common
 from .policy_data import mapping as _policy_mapping, value as _policy_value
-from .runtime_support import RUNS_DIR, SCREENSHOTS_DIR, SCREENSHOT_MANIFEST, SERVER_LEASE, ForgeError, artifact_entry, blocking_items, decode_image_meta, file_sha256, now_utc, read_json, redact, relative_to_project, slugify, source_hash, write_json
+from .runtime_support import RUNS_DIR, SCREENSHOTS_DIR, SCREENSHOT_MANIFEST, SERVER_LEASE, ForgeError, artifact_entry, blocking_items, decode_image_meta, file_sha256, now_utc, read_json, relative_to_project, slugify, source_hash, write_json
 from .runtime_project import ensure_state_dirs, resolve_project, safe_release_snapshot, try_source_hash
 from .runtime_plan import command_is_noop, normalize_command, task_allows_noop_verification, task_is_visual, task_plan, task_verify_command
 from .runtime_preview import current_live_source_hash, is_task_scoped_live_path, live_manifest_summary, load_and_validate_live_manifest, require_raw_hash_for_artifact
-from .runtime_store import load_run_records, run_record_path, write_run_record
+from .runtime_store import load_run_records, write_run_record
 RECORD_POLICY = _policy_value("runtime_records.POLICY")
 def _finish_record(project: Path, payload: dict[str, Any], strict: bool) -> int:
-    path = write_run_record(project, payload)
-    payload["artifact"] = relative_to_project(path, project)
-    print(json.dumps(payload, indent=2))
-    return 0 if payload["verdict"] == RECORD_POLICY["verdicts"]["pass"] or not strict else 1
+    sanitized, report = live_common.redact_sensitive_values(payload)
+    if not isinstance(sanitized, dict):
+        raise ForgeError("run record redaction did not produce an object")
+    sanitized["redaction_report"] = report
+    write_run_record(project, sanitized, sanitized=True)
+    print(json.dumps(sanitized, indent=2))
+    return 0 if sanitized["verdict"] == RECORD_POLICY["verdicts"]["pass"] or not strict else 1
 def _task_finding(name: str, task: str) -> dict[str, Any]:
     rule, message = RECORD_POLICY["findings"][name]
     return _policy_mapping("task_finding", rule=rule, file=str(RUNS_DIR),
@@ -36,6 +40,8 @@ def _report_browser_if(condition: bool, problems: list[dict[str, Any]], name: st
         problems.append(_browser_problem(name, path, **values))
 def command_output_tail(text: str, limit: int = 6000) -> str:
     return text[-limit:] if len(text) > limit else text
+def command_identity_digest(text: str) -> str:
+    return "sha256:" + hashlib.sha256(normalize_command(text).encode("utf-8")).hexdigest()
 def cmd_verify(args: argparse.Namespace) -> int:
     project = resolve_project(args.project)
     ensure_state_dirs(project)
@@ -69,15 +75,17 @@ def cmd_verify(args: argparse.Namespace) -> int:
     problems = [snapshot_problem] if snapshot_problem else []
     verdicts = RECORD_POLICY["verdicts"]
     verdict = verdicts["pass"] if proc_returncode == 0 and not problems else verdicts["fail"]
+    recorded_command = args.command or RECORD_POLICY["verify"]["noop_command"]
     payload = _policy_mapping(
         "verify_record", schema=RECORD_POLICY["schemas"]["verify"],
         kind=RECORD_POLICY["kinds"]["verify"], created_at=now_utc(),
         started_at=started, project=str(project), task=args.task,
-        command=args.command or RECORD_POLICY["verify"]["noop_command"],
+        command=recorded_command,
         noop=args.noop, returncode=proc_returncode, verdict=verdict,
         duration_timeout_seconds=args.timeout, source_snapshot=snapshot,
         stdout_tail=command_output_tail(stdout), stderr_tail=command_output_tail(stderr),
         problems=problems, summary=args.summary)
+    payload["command_digest"] = command_identity_digest(recorded_command)
     return _finish_record(project, payload, args.strict)
 def fresh_passing_verify(project: Path, task: dict[str, Any]) -> bool:
     """Require a passing verify bound to the declared command and current source."""
@@ -86,9 +94,12 @@ def fresh_passing_verify(project: Path, task: dict[str, Any]) -> bool:
     if hash_problem or current is None or not declared or command_is_noop(task_verify_command(task)):
         return False
     runs = load_run_records(project, kind="verify-run", task=task["id"])
+    declared_digest = command_identity_digest(declared)
     return any(
-        not command_is_noop(str(item.get("command") or ""))
-        and normalize_command(str(item.get("command") or "")) == declared
+        ((str(item.get("command_digest")) == declared_digest)
+         if item.get("command_digest") else
+         (not command_is_noop(str(item.get("command") or ""))
+          and normalize_command(str(item.get("command") or "")) == declared))
         and item.get("verdict") == RECORD_POLICY["verdicts"]["pass"]
         and not item.get("noop") and isinstance(item.get("source_snapshot"), dict)
         and item["source_snapshot"].get("source_hash") == current for item in runs)

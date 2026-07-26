@@ -1,5 +1,4 @@
 """Cohesive Star Forge runtime extracted from the CLI facade."""
-
 from __future__ import annotations
 import json
 import re
@@ -9,36 +8,19 @@ from typing import Any
 from live_collectors import common as live_common
 from starforge import lifecycle as project_lifecycle
 from starforge import review_policy as adaptive_review_policy
+from starforge import safe_io
 from .policy_data import mapping as _policy_mapping, record as _policy_record
 from .policy_data import value as _policy_value
 from .runtime_support import BLUEPRINT_FILE, HOOK_EVENTS, LEDGER_FILE, PLAN_FILE, PROJECT_MANIFEST, PROOF_FILE, REVIEWS_DIR, REVIEW_PROFILE_ROLES, SOURCE_PROFILE_FILE, SOURCE_PROFILE_SCHEMA, STAR_FORGE_STATE_VERSION, STATE_DIR, STOPWORDS, ForgeError, file_sha256, git_head, git_status, git_status_path, is_git_repo, jsonl_payloads, now_utc, read_json, read_text, release_snapshot, release_snapshot_unavailable, repo_root, run_git, slugify, source_hash, stable_json_hash, strip_volatile, write_json, write_json_if_changed, write_text
 from .runtime_plan import blueprint_is_approved, blueprint_text_is_approved, parse_tasks, parse_tasks_from_text, plan_is_placeholder
-
 _POLICY = _policy_value("runtime_project.POLICY")
 _STATE_POLICY = _policy_value("runtime_orchestration.POLICY")
-
 def assert_project_state_safe(project: Path) -> None:
     """Reject state paths that can escape the resolved project through symlinks."""
-    root, state_root = project.resolve(), project / STATE_DIR
-    if not state_root.exists() and not state_root.is_symlink():
-        return
     try:
-        if state_root.is_symlink():
-            raise ForgeError(f"Refusing unsafe Star Forge state symlink: {state_root}")
-        if not state_root.is_dir():
-            raise ForgeError(f"Refusing non-directory Star Forge state root: {state_root}")
-        if not state_root.resolve(strict=True).is_relative_to(root):
-            raise ForgeError(f"Refusing Star Forge state outside project root: {state_root}")
-        for path in state_root.rglob("*"):
-            if path.is_symlink():
-                raise ForgeError(f"Refusing unsafe Star Forge state symlink: {path}")
-            if not path.resolve(strict=True).is_relative_to(root):
-                raise ForgeError(f"Refusing Star Forge state outside project root: {path}")
-    except ForgeError:
-        raise
+        safe_io.assert_tree_no_symlinks(project.resolve(), STATE_DIR)
     except OSError as exc:
         raise ForgeError(f"Cannot safely inspect Star Forge state: {exc}") from exc
-
 def ensure_state_dirs(project: Path) -> None:
     project = project.resolve()
     assert_project_state_safe(project)
@@ -46,31 +28,29 @@ def ensure_state_dirs(project: Path) -> None:
         target = project / path
         if not target.is_relative_to(project):
             raise ForgeError(f"Refusing state directory outside project root: {target}")
-        target.mkdir(parents=True, exist_ok=True)
+        try:
+            safe_io.make_directory(project, target)
+        except OSError as exc:
+            raise ForgeError(f"Cannot safely create Star Forge state: {exc}") from exc
     assert_project_state_safe(project)
     if not (project / LEDGER_FILE).exists():
-        write_text(project / LEDGER_FILE, "")
-
+        write_text(project / LEDGER_FILE, "", root=project)
 def hooks_liveness(project: Path) -> dict[str, Any]:
     events = jsonl_payloads(project / HOOK_EVENTS)
     last_event = (str(events[-1].get("timestamp") or "") or None) if events else None
     return _policy_mapping("hooks_liveness", local_events_observed=last_event is not None,
                            local_last_event_at=last_event, **_STATE_POLICY["hook_liveness"])
-
 def enforcement_mode(project: Path) -> str:
     return "witnessed" if hooks_liveness(project)["events_observed"] else "advisory"
-
 def source_hash_unavailable_state(
     profile_lock: dict[str, Any], *, problems: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     return _policy_mapping(
         "source_hash_unavailable",
         problems=list(problems) if problems is not None else profile_lock.get("problems") or [])
-
 def has_star_forge_project_markers(project: Path) -> bool:
     assert_project_state_safe(project)
     return (project / PROJECT_MANIFEST).is_file()
-
 def _optional_load(path: Path, loader: Any, errors: tuple[type[BaseException], ...], default: Any) -> Any:
     if not path.exists():
         return default
@@ -78,10 +58,8 @@ def _optional_load(path: Path, loader: Any, errors: tuple[type[BaseException], .
         return loader(path)
     except errors:
         return default
-
 def _read_json_if_possible(path: Path) -> dict[str, Any]:
     return _optional_load(path, read_json, (Exception,), {})
-
 def find_star_forge_project_root(start: Path) -> Path | None:
     current = start.resolve()
     if current.is_file():
@@ -90,7 +68,6 @@ def find_star_forge_project_root(start: Path) -> Path | None:
         if has_star_forge_project_markers(candidate):
             return follow_project_redirect(candidate)
     return None
-
 def follow_project_redirect(candidate: Path) -> Path:
     manifest = _read_json_if_possible(candidate / PROJECT_MANIFEST)
     raw_root = (str(manifest.get("project_root") or "")
@@ -115,11 +92,9 @@ def follow_project_redirect(candidate: Path) -> Path:
     if not valid:
         raise ForgeError(f"Refusing unbound project redirect target: {raw_root}")
     return resolved
-
 def resolve_project(raw: str) -> Path:
     start = Path(raw).resolve()
     return find_star_forge_project_root(start) or repo_root(start)
-
 def root_needs_product_isolation(project: Path) -> bool:
     if has_star_forge_project_markers(project):
         return False
@@ -129,7 +104,6 @@ def root_needs_product_isolation(project: Path) -> bool:
         return False
     return bool(entries & set(_POLICY["isolation_markers"])
                 and entries - set(_POLICY["isolation_ignored"]))
-
 def product_slug_from_objective(project: Path, objective: str = "", explicit: str = "") -> str:
     if explicit.strip():
         return slugify(explicit).lower()
@@ -142,24 +116,19 @@ def product_slug_from_objective(project: Path, objective: str = "", explicit: st
     source = ("-".join(terms[:_POLICY["slug_term_limit"]]) if terms
               else project.name or _POLICY["slug_fallback"])
     return slugify(source).lower()
-
 def normalize_project_profile(profile: str) -> str:
     candidate = str(profile or "").strip()
     return candidate if candidate in REVIEW_PROFILE_ROLES else _POLICY["default_profile"]
-
 def source_profile_path(project: Path) -> Path:
     return project / SOURCE_PROFILE_FILE
-
 def _profile_failure(status: dict[str, Any], field: str, kind: str) -> dict[str, Any]:
     status[field] = _POLICY["source_profile_errors"][kind].format(file=SOURCE_PROFILE_FILE)
     return status
-
 def _attempt(operation: Any, errors: tuple[tuple[type[BaseException], str], ...]) -> tuple[Any, str]:
     try:
         return operation(), ""
     except tuple(error[0] for error in errors) as exc:
         return None, next(kind for exception, kind in errors if isinstance(exc, exception))
-
 def _source_profile_status(project: Path) -> dict[str, Any]:
     status = dict(_POLICY["source_profile_status_defaults"])
     path = source_profile_path(project)
@@ -196,28 +165,21 @@ def _source_profile_status(project: Path) -> dict[str, Any]:
         return _profile_failure(status, "invalid_problem", invalid)
     status["payload"] = payload
     return status
-
 def source_profile_exists(project: Path) -> bool:
     return bool(_source_profile_status(project)["exists"])
-
 def source_profile_path_problem(project: Path) -> str:
     return str(_source_profile_status(project)["path_problem"])
-
 def _profile_problem(status: dict[str, Any], *fields: str) -> str:
     return str(next((status[field] for field in fields if status[field]), ""))
-
 def source_profile_read_problem(project: Path) -> str:
     return _profile_problem(_source_profile_status(project), "path_problem", "read_problem")
-
 def source_profile_invalid_problem(project: Path) -> str:
     return _profile_problem(
         _source_profile_status(project), "path_problem", "read_problem", "invalid_problem")
-
 def source_profile_hash_blocker(project: Path) -> str:
     status = _source_profile_status(project)
     return (_profile_problem(status, "path_problem", "read_problem", "invalid_problem")
             if status["exists"] else "")
-
 def source_hash_unavailable_problem(project: Path) -> dict[str, Any] | None:
     problem = source_profile_hash_blocker(project)
     if not problem:
@@ -225,11 +187,9 @@ def source_hash_unavailable_problem(project: Path) -> dict[str, Any] | None:
     return _policy_mapping(
         "source_hash_problem", file=SOURCE_PROFILE_FILE,
         message=_POLICY["source_hash_messages"]["blocked"].format(problem=problem))
-
 def source_hash_exception_problem(exc: BaseException) -> dict[str, Any]:
     return _policy_mapping("source_hash_problem", file="source tree",
         message=_POLICY["source_hash_messages"]["exception"].format(error=exc))
-
 def try_source_hash(project: Path) -> tuple[str | None, dict[str, Any] | None]:
     problem = source_hash_unavailable_problem(project)
     if problem:
@@ -238,7 +198,6 @@ def try_source_hash(project: Path) -> tuple[str | None, dict[str, Any] | None]:
         return source_hash(project), None
     except (PermissionError, OSError) as exc:
         return None, source_hash_exception_problem(exc)
-
 def safe_release_snapshot(project: Path) -> tuple[dict[str, Any], dict[str, Any] | None]:
     problem = source_hash_unavailable_problem(project)
     if problem:
@@ -248,14 +207,11 @@ def safe_release_snapshot(project: Path) -> tuple[dict[str, Any], dict[str, Any]
     except (PermissionError, OSError) as exc:
         problem = source_hash_exception_problem(exc)
         return release_snapshot_unavailable(project, [problem]), problem
-
 def read_source_profile_payload(project: Path) -> dict[str, Any]:
     return dict(_source_profile_status(project)["payload"])
-
 def read_source_profile(project: Path) -> str:
     profile = str(read_source_profile_payload(project).get("profile") or "").strip()
     return profile if profile in REVIEW_PROFILE_ROLES else ""
-
 def ensure_source_profile(project: Path, profile: str) -> None:
     normalized = normalize_project_profile(profile)
     write_problem = source_profile_path_problem(project)
@@ -267,12 +223,10 @@ def ensure_source_profile(project: Path, profile: str) -> None:
     payload = _policy_record(
         "source_profile", profile=normalized, initial_profile=str(existing.get("initial_profile") or normalized),
         selected_before_gates=selected_before_gates, review_roles=review_roles_for_profile(normalized))
-    write_json_if_changed(source_profile_path(project), payload)
-
+    write_json_if_changed(source_profile_path(project), payload, root=project)
 def review_records_exist(project: Path) -> bool:
     root = project / REVIEWS_DIR
     return root.exists() and any(path.is_file() for path in root.rglob("*"))
-
 def _profile_gate_reasons(project: Path, *, extended: bool) -> list[str]:
     reasons: list[str] = []
     if blueprint_is_approved(project):
@@ -287,44 +241,36 @@ def _profile_gate_reasons(project: Path, *, extended: bool) -> list[str]:
     if extended and review_records_exist(project):
         reasons.append(_POLICY["gate_reasons"]["reviews"])
     return reasons
-
 def profile_downgrade_lock_reasons(project: Path) -> list[str]:
     return _profile_gate_reasons(project, extended=True)
-
 def source_profile_payload_from_text(text: str) -> dict[str, Any]:
     payload, error = _attempt(lambda: json.loads(text), ((Exception, "invalid"),))
     valid = (not error and isinstance(payload, dict)
              and payload.get("schema") == SOURCE_PROFILE_SCHEMA
              and str(payload.get("profile") or "").strip() in REVIEW_PROFILE_ROLES)
     return payload if valid else {}
-
 def _text_has_real_tasks(text: str, parser: Any) -> bool:
     try:
         tasks = parser(text)
     except Exception:
         return False
     return bool(tasks) and not plan_is_placeholder(tasks)
-
 def plan_text_has_real_tasks(text: str) -> bool:
     return _text_has_real_tasks(text, parse_tasks_from_text)
-
 def git_show_text(project: Path, revision: str, relpath: str) -> str | None:
     code, out, _ = run_git(["show", f"{revision}:{relpath}"], project)
     return out if code == 0 else None
-
 def git_revision_has_review_gates(project: Path, revision: str) -> bool:
     blueprint, plan = (git_show_text(project, revision, path)
                        for path in (BLUEPRINT_FILE, PLAN_FILE))
     return bool(blueprint is not None and blueprint_text_is_approved(blueprint)
                 or plan is not None and plan_text_has_real_tasks(plan))
-
 def git_revision_or_ancestors_have_review_gates(project: Path, revision: str) -> bool:
     code, out, _ = run_git(["rev-list", "--reverse", revision], project)
     if code != 0:
         return True
     return any(git_revision_has_review_gates(project, line.strip())
                for line in out.splitlines() if line.strip())
-
 def git_history_has_fast_mvp_before_gates(project: Path) -> bool:
     if not is_git_repo(project) or git_head(project) is None:
         return False
@@ -337,7 +283,6 @@ def git_history_has_fast_mvp_before_gates(project: Path) -> bool:
                          git_show_text(project, revision, SOURCE_PROFILE_FILE) or ""
                      ).get("profile") == _POLICY["fast_profile"]), "")
     return bool(selected) and not git_revision_or_ancestors_have_review_gates(project, selected)
-
 def source_profile_lock_is_durable(project: Path) -> bool:
     path = source_profile_path(project)
     if (not source_profile_exists(project) or not is_git_repo(project)
@@ -348,17 +293,14 @@ def source_profile_lock_is_durable(project: Path) -> bool:
     snapshotted = any(candidate.resolve() == path.resolve()
                       for candidate in live_common.snapshot_file_candidates(project))
     return code == 0 and not dirty and snapshotted
-
 def fast_mvp_profile_predates_gates(project: Path) -> bool:
     return (read_source_profile(project) == _POLICY["fast_profile"]
             and source_profile_lock_is_durable(project)
             and git_history_has_fast_mvp_before_gates(project))
-
 def fast_mvp_profile_selected_before_gates(project: Path) -> bool:
     payload = read_source_profile_payload(project)
     return (str(payload.get("profile") or "") == _POLICY["fast_profile"]
             and bool(payload.get("selected_before_gates")))
-
 def setup_ledger_records_fast_mvp_before_gates(project: Path) -> bool:
     expected = _POLICY["ledger_setup"]
     return any(payload.get("schema") == expected["schema"]
@@ -366,15 +308,12 @@ def setup_ledger_records_fast_mvp_before_gates(project: Path) -> bool:
                and str(payload.get("profile") or "") == expected["profile"]
                and bool(payload.get(expected["selected_field"]))
                for payload in jsonl_payloads(project / LEDGER_FILE))
-
 def review_profile(project: Path) -> str:
     manifest_profile = project_profile(project)
     return (_POLICY["fast_profile"] if manifest_profile == _POLICY["fast_profile"]
             and fast_mvp_profile_predates_gates(project) else _POLICY["default_profile"])
-
 def profile_lock_gate_reasons(project: Path) -> list[str]:
     return _profile_gate_reasons(project, extended=False)
-
 def source_profile_lock_problems(project: Path) -> list[str]:
     path = source_profile_path(project)
     errors = _POLICY["source_profile_lock_errors"]
@@ -400,7 +339,6 @@ def source_profile_lock_problems(project: Path) -> list[str]:
         (head is not None and not git_history_has_fast_mvp_before_gates(project), "history"))
     problems.extend(message(kind) for failed, kind in checks if failed)
     return problems
-
 def fast_mvp_profile_lock_state(project: Path) -> dict[str, Any]:
     manifest_profile = project_profile(project)
     profile_status = _source_profile_status(project)
@@ -426,7 +364,6 @@ def fast_mvp_profile_lock_state(project: Path) -> dict[str, Any]:
         source_profile=recorded_profile or None, effective_review_profile=effective_profile,
         selected_before_gates=selected_before_gates, gate_reasons=gate_reasons,
         problems=source_profile_lock_problems(project) if requested_fast_mvp else [])
-
 def project_manifest_payload(project: Path, *, objective: str = "", product_slug: str = "", profile: str = "standard", root_mode: str = "dedicated") -> dict[str, Any]:
     slug = product_slug_from_objective(project, objective, product_slug)
     project_root = str(project.resolve())
@@ -436,9 +373,8 @@ def project_manifest_payload(project: Path, *, objective: str = "", product_slug
         profile=normalize_project_profile(profile), source_profile_path=SOURCE_PROFILE_FILE,
         root_mode=root_mode or _POLICY["default_root_mode"], state_machine_version=STAR_FORGE_STATE_VERSION,
         blueprint_path=BLUEPRINT_FILE, plan_path=PLAN_FILE,
-        blueprint_hash=file_sha256(project / BLUEPRINT_FILE) if (project / BLUEPRINT_FILE).exists() else None,
-        plan_hash=file_sha256(project / PLAN_FILE) if (project / PLAN_FILE).exists() else None)
-
+        blueprint_hash=file_sha256(project / BLUEPRINT_FILE, root=project) if (project / BLUEPRINT_FILE).exists() else None,
+        plan_hash=file_sha256(project / PLAN_FILE, root=project) if (project / PLAN_FILE).exists() else None)
 def ensure_project_manifest(project: Path, *, objective: str = "", product_slug: str = "", profile: str = "", root_mode: str = "") -> dict[str, Any]:
     path = project / PROJECT_MANIFEST
     existing = _read_json_if_possible(path)
@@ -470,15 +406,12 @@ def ensure_project_manifest(project: Path, *, objective: str = "", product_slug:
                         if field in existing})
         if strip_volatile(existing) == strip_volatile(payload):
             return existing
-    write_json(path, payload)
+    write_json(path, payload, root=project)
     return payload
-
 def project_profile(project: Path) -> str:
     return normalize_project_profile(str(_read_json_if_possible(project / PROJECT_MANIFEST).get("profile") or _POLICY["default_profile"]))
-
 def review_roles_for_profile(profile: str) -> list[str]:
     return adaptive_review_policy.legacy_roles_for_profile(profile)
-
 def required_review_policy(
     project: Path,
     *,
@@ -495,8 +428,6 @@ def required_review_policy(
     return adaptive_review_policy.select_review_policy(
         blueprint_text, tasks, profile=review_profile(project),
         source_hash=source_hash_value, delivery_contract=delivery_contract)
-
 def required_review_roles(project: Path) -> list[str]:
     return list(required_review_policy(project).roles)
-
 __all__ = tuple(name for name in globals() if not name.startswith("__"))

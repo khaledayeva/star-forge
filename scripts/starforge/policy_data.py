@@ -50,4 +50,5 @@ def mapping(name: str, /, **values: Any) -> dict[str, Any]:
 def record(name: str, /, **values: Any) -> dict[str, Any]:
     descriptor = value(f"records.{name}")
     return {"schema": descriptor["schema"], **_ordered(f"record {name}", descriptor, values)}
-for _name, _doc in value("policy_data.DOCS").items(): globals()[_name].__doc__ = _doc
+for _name, _doc in value("policy_data.DOCS").items():
+    globals()[_name].__doc__ = _doc
