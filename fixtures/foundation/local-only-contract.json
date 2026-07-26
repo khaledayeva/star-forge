@@ -1,0 +1,65 @@
+{
+  "schema": "star-forge.foundation-contract.v1",
+  "repository": {
+    "state": "not-applicable",
+    "github_requested": false,
+    "mode": "not-applicable",
+    "owner": "",
+    "name": "",
+    "visibility": "not-applicable",
+    "write_authorized": false,
+    "preferred_provider": "not-applicable",
+    "create_fallback": "not-applicable",
+    "mutation_policy": "never-change-visibility"
+  },
+  "expectations": {
+    "default_branch": "main",
+    "ci_path": ".github/workflows/ci.yml"
+  },
+  "requirements": {
+    "source_scaffold": {
+      "state": "requested",
+      "reason": "source scaffold must exist before feature work"
+    },
+    "local_git": {
+      "state": "requested",
+      "reason": "local Git initialization is an automatic foundation outcome"
+    },
+    "github_repository": {
+      "state": "not-applicable",
+      "reason": "approved contract does not request GitHub"
+    },
+    "remote_origin": {
+      "state": "not-applicable",
+      "reason": "approved contract does not request GitHub"
+    },
+    "default_branch": {
+      "state": "requested",
+      "reason": "the initial commit must establish the approved default branch"
+    },
+    "initial_commit": {
+      "state": "requested",
+      "reason": "foundation artifacts must be committed before feature work"
+    },
+    "ci": {
+      "state": "requested",
+      "reason": "CI configuration must be installed before feature work"
+    },
+    "environment_example": {
+      "state": "not-applicable",
+      "reason": "the project has no configurable environment"
+    },
+    "secret_scan": {
+      "state": "requested",
+      "reason": "the committed foundation requires a clean secret scan"
+    },
+    "dependency_audit": {
+      "state": "not-applicable",
+      "reason": "the foundation declares no third-party dependencies"
+    },
+    "security_plan": {
+      "state": "not-applicable",
+      "reason": "approved risk flags make a security plan not applicable"
+    }
+  }
+}

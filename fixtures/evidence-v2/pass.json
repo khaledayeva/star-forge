@@ -1,0 +1,26 @@
+{
+  "artifacts": [
+    {
+      "bytes": 3,
+      "kind": "transcript",
+      "path": ".starforge/live/SF-001/browser/result.txt",
+      "sha256": "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    }
+  ],
+  "blockers": [],
+  "capability": "local-web-qa",
+  "finished_at": "2026-07-25T20:00:02Z",
+  "kind": "browser",
+  "provenance": {
+    "operation": "browser-qa",
+    "tool": "in-app-browser",
+    "tool_version": "1"
+  },
+  "provider": "browser",
+  "runtime_asset_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "schema": "star-forge.evidence-envelope.v2",
+  "source_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "started_at": "2026-07-25T20:00:00Z",
+  "task": "SF-001",
+  "verdict": "PASS"
+}

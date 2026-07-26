@@ -1,0 +1,119 @@
+{
+  "schema": "star-forge.foundation-evidence.v1",
+  "captured_at": "2026-07-25T20:20:00Z",
+  "source_hash": "1111111111111111111111111111111111111111111111111111111111111111",
+  "contract_sha256": "24312606e66152d8990a98b223b8503c95594fc5a20f8856d36bdff577736729",
+  "checks": {
+    "source_scaffold": {
+      "state": "satisfied",
+      "source_hash": "1111111111111111111111111111111111111111111111111111111111111111",
+      "detail": {
+        "artifacts": [
+          {
+            "path": "src/app.py",
+            "sha256": "7777777777777777777777777777777777777777777777777777777777777777",
+            "committed": true
+          }
+        ]
+      }
+    },
+    "local_git": {
+      "state": "satisfied",
+      "source_hash": "1111111111111111111111111111111111111111111111111111111111111111",
+      "detail": {
+        "is_repository": true,
+        "method": "existing-repository"
+      }
+    },
+    "github_repository": {
+      "state": "satisfied",
+      "source_hash": "1111111111111111111111111111111111111111111111111111111111111111",
+      "detail": {
+        "provider": "gh-readonly",
+        "owner": "acme-labs",
+        "name": "existing-app",
+        "visibility": "private",
+        "identity_verified": true,
+        "visibility_verified": true,
+        "created": false,
+        "read_only_adoption": true,
+        "visibility_changed": false
+      }
+    },
+    "remote_origin": {
+      "state": "satisfied",
+      "source_hash": "1111111111111111111111111111111111111111111111111111111111111111",
+      "detail": {
+        "remote": "origin",
+        "url": "git@github.com:acme-labs/existing-app.git"
+      }
+    },
+    "default_branch": {
+      "state": "satisfied",
+      "source_hash": "1111111111111111111111111111111111111111111111111111111111111111",
+      "detail": {
+        "name": "main",
+        "exists": true,
+        "head_commit": "2222222222222222222222222222222222222222"
+      }
+    },
+    "initial_commit": {
+      "state": "satisfied",
+      "source_hash": "1111111111111111111111111111111111111111111111111111111111111111",
+      "detail": {
+        "sha": "0000000000000000000000000000000000000000",
+        "parent_count": 0,
+        "current_head": "2222222222222222222222222222222222222222",
+        "exists": true,
+        "tree_source_hash": "1111111111111111111111111111111111111111111111111111111111111111"
+      }
+    },
+    "ci": {
+      "state": "satisfied",
+      "source_hash": "1111111111111111111111111111111111111111111111111111111111111111",
+      "detail": {
+        "path": ".github/workflows/ci.yml",
+        "sha256": "8888888888888888888888888888888888888888888888888888888888888888",
+        "committed": true
+      }
+    },
+    "environment_example": {
+      "state": "satisfied",
+      "source_hash": "1111111111111111111111111111111111111111111111111111111111111111",
+      "detail": {
+        "path": ".env.example",
+        "sha256": "9999999999999999999999999999999999999999999999999999999999999999",
+        "committed": true,
+        "contains_secret_values": false
+      }
+    },
+    "secret_scan": {
+      "state": "satisfied",
+      "source_hash": "1111111111111111111111111111111111111111111111111111111111111111",
+      "detail": {
+        "tool": "repository-secret-scanner",
+        "verdict": "PASS",
+        "findings": 0
+      }
+    },
+    "dependency_audit": {
+      "state": "satisfied",
+      "source_hash": "1111111111111111111111111111111111111111111111111111111111111111",
+      "detail": {
+        "tool": "project-dependency-audit",
+        "verdict": "PASS",
+        "unresolved_findings": 0
+      }
+    },
+    "security_plan": {
+      "state": "satisfied",
+      "source_hash": "1111111111111111111111111111111111111111111111111111111111111111",
+      "detail": {
+        "kind": "security-plan",
+        "path": "docs/security-plan.md",
+        "sha256": "abababababababababababababababababababababababababababababababab",
+        "committed": true
+      }
+    }
+  }
+}

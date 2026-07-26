@@ -1,0 +1,81 @@
+{
+  "schema": "star-forge.foundation-evidence.v1",
+  "captured_at": "2026-07-25T20:10:00Z",
+  "source_hash": "3333333333333333333333333333333333333333333333333333333333333333",
+  "contract_sha256": "a236725acc2def8d092780bd4c2384269139704e480d8ac43f7620c1bce05d7a",
+  "checks": {
+    "source_scaffold": {
+      "state": "satisfied",
+      "source_hash": "3333333333333333333333333333333333333333333333333333333333333333",
+      "detail": {
+        "artifacts": [
+          {
+            "path": "src/main.py",
+            "sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+            "committed": true
+          }
+        ]
+      }
+    },
+    "local_git": {
+      "state": "satisfied",
+      "source_hash": "3333333333333333333333333333333333333333333333333333333333333333",
+      "detail": {
+        "is_repository": true,
+        "method": "automatic-local-init"
+      }
+    },
+    "github_repository": {
+      "state": "not-applicable"
+    },
+    "remote_origin": {
+      "state": "not-applicable"
+    },
+    "default_branch": {
+      "state": "satisfied",
+      "source_hash": "3333333333333333333333333333333333333333333333333333333333333333",
+      "detail": {
+        "name": "main",
+        "exists": true,
+        "head_commit": "5555555555555555555555555555555555555555"
+      }
+    },
+    "initial_commit": {
+      "state": "satisfied",
+      "source_hash": "3333333333333333333333333333333333333333333333333333333333333333",
+      "detail": {
+        "sha": "5555555555555555555555555555555555555555",
+        "parent_count": 0,
+        "current_head": "5555555555555555555555555555555555555555",
+        "tree_source_hash": "3333333333333333333333333333333333333333333333333333333333333333"
+      }
+    },
+    "ci": {
+      "state": "satisfied",
+      "source_hash": "3333333333333333333333333333333333333333333333333333333333333333",
+      "detail": {
+        "path": ".github/workflows/ci.yml",
+        "sha256": "6666666666666666666666666666666666666666666666666666666666666666",
+        "committed": true
+      }
+    },
+    "environment_example": {
+      "state": "not-applicable"
+    },
+    "secret_scan": {
+      "state": "satisfied",
+      "source_hash": "3333333333333333333333333333333333333333333333333333333333333333",
+      "detail": {
+        "tool": "repository-secret-scanner",
+        "verdict": "PASS",
+        "findings": 0
+      }
+    },
+    "dependency_audit": {
+      "state": "not-applicable"
+    },
+    "security_plan": {
+      "state": "not-applicable"
+    }
+  }
+}

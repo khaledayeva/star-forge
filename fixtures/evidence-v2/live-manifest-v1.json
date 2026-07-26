@@ -1,0 +1,35 @@
+{
+  "artifacts": [
+    {
+      "bytes": 3,
+      "exists": true,
+      "kind": "transcript",
+      "path": ".starforge/live/SF-001/browser/result.txt",
+      "sha256": "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    }
+  ],
+  "collector": "browser",
+  "command_argv": [
+    "browser-collector",
+    "--task",
+    "SF-001"
+  ],
+  "created_at": "2026-07-25T20:00:02Z",
+  "degraded": false,
+  "problems": [],
+  "raw_artifact_hashes": {
+    ".starforge/live/SF-001/browser/result.txt": {
+      "bytes": 3,
+      "sha256": "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    }
+  },
+  "runtime_asset_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "schema": "star-forge.live-manifest.v1",
+  "source_hash_after": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "source_hash_before": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "task": "SF-001",
+  "tool_versions": {
+    "browser": "1"
+  },
+  "unavailable_capabilities": []
+}

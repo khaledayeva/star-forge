@@ -1,0 +1,65 @@
+{
+  "schema": "star-forge.foundation-contract.v1",
+  "repository": {
+    "state": "requested",
+    "github_requested": true,
+    "mode": "create",
+    "owner": "acme-labs",
+    "name": "fixture-app",
+    "visibility": "private",
+    "write_authorized": true,
+    "preferred_provider": "github-connector",
+    "create_fallback": "gh repo create --private",
+    "mutation_policy": "never-change-visibility"
+  },
+  "expectations": {
+    "default_branch": "main",
+    "ci_path": ".github/workflows/ci.yml"
+  },
+  "requirements": {
+    "source_scaffold": {
+      "state": "requested",
+      "reason": "source scaffold must exist before feature work"
+    },
+    "local_git": {
+      "state": "requested",
+      "reason": "local Git initialization is an automatic foundation outcome"
+    },
+    "github_repository": {
+      "state": "requested",
+      "reason": "approved Repository Contract requests GitHub"
+    },
+    "remote_origin": {
+      "state": "requested",
+      "reason": "approved Repository Contract requests GitHub"
+    },
+    "default_branch": {
+      "state": "requested",
+      "reason": "the initial commit must establish the approved default branch"
+    },
+    "initial_commit": {
+      "state": "requested",
+      "reason": "foundation artifacts must be committed before feature work"
+    },
+    "ci": {
+      "state": "requested",
+      "reason": "CI configuration must be installed before feature work"
+    },
+    "environment_example": {
+      "state": "requested",
+      "reason": "an environment example is required"
+    },
+    "secret_scan": {
+      "state": "requested",
+      "reason": "the committed foundation requires a clean secret scan"
+    },
+    "dependency_audit": {
+      "state": "requested",
+      "reason": "declared dependencies require an audit"
+    },
+    "security_plan": {
+      "state": "requested",
+      "reason": "risk flags require a threat model or security plan"
+    }
+  }
+}

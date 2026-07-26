@@ -1,0 +1,116 @@
+{
+  "schema": "star-forge.foundation-evidence.v1",
+  "captured_at": "2026-07-25T20:00:00Z",
+  "source_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "contract_sha256": "fb7821f67e5557667bd0d50037690eec5007d9b276217dc3ef659fffb40dca79",
+  "checks": {
+    "source_scaffold": {
+      "state": "satisfied",
+      "source_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "detail": {
+        "artifacts": [
+          {
+            "path": "src/app.py",
+            "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "committed": true
+          }
+        ]
+      }
+    },
+    "local_git": {
+      "state": "satisfied",
+      "source_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "detail": {
+        "is_repository": true,
+        "method": "automatic-local-init"
+      }
+    },
+    "github_repository": {
+      "state": "satisfied",
+      "source_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "detail": {
+        "provider": "github-connector",
+        "owner": "acme-labs",
+        "name": "fixture-app",
+        "visibility": "private",
+        "identity_verified": true,
+        "visibility_verified": true,
+        "created": true
+      }
+    },
+    "remote_origin": {
+      "state": "satisfied",
+      "source_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "detail": {
+        "remote": "origin",
+        "url": "https://github.com/acme-labs/fixture-app.git"
+      }
+    },
+    "default_branch": {
+      "state": "satisfied",
+      "source_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "detail": {
+        "name": "main",
+        "exists": true,
+        "head_commit": "cccccccccccccccccccccccccccccccccccccccc"
+      }
+    },
+    "initial_commit": {
+      "state": "satisfied",
+      "source_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "detail": {
+        "sha": "cccccccccccccccccccccccccccccccccccccccc",
+        "parent_count": 0,
+        "current_head": "cccccccccccccccccccccccccccccccccccccccc",
+        "tree_source_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    },
+    "ci": {
+      "state": "satisfied",
+      "source_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "detail": {
+        "path": ".github/workflows/ci.yml",
+        "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "committed": true
+      }
+    },
+    "environment_example": {
+      "state": "satisfied",
+      "source_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "detail": {
+        "path": ".env.example",
+        "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "committed": true,
+        "contains_secret_values": false
+      }
+    },
+    "secret_scan": {
+      "state": "satisfied",
+      "source_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "detail": {
+        "tool": "repository-secret-scanner",
+        "verdict": "PASS",
+        "findings": 0
+      }
+    },
+    "dependency_audit": {
+      "state": "satisfied",
+      "source_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "detail": {
+        "tool": "project-dependency-audit",
+        "verdict": "PASS",
+        "unresolved_findings": 0
+      }
+    },
+    "security_plan": {
+      "state": "satisfied",
+      "source_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "detail": {
+        "kind": "threat-model",
+        "path": "docs/threat-model.md",
+        "sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "committed": true
+      }
+    }
+  }
+}
