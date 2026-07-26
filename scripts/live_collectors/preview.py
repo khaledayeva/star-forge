@@ -31,9 +31,12 @@ if str(SCRIPTS_ROOT) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_ROOT))
 
 from live_collectors import common
+from starforge import evidence
 
 
 COLLECTOR = "preview"
+CAPABILITY = "preview-verification"
+EVIDENCE_FILENAME = "evidence.v2.json"
 STAR_FORGE = PLUGIN_ROOT / "scripts" / "star_forge.py"
 DEFAULT_USER_AGENT = "star-forge-preview-collector/1 read-only"
 METADATA_HOSTS = {"metadata.google.internal", "metadata", "169.254.169.254", "169.254.170.2"}
@@ -120,6 +123,39 @@ def merge_reports(reports: Sequence[Mapping[str, Any]]) -> dict[str, int]:
             if isinstance(value, int):
                 merged[key] = merged.get(key, 0) + value
     return merged
+
+
+def evidence_provider(raw_provider: str) -> str:
+    return common.sanitize_segment(raw_provider, fallback="provider-neutral")
+
+
+def write_evidence_envelope(
+    project: Path,
+    manifest_path: Path,
+    *,
+    provider: str,
+) -> tuple[Path, dict[str, Any]]:
+    """Adapt the compatibility manifest to validated source-bound v2 evidence."""
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    provider_id = evidence_provider(provider)
+    envelope = evidence.adapt_v1_manifest(
+        manifest,
+        capability=CAPABILITY,
+        provider=provider_id,
+    )
+    provenance = dict(envelope["provenance"])
+    provenance["collector_mode"] = "provider-neutral-read-only-http"
+    provenance["deployment_provider"] = provider_id
+    envelope["provenance"] = provenance
+    envelope_path = manifest_path.parent / EVIDENCE_FILENAME
+    written = evidence.write_envelope(
+        envelope_path,
+        envelope,
+        project_root=project,
+        verify_artifacts=True,
+    )
+    return envelope_path, written
 
 
 def problem(message: str, *, rule: str, severity: str = "high", path: str = "", blocking: bool = True) -> dict[str, Any]:
@@ -876,6 +912,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         artifacts=manifest_artifacts,
         summary={
             "url": safe_url_for_artifact(args.url),
+            "capability": CAPABILITY,
+            "provider": evidence_provider(args.provider),
             "status": http_payload.get("status"),
             "expected_status": args.expect_status,
             "smoke_passed": smoke_payload.get("passed"),
@@ -890,6 +928,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         source_hash_before=source_before,
         source_hash_after=source_after,
         runtime_asset_hash=runtime_hash,
+    )
+    envelope_path, envelope = write_evidence_envelope(
+        project,
+        manifest,
+        provider=args.provider,
     )
 
     command = proof_command_for_project(
@@ -916,6 +959,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         "schema": "star-forge.preview-collector.v1",
         "collector": COLLECTOR,
         "manifest": common.project_relative(project, manifest),
+        "evidence": common.project_relative(project, envelope_path),
+        "evidence_verdict": envelope["verdict"],
+        "capability": CAPABILITY,
+        "provider": evidence_provider(args.provider),
         "artifacts": {
             "http": common.project_relative(project, http_path),
             "deployment": common.project_relative(project, deployment_path),

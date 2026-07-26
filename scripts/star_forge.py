@@ -127,6 +127,49 @@ VISUAL_TASK_RE = re.compile(
     r"layout|styling|css|web ?page|viewport)\b",
     re.IGNORECASE,
 )
+INFRASTRUCTURE_TASK_PARTS = frozenset(
+    {
+        "agents",
+        "collectors",
+        "config",
+        "docs",
+        "fixtures",
+        "live_collectors",
+        "skills",
+        "templates",
+        "test",
+        "tests",
+    }
+)
+INFRASTRUCTURE_DOCUMENT_SUFFIXES = frozenset({".md", ".mdx", ".rst"})
+VISUAL_SOURCE_SUFFIXES = frozenset(
+    {
+        ".astro",
+        ".css",
+        ".html",
+        ".htm",
+        ".jsx",
+        ".less",
+        ".sass",
+        ".scss",
+        ".svelte",
+        ".tsx",
+        ".vue",
+        ".xib",
+        ".storyboard",
+    }
+)
+VISUAL_SOURCE_PARTS = frozenset(
+    {
+        "components",
+        "frontend",
+        "layouts",
+        "pages",
+        "screens",
+        "ui",
+        "views",
+    }
+)
 TEXT_SUFFIXES = {
     "." + "env", ".astro", ".c", ".cc", ".cfg", ".conf", ".cpp", ".cs", ".css",
     ".go", ".h", ".html", ".java", ".js", ".json", ".jsx", ".kt", ".mjs", ".md",
@@ -1417,7 +1460,69 @@ def task_verify_command(task: dict[str, Any]) -> str:
     return str(task.get("verify") or "").strip()
 
 
+def task_proof_kinds(task: Mapping[str, Any]) -> set[str]:
+    return {
+        item.strip().casefold()
+        for item in str(task.get("proof") or "").split(",")
+        if item.strip() and item.strip() != "-"
+    }
+
+
+def task_file_is_infrastructure(raw_path: str) -> bool:
+    normalized = str(raw_path or "").strip().replace("\\", "/").strip("/")
+    if not normalized:
+        return False
+    path = Path(normalized)
+    parts = {part.casefold() for part in path.parts}
+    name = path.name.casefold()
+    if parts & INFRASTRUCTURE_TASK_PARTS:
+        return True
+    if path.suffix.casefold() in INFRASTRUCTURE_DOCUMENT_SUFFIXES:
+        return True
+    return (
+        name.startswith("test_")
+        or ".test." in name
+        or ".spec." in name
+        or name in {"readme", "readme.md", "changelog", "changelog.md"}
+    )
+
+
+def task_files_are_infrastructure(task: Mapping[str, Any]) -> bool:
+    files = task_files(dict(task))
+    return bool(files) and all(task_file_is_infrastructure(path) for path in files)
+
+
+def task_owns_visual_source(task: Mapping[str, Any]) -> bool:
+    for raw_path in task_files(dict(task)):
+        if task_file_is_infrastructure(raw_path):
+            continue
+        path = Path(raw_path.replace("\\", "/"))
+        suffix = path.suffix.casefold()
+        parts = {part.casefold() for part in path.parts[:-1]}
+        if suffix in VISUAL_SOURCE_SUFFIXES:
+            return True
+        if parts & VISUAL_SOURCE_PARTS and (
+            suffix in CODE_SUFFIXES or path.name.casefold() in CODE_FILENAMES
+        ):
+            return True
+        if suffix == ".swift" and (
+            path.stem.casefold().endswith("view")
+            or path.stem.casefold().endswith("screen")
+        ):
+            return True
+    return False
+
+
 def task_is_visual(task: dict[str, Any]) -> bool:
+    proof_kinds = task_proof_kinds(task)
+    if "browser" in proof_kinds:
+        return True
+    if task_owns_visual_source(task):
+        return True
+    if task_files_are_infrastructure(task):
+        return False
+    if str(task.get("plan_version") or "").casefold() == "v2" and proof_kinds:
+        return False
     text = " ".join(str(task.get(key, "")) for key in ("description", "verify", "files", "evidence"))
     return bool(VISUAL_TASK_RE.search(text))
 

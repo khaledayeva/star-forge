@@ -1,0 +1,14 @@
+{
+  "schema": "star-forge.delivery-contract.v1",
+  "target": {"kind": "source-only", "platform": "", "project_class": "Python library", "environment": "local", "destination": "tracked source handoff"},
+  "route": {"provider": "not-applicable", "sites_selected": false, "vercel_selected": false, "selection_blocker": ""},
+  "result": {"identity_kind": "source-handoff", "live_url_required": false, "smoke_result_required": true},
+  "authority": {"external_write_authorized": true, "credentials_required": false, "credentials_available": true, "signing_required": false, "signing_authorized": false, "billing_required": false, "billing_authorized": false, "production_authorized": false, "blocker": ""},
+  "requirements": {
+    "source_binding": {"state": "requested", "reason": "delivery evidence must match the current source hash"},
+    "repository_commit": {"state": "requested", "reason": "delivery evidence must identify the delivered repository commit"},
+    "delivery_identity": {"state": "requested", "reason": "delivery requires a source-handoff identity"},
+    "live_url": {"state": "not-applicable", "reason": "the approved delivery result has no live URL"},
+    "smoke_result": {"state": "requested", "reason": "the delivered result requires a passing smoke result"}
+  }
+}

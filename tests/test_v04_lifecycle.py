@@ -16,7 +16,8 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
-FIXTURES = ROOT / "fixtures" / "foundation"
+FOUNDATION_FIXTURES = ROOT / "fixtures" / "foundation"
+DELIVERY_FIXTURES = ROOT / "fixtures" / "delivery"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
@@ -24,11 +25,21 @@ from starforge import lifecycle
 
 
 def fixture(name: str) -> dict[str, Any]:
-    return json.loads((FIXTURES / name).read_text(encoding="utf-8"))
+    return json.loads((FOUNDATION_FIXTURES / name).read_text(encoding="utf-8"))
 
 
 def fixture_pair(stem: str) -> tuple[dict[str, Any], dict[str, Any]]:
     return fixture(f"{stem}-contract.json"), fixture(f"{stem}-evidence.json")
+
+
+def delivery_fixture_pair(stem: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    contract = json.loads(
+        (DELIVERY_FIXTURES / f"{stem}-contract.json").read_text(encoding="utf-8")
+    )
+    evidence = json.loads(
+        (DELIVERY_FIXTURES / f"{stem}-evidence.json").read_text(encoding="utf-8")
+    )
+    return contract, evidence
 
 
 def test_contract_builder_distinguishes_requested_not_applicable_and_blocking() -> None:
@@ -270,6 +281,181 @@ def test_evidence_rejects_secret_fields_values_and_credentialed_urls() -> None:
     assert any("embed credentials" in blocker for blocker in blockers)
 
 
+def test_delivery_builder_supports_every_generic_and_named_platform_target() -> None:
+    contracts = (
+        lifecycle.make_delivery_contract(delivery_target="source-only"),
+        lifecycle.make_delivery_contract(delivery_target="private-repo"),
+        lifecycle.make_delivery_contract(
+            delivery_target="preview", project_class="simple internal portal"
+        ),
+        lifecycle.make_delivery_contract(
+            delivery_target="production",
+            project_class="Next.js application",
+            production_authorized=True,
+        ),
+        lifecycle.make_delivery_contract(delivery_target="package"),
+        lifecycle.make_delivery_contract(
+            delivery_target="platform-specific",
+            platform_target="ios-app-store",
+            signing_required=True,
+            signing_authorized=True,
+        ),
+        lifecycle.make_delivery_contract(delivery_target="macos-notarized"),
+    )
+    assert all(lifecycle.validate_delivery_contract(item) == [] for item in contracts)
+    assert [item["target"]["kind"] for item in contracts[:5]] == [
+        "source-only",
+        "private-repo",
+        "preview",
+        "production",
+        "package",
+    ]
+    assert contracts[5]["target"]["platform"] == "ios-app-store"
+    assert contracts[6]["target"]["platform"] == "macos-notarized"
+
+
+def test_sites_and_vercel_routes_are_selected_by_fit_and_never_together() -> None:
+    simple = lifecycle.make_delivery_contract(
+        delivery_target="preview", project_class="simple internal dashboard"
+    )
+    production = lifecycle.make_delivery_contract(
+        delivery_target="production",
+        project_class="full-stack React application",
+        production_authorized=True,
+    )
+    assert simple["route"]["provider"] == "sites"
+    assert simple["route"]["sites_selected"] is True
+    assert simple["route"]["vercel_selected"] is False
+    assert production["route"]["provider"] == "vercel"
+    assert production["route"]["sites_selected"] is False
+    assert production["route"]["vercel_selected"] is True
+
+    conflicted = lifecycle.make_delivery_contract(
+        delivery_target="preview",
+        project_class="internal app",
+        provider=("sites", "vercel"),
+    )
+    assert lifecycle.validate_delivery_contract(conflicted) == []
+    gate = lifecycle.evaluate_delivery(
+        conflicted, {}, current_source_hash="a" * 64
+    )
+    assert gate.status == "BLOCKED"
+    assert len(gate.blockers) == 1
+    assert "mutually exclusive" in gate.blockers[0]
+
+
+def test_delivery_fixtures_satisfy_the_exact_approved_result() -> None:
+    for stem in ("source-only", "preview-sites", "package"):
+        contract, evidence = delivery_fixture_pair(stem)
+        result = lifecycle.evaluate_delivery(
+            contract,
+            evidence,
+            current_source_hash=evidence["source_hash"],
+        )
+        assert result.status == "PASS", (stem, result.blockers)
+        assert result.delivery_satisfied
+        assert result.ready_for_completion
+        assert result.repository_commit == evidence["repository_commit"]
+        assert set(result.checks) == set(lifecycle.DELIVERY_REQUIREMENTS)
+        assert result.to_dict()["schema"] == lifecycle.DELIVERY_GATE_SCHEMA
+
+
+def test_delivery_requires_source_commit_identity_live_url_and_smoke_result() -> None:
+    contract, evidence = delivery_fixture_pair("preview-sites")
+    for check in lifecycle.DELIVERY_REQUIREMENTS:
+        incomplete = copy.deepcopy(evidence)
+        del incomplete["checks"][check]
+        result = lifecycle.evaluate_delivery(
+            contract,
+            incomplete,
+            current_source_hash=evidence["source_hash"],
+        )
+        assert not result.ready_for_completion, check
+        assert result.checks[check] == "blocking"
+        assert any(blocker.startswith(f"{check}:") for blocker in result.blockers)
+
+
+def test_delivery_proof_is_bound_to_source_contract_and_repository_commit() -> None:
+    contract, evidence = delivery_fixture_pair("preview-sites")
+    stale = lifecycle.evaluate_delivery(
+        contract, evidence, current_source_hash="0" * 64
+    )
+    assert not stale.ready_for_completion
+    assert "delivery evidence source hash is stale" in stale.blockers
+
+    changed_contract = copy.deepcopy(contract)
+    changed_contract["target"]["destination"] = "customer preview"
+    drifted = lifecycle.evaluate_delivery(
+        changed_contract,
+        evidence,
+        current_source_hash=evidence["source_hash"],
+    )
+    assert "delivery evidence is not bound to the current contract" in drifted.blockers
+
+    wrong_commit = copy.deepcopy(evidence)
+    wrong_commit["checks"]["delivery_identity"]["detail"]["repository_commit"] = "c" * 40
+    wrong_commit["checks"]["smoke_result"]["detail"]["repository_commit"] = "c" * 40
+    blockers = lifecycle.validate_delivery_evidence(
+        contract,
+        wrong_commit,
+        current_source_hash=evidence["source_hash"],
+    )
+    assert any("repository commit" in blocker for blocker in blockers)
+
+
+def test_package_identity_requires_artifact_hash_and_web_requires_live_url() -> None:
+    package_contract, package_evidence = delivery_fixture_pair("package")
+    missing_artifact = copy.deepcopy(package_evidence)
+    del missing_artifact["checks"]["delivery_identity"]["detail"]["artifact_sha256"]
+    blockers = lifecycle.validate_delivery_evidence(
+        package_contract,
+        missing_artifact,
+        current_source_hash=package_evidence["source_hash"],
+    )
+    assert any("artifact SHA-256" in blocker for blocker in blockers)
+
+    preview_contract, preview_evidence = delivery_fixture_pair("preview-sites")
+    bad_url = copy.deepcopy(preview_evidence)
+    bad_url["checks"]["live_url"]["detail"]["url"] = "not-live"
+    blockers = lifecycle.validate_delivery_evidence(
+        preview_contract,
+        bad_url,
+        current_source_hash=preview_evidence["source_hash"],
+    )
+    assert any("live URL is invalid" in blocker for blocker in blockers)
+
+
+def test_unresolved_delivery_authority_collapses_to_one_honest_blocker() -> None:
+    contract = lifecycle.make_delivery_contract(
+        delivery_target="production",
+        project_class="production web application",
+        external_write_authorized=False,
+        credentials_required=True,
+        credentials_available=False,
+        signing_required=True,
+        signing_authorized=False,
+        billing_required=True,
+        billing_authorized=False,
+        production_authorized=False,
+    )
+    assert lifecycle.validate_delivery_contract(contract) == []
+    blocker = contract["authority"]["blocker"]
+    for reason in (
+        "delivery authority",
+        "credentials",
+        "signing",
+        "billing",
+        "production authority",
+    ):
+        assert reason in blocker
+    result = lifecycle.evaluate_delivery(
+        contract, {}, current_source_hash="a" * 64
+    )
+    assert result.status == "BLOCKED"
+    assert not result.ready_for_completion
+    assert result.blockers == (f"delivery blocked: {blocker}",)
+
+
 def test_foundation_module_is_validation_only_and_has_no_external_write_runtime() -> None:
     source = (SCRIPTS / "starforge" / "lifecycle.py").read_text(encoding="utf-8")
     forbidden = (
@@ -288,6 +474,8 @@ def test_foundation_module_is_validation_only_and_has_no_external_write_runtime(
     assert not any(token in source for token in forbidden)
     assert "gh repo create --private" in source
     assert "never-change-visibility" in source
+    assert "Sites and Vercel are mutually exclusive" in source
+    assert len(source.splitlines()) < 1200
 
 
 def main() -> int:

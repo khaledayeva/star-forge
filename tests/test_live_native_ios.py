@@ -30,6 +30,7 @@ SPEC.loader.exec_module(star_forge)
 
 from live_collectors import common as live_common
 from live_collectors import native_ios
+from starforge import evidence
 
 os.environ["STAR_FORGE_LEARNINGS_HOME"] = tempfile.mkdtemp(prefix="star-forge-native-ios-learnings-")
 
@@ -118,6 +119,14 @@ def manifest_payload(project: Path) -> dict[str, Any]:
     return json.loads((live_dir(project) / "manifest.json").read_text(encoding="utf-8"))
 
 
+def envelope_payload(project: Path) -> dict[str, Any]:
+    return evidence.read_envelope(
+        live_dir(project) / "evidence.json",
+        project_root=project,
+        verify_artifacts=True,
+    )
+
+
 def rules(payload: dict[str, Any]) -> set[str]:
     return {str(item.get("rule")) for item in payload.get("problems", []) if isinstance(item, dict)}
 
@@ -151,6 +160,7 @@ def base_inputs(
     transcript_name: str = "mcp-transcript-happy.json",
     mutate_transcript: Callable[[dict[str, Any]], None] | None = None,
     include_screenshot: bool = True,
+    include_ui_snapshot: bool = True,
     include_log: bool = False,
     build_success: bool = True,
     launch_success: bool = True,
@@ -159,6 +169,15 @@ def base_inputs(
     root = project / ".starforge" / "native-ios-inputs"
     transcript = fixture_payload(transcript_name)
     transcript.setdefault("source_hash", star_forge.source_hash(project))
+    if include_ui_snapshot:
+        transcript.setdefault("capabilities", []).append("ui_snapshot")
+        transcript.setdefault("calls", []).append(
+            {
+                "tool": "ui_snapshot",
+                "arguments": {"simulator": "iPhone 16"},
+                "result": {"success": True},
+            }
+        )
     if mutate_transcript is not None:
         mutate_transcript(transcript)
     def result_payload(kind: str, success: bool) -> dict[str, Any]:
@@ -177,6 +196,11 @@ def base_inputs(
     }
     if include_screenshot:
         paths["screenshot"] = make_png(root / "screenshot.png")
+    if include_ui_snapshot:
+        paths["ui_snapshot"] = write_json(
+            root / "ui-snapshot.json",
+            {"app": "TestApp", "tree": {"role": "window", "children": []}},
+        )
     if include_log:
         paths["log"] = write_text(root / "log.txt", "SpringBoard log line\n")
     return paths
@@ -196,6 +220,8 @@ def base_args(project: Path, paths: dict[str, Path]) -> list[str]:
     ]
     if "screenshot" in paths:
         args.extend(["--screenshot", str(paths["screenshot"])])
+    if "ui_snapshot" in paths:
+        args.extend(["--ui-snapshot", str(paths["ui_snapshot"])])
     if "log" in paths:
         args.extend(["--log", str(paths["log"])])
     return args
@@ -403,12 +429,36 @@ def test_log_only_ui_proof_is_rejected() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         project = Path(tmp).resolve()
         init_project(project)
-        paths = base_inputs(project, include_screenshot=False, include_log=True)
+        paths = base_inputs(
+            project,
+            include_screenshot=False,
+            include_ui_snapshot=False,
+            include_log=True,
+        )
         code, output, _ = run_collector(base_args(project, paths))
         assert code == 1
         assert "log" in output["artifacts"]
         assert "screenshot" not in output["artifacts"]
         assert_collector_rule(project, output, "native-ios-ui")
+        assert_collector_rule(project, output, "native-ios-ui-snapshot")
+
+
+def test_each_visual_artifact_is_required() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        init_project(project)
+        paths = base_inputs(project, include_screenshot=False)
+        code, output, _ = run_collector(base_args(project, paths))
+        assert code == 1
+        assert_collector_rule(project, output, "native-ios-ui")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        init_project(project)
+        paths = base_inputs(project, include_ui_snapshot=False)
+        code, output, _ = run_collector(base_args(project, paths))
+        assert code == 1
+        assert_collector_rule(project, output, "native-ios-ui-snapshot")
 
 
 def test_missing_app_identity_blocks_collection() -> None:
@@ -467,9 +517,24 @@ def test_happy_path_prints_native_ios_proof_command_and_passes() -> None:
         assert manifest["summary"]["simulator"]["runtime"] == "iOS 18.4"
         assert manifest["summary"]["simulator"]["udid"].endswith("0001")
         assert manifest["summary"]["app_identity"] == "com.example.TestApp"
-        assert manifest["summary"]["artifact_semantics"]["ui_proof"] == "screenshot"
+        assert manifest["summary"]["artifact_semantics"]["ui_proof"] == ["ui_snapshot", "screenshot"]
         assert manifest["source_hash_after"] == star_forge.source_hash(project)
         assert "runtime_asset_hash" in manifest
+        assert output["evidence"].endswith("/evidence.json")
+        envelope = envelope_payload(project)
+        assert envelope["schema"] == evidence.EVIDENCE_SCHEMA
+        assert envelope["capability"] == native_ios.CAPABILITY
+        assert envelope["provider"] == native_ios.PRIMARY_PROVIDER
+        assert envelope["source_hash"] == manifest["source_hash_after"]
+        assert envelope["runtime_asset_hash"] == manifest["runtime_asset_hash"]
+        assert envelope["verdict"] == "PASS"
+        assert envelope["provenance"]["route"] == native_ios.ROUTE
+        assert envelope["provenance"]["tool"] == "XcodeBuildMCP"
+        assert envelope["provenance"]["tool_categories"]["ui_snapshot"] is True
+        assert {
+            item["id"]: item["status"]
+            for item in envelope["provenance"]["providers"]
+        }[native_ios.SIMULATOR_BROWSER_PROVIDER] == "availability-not-reported"
 
         with chdir(project):
             proof_args = output["proof_command_argv"][2:]
@@ -500,7 +565,12 @@ def test_record_invokes_strict_proof_even_when_collector_degraded() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         project = Path(tmp).resolve()
         init_project(project)
-        paths = base_inputs(project, include_screenshot=False, include_log=True)
+        paths = base_inputs(
+            project,
+            include_screenshot=False,
+            include_ui_snapshot=False,
+            include_log=True,
+        )
         code, output, err = run_collector(base_args(project, paths) + ["--record"])
         assert err == ""
         assert code == 1, output
@@ -512,6 +582,39 @@ def test_record_invokes_strict_proof_even_when_collector_degraded() -> None:
         assert records, output["record"]
         assert records[-1]["verdict"] == "FAIL", records[-1]
         assert_collector_rule(project, output, "native-ios-ui")
+
+
+def test_simulator_browser_route_is_recorded_or_degraded_honestly() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        init_project(project)
+        paths = base_inputs(project)
+        code, output, _ = run_collector(
+            base_args(project, paths) + ["--simulator-browser-used"]
+        )
+        assert code == 0, output
+        providers = {
+            item["id"]: item["status"]
+            for item in envelope_payload(project)["provenance"]["providers"]
+        }
+        assert providers[native_ios.SIMULATOR_BROWSER_PROVIDER] == "used"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        init_project(project)
+        paths = base_inputs(project)
+        code, output, _ = run_collector(
+            base_args(project, paths) + ["--simulator-browser-unavailable"]
+        )
+        assert code == 1
+        assert output["evidence_verdict"] == "DEGRADED"
+        assert native_ios.SIMULATOR_BROWSER_PROVIDER in output["unavailable_capabilities"]
+        envelope = envelope_payload(project)
+        assert envelope["verdict"] == "DEGRADED"
+        assert any(
+            blocker.get("capability") == native_ios.SIMULATOR_BROWSER_PROVIDER
+            for blocker in envelope["blockers"]
+        )
 
 
 def main() -> int:

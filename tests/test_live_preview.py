@@ -37,6 +37,7 @@ preview = importlib.util.module_from_spec(PREVIEW_SPEC)
 PREVIEW_SPEC.loader.exec_module(preview)
 
 from live_collectors import common as live_common
+from starforge import evidence
 
 os.environ["STAR_FORGE_LEARNINGS_HOME"] = tempfile.mkdtemp(prefix="star-forge-preview-test-learnings-")
 
@@ -237,6 +238,20 @@ def test_happy_path_collects_artifacts_and_strict_proof_run_passes() -> None:
         assert code == 0, payload
         assert payload["degraded"] is False, payload
         assert payload["proof_command"][2] == "preview-proof", payload["proof_command"]
+        manifest = load_manifest(project)
+        assert manifest["schema"] == live_common.LIVE_MANIFEST_SCHEMA
+        envelope = evidence.read_envelope(
+            project / payload["evidence"],
+            project_root=project,
+            verify_artifacts=True,
+        )
+        assert envelope["schema"] == evidence.EVIDENCE_SCHEMA
+        assert envelope["capability"] == "preview-verification"
+        assert envelope["provider"] == "provider-neutral"
+        assert envelope["runtime_asset_hash"] == manifest["runtime_asset_hash"]
+        assert envelope["source_hash"] == manifest["source_hash_after"]
+        assert envelope["verdict"] == "PASS"
+        assert envelope["provenance"]["collector_mode"] == "provider-neutral-read-only-http"
         for name in ("http", "deployment", "smoke", "headers"):
             assert (project / payload["artifacts"][name]).exists(), name
 
@@ -373,6 +388,9 @@ def test_unsafe_url_rejection_writes_degraded_manifest() -> None:
         assert_failed_with(code, payload, "preview-url")
         manifest = load_manifest(project)
         assert manifest["degraded"] is True
+        envelope = evidence.read_envelope(project / payload["evidence"])
+        assert envelope["verdict"] == "FAIL"
+        assert any(item.get("rule") == "preview-url" for item in envelope["blockers"])
         proof_code, proof_payload, _ = run_star_cli(payload["proof_command"][2:])
         assert proof_code == 1, proof_payload
         assert "manifest-degraded" in {item.get("rule") for item in proof_payload["problems"]}

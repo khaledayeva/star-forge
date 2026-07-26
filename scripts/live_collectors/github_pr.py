@@ -21,9 +21,16 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from live_collectors import common as live_common
+from starforge import evidence
 
 
 COLLECTOR = "github"
+CAPABILITY = "github-lifecycle"
+PREFERRED_PROVIDER = "github-connector"
+GH_READONLY_PROVIDER = "gh-readonly"
+GH_CREATE_PROVIDER = "gh-cli"
+GH_CREATE_FALLBACK = "gh repo create --private"
+EVIDENCE_FILENAME = "evidence.v2.json"
 DEFAULT_MAX_LOG_BYTES = 20_000
 HARD_MAX_LOG_BYTES = 64 * 1024
 SUCCESSFUL_CONCLUSIONS = {"success"}
@@ -149,11 +156,13 @@ class RawEvidence:
     operations: list[Any]
     tool_versions: dict[str, Any]
     live_provenance: dict[str, Any] = field(default_factory=dict)
+    foundation_provenance: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
 class CollectionResult:
     manifest_path: Path
+    evidence_path: Path
     commands: list[list[str]]
     problems: list[dict[str, Any]]
 
@@ -1512,6 +1521,14 @@ def load_connector_fixture(path: Path) -> RawEvidence:
         commands=[],
         operations=list(payload.get("operations") or []),
         tool_versions=dict(payload.get("tool_versions") or {}),
+        foundation_provenance=(
+            dict(payload.get("foundation") or payload.get("foundation_provenance") or {})
+            if isinstance(
+                payload.get("foundation") or payload.get("foundation_provenance") or {},
+                Mapping,
+            )
+            else {}
+        ),
     )
 
 
@@ -1537,6 +1554,14 @@ def load_connector_input(path: Path) -> RawEvidence:
         operations=list(payload.get("operations") or []),
         tool_versions=dict(payload.get("tool_versions") or {}),
         live_provenance=provenance if isinstance(provenance, dict) else {},
+        foundation_provenance=(
+            dict(payload.get("foundation") or payload.get("foundation_provenance") or {})
+            if isinstance(
+                payload.get("foundation") or payload.get("foundation_provenance") or {},
+                Mapping,
+            )
+            else {}
+        ),
     )
 
 
@@ -1573,6 +1598,10 @@ def load_gh_readonly_dir(path: Path) -> RawEvidence:
     if not (path / "final-pr-view.json").exists():
         raw.final_pr = {}
     raw.live_provenance = provenance if isinstance(provenance, dict) else {}
+    foundation = read_json(path / "foundation.json", {})
+    if not foundation and isinstance(provenance, Mapping):
+        foundation = provenance.get("foundation") or provenance.get("foundation_provenance") or {}
+    raw.foundation_provenance = dict(foundation) if isinstance(foundation, Mapping) else {}
     return raw
 
 
@@ -2117,6 +2146,278 @@ def operation_transcript_payload(
     }
 
 
+def github_provider(raw: RawEvidence) -> str:
+    """Identify the GitHub capability route that actually supplied the evidence."""
+
+    provider = first_text(
+        raw.foundation_provenance.get("provider"),
+        nested(raw.foundation_provenance, "github_repository", "provider"),
+    )
+    if provider in {PREFERRED_PROVIDER, GH_READONLY_PROVIDER, GH_CREATE_PROVIDER}:
+        return provider
+    if raw.source.startswith("github-connector") or raw.source == "connector-fixture":
+        return PREFERRED_PROVIDER
+    if raw.source.startswith("gh-"):
+        return GH_READONLY_PROVIDER
+    return "github-unavailable"
+
+
+def foundation_check_detail(payload: Mapping[str, Any], name: str) -> Mapping[str, Any]:
+    checks = payload.get("checks")
+    if isinstance(checks, Mapping):
+        record = checks.get(name)
+        if isinstance(record, Mapping):
+            detail = record.get("detail")
+            if isinstance(detail, Mapping):
+                return detail
+    direct = payload.get(name)
+    if isinstance(direct, Mapping):
+        detail = direct.get("detail")
+        return detail if isinstance(detail, Mapping) else direct
+    return {}
+
+
+def github_remote_matches(remote_url: Any, repo: str) -> bool:
+    if not isinstance(remote_url, str) or not remote_url.strip():
+        return False
+    if re.match(r"^https?://[^/@\s]+@", remote_url):
+        return False
+    escaped = re.escape(repo)
+    return bool(
+        re.fullmatch(rf"https://github\.com/{escaped}(?:\.git)?", remote_url)
+        or re.fullmatch(rf"git@github\.com:{escaped}(?:\.git)?", remote_url)
+    )
+
+
+def normalize_foundation_provenance(
+    raw: RawEvidence,
+    *,
+    repo: str,
+    current_source_hash: str,
+    problems: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Return allowlisted Foundation identity and append honest blockers when supplied."""
+
+    payload = raw.foundation_provenance
+    if not payload:
+        return {
+            "applicable": False,
+            "reason": "pull-request proof does not include Foundation evidence",
+        }
+
+    repository = foundation_check_detail(payload, "github_repository")
+    remote = foundation_check_detail(payload, "remote_origin")
+    branch = foundation_check_detail(payload, "default_branch")
+    initial = foundation_check_detail(payload, "initial_commit")
+    ci = foundation_check_detail(payload, "ci")
+    source_hash = first_text(payload.get("source_hash"), payload.get("tree_source_hash"))
+    provider = first_text(repository.get("provider"), payload.get("provider"))
+    fallback = first_text(repository.get("fallback"), payload.get("fallback"))
+    owner, _, name = repo.partition("/")
+    repository_owner = first_text(repository.get("owner"), payload.get("owner"))
+    repository_name = first_text(repository.get("name"), payload.get("name"))
+    visibility = first_text(repository.get("visibility"), payload.get("visibility")).lower()
+    remote_url = first_text(remote.get("url"), payload.get("remote_url"))
+    default_branch = first_text(branch.get("name"), payload.get("default_branch"))
+    head_commit = first_text(branch.get("head_commit"), payload.get("head_commit"))
+    initial_commit = first_text(initial.get("sha"), payload.get("initial_commit"))
+    current_head = first_text(initial.get("current_head"), payload.get("current_head"))
+    tree_source_hash = first_text(
+        initial.get("tree_source_hash"),
+        payload.get("tree_source_hash"),
+        source_hash,
+    )
+    ci_path = first_text(ci.get("path"), payload.get("ci_path"))
+    ci_sha256 = first_text(ci.get("sha256"), payload.get("ci_sha256"))
+    created = repository.get("created", payload.get("created"))
+
+    def foundation_problem(message: str) -> None:
+        problems.append(
+            blocking_problem(message, rule="github-foundation-provenance")
+        )
+
+    if source_hash != current_source_hash:
+        foundation_problem("Foundation evidence source hash does not match the current source")
+    if provider not in {PREFERRED_PROVIDER, GH_READONLY_PROVIDER, GH_CREATE_PROVIDER}:
+        foundation_problem("Foundation evidence does not identify an allowed GitHub provider")
+    if provider == GH_CREATE_PROVIDER and fallback != GH_CREATE_FALLBACK:
+        foundation_problem(
+            "Foundation gh repository creation provenance must be exactly gh repo create --private"
+        )
+    if repository_owner != owner or repository_name != name:
+        foundation_problem("Foundation repository identity does not match --repo")
+    if visibility not in {"private", "public"}:
+        foundation_problem("Foundation evidence requires verified repository visibility")
+    if created is True and visibility != "private":
+        foundation_problem("New GitHub Foundation repositories must be private")
+    if provider == GH_READONLY_PROVIDER and created is True:
+        foundation_problem("Read-only gh provenance cannot claim repository creation")
+    if created is False and repository.get("visibility_changed") is not False:
+        foundation_problem("Adopted repository provenance must prove visibility was unchanged")
+    if repository.get("identity_verified") is not True:
+        foundation_problem("Foundation evidence must verify repository identity")
+    if repository.get("visibility_verified") is not True:
+        foundation_problem("Foundation evidence must verify repository visibility")
+    if not github_remote_matches(remote_url, repo):
+        foundation_problem("Foundation origin URL does not match --repo")
+    if first_text(remote.get("remote"), payload.get("remote")) != "origin":
+        foundation_problem("Foundation GitHub remote must be named origin")
+    if not default_branch or branch.get("exists") is not True:
+        foundation_problem("Foundation evidence must prove the default branch")
+    if not re.fullmatch(r"[0-9a-f]{40}(?:[0-9a-f]{24})?", head_commit):
+        foundation_problem("Foundation default branch head commit is invalid")
+    if not re.fullmatch(r"[0-9a-f]{40}(?:[0-9a-f]{24})?", initial_commit):
+        foundation_problem("Foundation initial commit is invalid")
+    if not re.fullmatch(r"[0-9a-f]{40}(?:[0-9a-f]{24})?", current_head):
+        foundation_problem("Foundation current head is invalid")
+    if head_commit and current_head and head_commit != current_head:
+        foundation_problem("Foundation default branch head does not match current head")
+    if tree_source_hash != current_source_hash:
+        foundation_problem("Foundation initial commit is not bound to the current source")
+    if not ci_path.startswith(".github/workflows/") or not ci_path.endswith((".yml", ".yaml")):
+        foundation_problem("Foundation CI path is not a GitHub workflow YAML path")
+    if not re.fullmatch(r"[0-9a-f]{64}", ci_sha256):
+        foundation_problem("Foundation CI artifact SHA-256 is invalid")
+    if ci.get("committed") is not True:
+        foundation_problem("Foundation CI artifact must be committed")
+
+    return {
+        "applicable": True,
+        "schema": first_text(payload.get("schema")) or "star-forge.foundation-provenance.v1",
+        "source_hash": source_hash,
+        "provider": provider,
+        "provider_route": {
+            "preferred_provider": PREFERRED_PROVIDER,
+            "selected_provider": provider,
+            "fallback": provider != PREFERRED_PROVIDER,
+            "create_fallback": GH_CREATE_FALLBACK,
+            "recorded_fallback": fallback,
+        },
+        "repository": {
+            "owner": repository_owner,
+            "name": repository_name,
+            "full_name": repo,
+            "visibility": visibility,
+            "identity_verified": repository.get("identity_verified") is True,
+            "visibility_verified": repository.get("visibility_verified") is True,
+            "created": created if isinstance(created, bool) else None,
+        },
+        "remote": {
+            "name": first_text(remote.get("remote"), payload.get("remote")),
+            "url": remote_url,
+        },
+        "default_branch": {
+            "name": default_branch,
+            "exists": branch.get("exists") is True,
+            "head_commit": head_commit,
+        },
+        "initial_commit": {
+            "sha": initial_commit,
+            "current_head": current_head,
+            "tree_source_hash": tree_source_hash,
+        },
+        "ci": {
+            "path": ci_path,
+            "sha256": ci_sha256,
+            "committed": ci.get("committed") is True,
+        },
+    }
+
+
+def write_evidence_envelope(
+    project: Path,
+    manifest_path: Path,
+    *,
+    raw: RawEvidence,
+    repo: str,
+    pr_number: str,
+    github_host: str,
+    pr_url: str,
+    captured_base: str,
+    captured_head: str,
+    current_base: str,
+    current_head: str,
+    foundation: Mapping[str, Any],
+) -> tuple[Path, dict[str, Any]]:
+    """Adapt the v1 packet while preserving connector, PR, and Foundation identity."""
+
+    manifest = read_json(manifest_path, {})
+    provider = github_provider(raw)
+    envelope = evidence.adapt_v1_manifest(
+        manifest,
+        capability=CAPABILITY,
+        provider=provider,
+    )
+    provenance_payload = {
+        **dict(envelope["provenance"]),
+        "route": {
+            "preferred_provider": PREFERRED_PROVIDER,
+            "selected_provider": provider,
+            "fallback": provider != PREFERRED_PROVIDER,
+            "create_fallback": GH_CREATE_FALLBACK,
+        },
+        "provider": provider,
+        "source": raw.source,
+        "repository": {
+            "full_name": repo,
+            "owner": repo.partition("/")[0],
+            "name": repo.partition("/")[2],
+            "github_host": github_host,
+        },
+        "pull_request": {
+            "number": str(pr_number),
+            "url": pr_url,
+            "captured_base_sha": captured_base,
+            "current_base_sha": current_base,
+            "captured_head_sha": captured_head,
+            "current_head_sha": current_head,
+        },
+        "source_binding": {
+            "source_hash": envelope["source_hash"],
+            "runtime_asset_hash": envelope["runtime_asset_hash"],
+        },
+        "foundation": dict(foundation),
+    }
+    safe_provenance, _provenance_redactions = redact_artifact_payload(
+        provenance_payload
+    )
+    envelope["provenance"] = safe_provenance
+    if provider != PREFERRED_PROVIDER:
+        envelope["blockers"].append(
+            {
+                "rule": "github-capability-fallback",
+                "message": (
+                    "GitHub connector evidence was not supplied; the recorded gh route "
+                    "is read-only except for the separately authorized exact private-repository fallback"
+                ),
+                "capability": CAPABILITY,
+                "preferred_provider": PREFERRED_PROVIDER,
+                "selected_provider": provider,
+                "allowed_create_fallback": GH_CREATE_FALLBACK,
+                "blocking": False,
+            }
+        )
+        if envelope["verdict"] == "PASS":
+            envelope["verdict"] = "DEGRADED"
+    if raw.source in {"connector-fixture", "gh-fixture", "missing-fixture"}:
+        envelope["blockers"].append(
+            {
+                "rule": "github-fixture-provenance",
+                "message": "Fixture GitHub evidence cannot satisfy live production proof",
+                "blocking": True,
+            }
+        )
+        envelope["verdict"] = "FAIL"
+    envelope_path = manifest_path.parent / EVIDENCE_FILENAME
+    written = evidence.write_envelope(
+        envelope_path,
+        envelope,
+        project_root=project,
+        verify_artifacts=True,
+    )
+    return envelope_path, written
+
+
 def collect(args: argparse.Namespace) -> CollectionResult:
     project = Path(args.project).resolve()
     source_hash_before = live_common.compute_source_hash(project)
@@ -2138,6 +2439,24 @@ def collect(args: argparse.Namespace) -> CollectionResult:
         raw = load_connector_input(Path(args.connector_input))
     else:
         raw = load_gh_readonly_dir(Path(args.gh_readonly_dir))
+    if args.foundation_evidence:
+        try:
+            foundation_path = live_common.safe_project_path(
+                project,
+                args.foundation_evidence,
+                must_exist=True,
+            )
+            foundation_payload = read_json(foundation_path, {})
+            if not isinstance(foundation_payload, Mapping):
+                raise ValueError("Foundation evidence must be a JSON object")
+            raw.foundation_provenance = dict(foundation_payload)
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            problems.append(
+                blocking_problem(
+                    f"Foundation evidence could not be imported safely: {exc}",
+                    rule="github-foundation-provenance",
+                )
+            )
 
     initial_base = extract_base_sha(raw.pr)
     initial_head = extract_head_sha(raw.pr)
@@ -2266,10 +2585,22 @@ def collect(args: argparse.Namespace) -> CollectionResult:
     transcript_sha256 = live_common.file_sha256(transcript_path)
 
     source_hash_after = live_common.compute_source_hash(project)
+    foundation = normalize_foundation_provenance(
+        raw,
+        repo=args.repo,
+        current_source_hash=source_hash_after,
+        problems=problems,
+    )
     summary_live_provenance = dict(raw.live_provenance)
     if github_host and github_host_provenance_evidence_for_raw(raw):
         summary_live_provenance.setdefault("github_host", github_host)
     summary_live_provenance["operation_transcript_sha256"] = transcript_sha256
+    summary_live_provenance, provenance_report = redact_artifact_payload(
+        summary_live_provenance
+    )
+    redaction_report = merge_reports(redaction_report, provenance_report)
+    foundation, foundation_report = redact_artifact_payload(foundation)
+    redaction_report = merge_reports(redaction_report, foundation_report)
     summary = {
         "adapter": "github-pr",
         "source": raw.source,
@@ -2297,14 +2628,17 @@ def collect(args: argparse.Namespace) -> CollectionResult:
         "read_only_transcript_sha256": transcript_sha256,
         "captured_at": first_text(raw.live_provenance.get("collected_at"), raw.live_provenance.get("captured_at")),
         "live_provenance": summary_live_provenance,
+        "foundation": foundation,
     }
     tool_versions = {"adapter": "github-pr.v1", "source": raw.source}
     tool_versions.update(raw.tool_versions)
+    safe_command_argv, argv_report = redact_artifact_payload(args.command_argv)
+    redaction_report = merge_reports(redaction_report, argv_report)
     manifest_path = live_common.write_live_manifest(
         project,
         task=args.task,
         collector=COLLECTOR,
-        command_argv=args.command_argv,
+        command_argv=safe_command_argv,
         tool_versions=tool_versions,
         artifacts=artifacts,
         summary=summary,
@@ -2316,6 +2650,26 @@ def collect(args: argparse.Namespace) -> CollectionResult:
         runtime_asset_hash=live_common.compute_runtime_asset_hash(project),
     )
     update_manifest_redaction_report(manifest_path, redaction_report)
+    pr_url = first_text(
+        raw.final_pr.get("url"),
+        raw.final_pr.get("html_url"),
+        raw.pr.get("url"),
+        raw.pr.get("html_url"),
+    )
+    envelope_path, _envelope = write_evidence_envelope(
+        project,
+        manifest_path,
+        raw=raw,
+        repo=args.repo,
+        pr_number=str(args.pr),
+        github_host=github_host,
+        pr_url=pr_url,
+        captured_base=captured_base,
+        captured_head=captured_head,
+        current_base=current_base,
+        current_head=current_head,
+        foundation=foundation,
+    )
     manifest_rel = live_common.project_relative(project, manifest_path)
     project_arg = live_common.project_cli_arg(project)
     fixture_sources = {"connector-fixture", "gh-fixture", "missing-fixture"}
@@ -2347,7 +2701,12 @@ def collect(args: argparse.Namespace) -> CollectionResult:
                 "--strict",
             ],
         ]
-    return CollectionResult(manifest_path=manifest_path, commands=commands, problems=problems)
+    return CollectionResult(
+        manifest_path=manifest_path,
+        evidence_path=envelope_path,
+        commands=commands,
+        problems=problems,
+    )
 
 
 def record_proof_commands(result: CollectionResult, project: Path) -> int:
@@ -2380,6 +2739,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--gh-fixture-dir", default="")
     parser.add_argument("--connector-input", default="")
     parser.add_argument("--gh-readonly-dir", default="")
+    parser.add_argument("--foundation-evidence", default="")
     parser.add_argument("--include-ci-logs", action="store_true")
     parser.add_argument("--max-log-bytes", type=int, default=DEFAULT_MAX_LOG_BYTES)
     parser.add_argument("--record", action="store_true")
@@ -2394,6 +2754,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     result = collect(args)
     print("Wrote GitHub PR source packet manifest:")
     print(live_common.project_relative(Path(args.project).resolve(), result.manifest_path))
+    print("Wrote GitHub evidence envelope:")
+    print(live_common.project_relative(Path(args.project).resolve(), result.evidence_path))
     if result.commands:
         print("Source packet proof commands:")
         for command in result.commands:

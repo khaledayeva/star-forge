@@ -10,6 +10,7 @@ argv commands, writes task-scoped evidence under
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import plistlib
@@ -29,6 +30,7 @@ if str(SCRIPTS_ROOT) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_ROOT))
 
 from live_collectors import common
+from starforge import evidence
 
 
 MappingLike = dict[str, Any]
@@ -38,6 +40,12 @@ SCREENSHOT_PLACEHOLDER = "{screenshot}"
 RESULT_SCHEMA = "star-forge.native-macos.result.v1"
 NOTE_SCHEMA = "star-forge.native-macos.note.v1"
 APP_METADATA_SCHEMA = "star-forge.native-macos.app-bundle-metadata.v1"
+CAPABILITY = "native-macos-verification"
+ROUTE = "macos-implementation"
+BUILD_MACOS_PROVIDER = "build-macos-apps"
+COMPUTER_USE_PROVIDER = "computer-use"
+PROJECT_WORKFLOW_PROVIDER = "macos-project-workflow"
+CONTRACT_CAPABILITIES = {"ui-automation", "signing", "packaging", "test"}
 
 FORBIDDEN_EXECUTABLES = {
     "sudo",
@@ -83,6 +91,73 @@ def write_text(path: Path, text: str) -> Path:
     redacted, _ = common.redact_sensitive_values(text)
     path.write_text(str(redacted), encoding="utf-8")
     return path
+
+
+def tree_sha256(path: Path | None) -> str:
+    if path is None or not path.is_dir():
+        return ""
+    digest = hashlib.sha256()
+    files = sorted(item for item in path.glob("**/*") if item.is_file() and not item.is_symlink())
+    for item in files:
+        digest.update(str(item.relative_to(path)).encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(common.file_sha256(item).encode("ascii"))
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def write_evidence_envelope(
+    project: Path,
+    out_dir: Path,
+    manifest_path: Path,
+    *,
+    provider: str,
+    route_status: MappingLike,
+) -> tuple[Path, MappingLike]:
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    envelope = evidence.adapt_v1_manifest(
+        manifest,
+        capability=CAPABILITY,
+        provider=provider,
+    )
+    envelope["provenance"] = {
+        **dict(envelope["provenance"]),
+        "route": ROUTE,
+        "provider": provider,
+        "executor": "structured-argv",
+        "capabilities": dict(route_status),
+        "providers": [
+            {
+                "id": BUILD_MACOS_PROVIDER,
+                "kind": "plugin",
+                "status": (
+                    "used"
+                    if provider == BUILD_MACOS_PROVIDER
+                    else "unavailable"
+                    if route_status.get("build_macos_apps") == "unavailable"
+                    else "not-selected"
+                ),
+            },
+            {
+                "id": COMPUTER_USE_PROVIDER,
+                "kind": "computer-use",
+                "status": str(route_status.get("computer_use") or "not-selected"),
+            },
+            {
+                "id": PROJECT_WORKFLOW_PROVIDER,
+                "kind": "shell",
+                "status": "used" if provider == PROJECT_WORKFLOW_PROVIDER else "not-selected",
+            },
+        ],
+    }
+    envelope_path = out_dir / "evidence.json"
+    written = evidence.write_envelope(
+        envelope_path,
+        envelope,
+        project_root=project,
+        verify_artifacts=True,
+    )
+    return envelope_path, written
 
 
 def problem(message: str, *, rule: str, path: str = "", severity: str = "high") -> MappingLike:
@@ -962,6 +1037,46 @@ def collect(args: argparse.Namespace, command_argv: Sequence[str]) -> tuple[int,
     problems.extend(parse_problems)
     screenshot_argv, parse_problems = parse_argv_json(args.screenshot_command, "screenshot", required=False)
     problems.extend(parse_problems)
+    required_capabilities = set(args.required_capability or [])
+    if "test" in required_capabilities and not test_argv:
+        problems.append(problem(
+            "the macOS contract requires test evidence, but no test command was provided",
+            rule="native-macos-required-test",
+        ))
+    if "ui-automation" in required_capabilities and not screenshot_argv:
+        problems.append(problem(
+            "the macOS contract requires UI automation evidence, but no UI capture command was provided",
+            rule="native-macos-required-ui-automation",
+        ))
+    if "signing" in required_capabilities:
+        problems.append(problem(
+            "the macOS contract requires signing evidence, but this collector has no signing authority",
+            rule="native-macos-required-signing",
+        ))
+    if "packaging" in required_capabilities:
+        problems.append(problem(
+            "the macOS contract requires packaging evidence, but this collector does not mutate packaging state",
+            rule="native-macos-required-packaging",
+        ))
+    if args.build_macos_apps_unavailable:
+        unavailable.append(BUILD_MACOS_PROVIDER)
+    if args.computer_use_unavailable:
+        unavailable.append(COMPUTER_USE_PROVIDER)
+    if args.build_provider == BUILD_MACOS_PROVIDER and args.build_macos_apps_unavailable:
+        problems.append(problem(
+            "Build macOS Apps cannot be both selected and unavailable",
+            rule="native-macos-capability-route",
+        ))
+    if args.ui_provider == COMPUTER_USE_PROVIDER and args.computer_use_unavailable:
+        problems.append(problem(
+            "Computer Use cannot be both selected and unavailable",
+            rule="native-macos-capability-route",
+        ))
+    if args.ui_provider == COMPUTER_USE_PROVIDER and not screenshot_argv:
+        problems.append(problem(
+            "Computer Use selection requires UI capture evidence",
+            rule="native-macos-capability-route",
+        ))
 
     app_bundle_path, metadata, metadata_problems = resolve_app_bundle(
         project,
@@ -1057,6 +1172,52 @@ def collect(args: argparse.Namespace, command_argv: Sequence[str]) -> tuple[int,
         unavailable.append("screenshot")
 
     source_hash_after = common.compute_source_hash(project)
+    app_bundle_hash = tree_sha256(app_bundle_path)
+    route_status: MappingLike = {
+        "required": sorted(required_capabilities),
+        "build": {
+            "provider": args.build_provider,
+            "tool": resolve_executable(project, build_argv or []),
+            "status": "passed" if build_payload.get("success") else "failed",
+        },
+        "run": {
+            "provider": args.ui_provider,
+            "tool": resolve_executable(project, run_argv or []),
+            "status": "passed" if run_payload.get("success") else "failed",
+        },
+        "ui_automation": {
+            "provider": args.ui_provider,
+            "status": "passed" if screenshot_path else "not-collected",
+        },
+        "test": {
+            "provider": args.test_provider,
+            "status": (
+                "passed"
+                if test_argv and test_payload.get("success")
+                else "failed"
+                if test_argv
+                else "not-required"
+                if "test" not in required_capabilities
+                else "missing"
+            ),
+        },
+        "signing": {
+            "provider": args.signing_provider,
+            "status": "blocked-no-authority" if "signing" in required_capabilities else "not-required",
+        },
+        "packaging": {
+            "provider": args.packaging_provider,
+            "status": "blocked-no-mutation" if "packaging" in required_capabilities else "not-required",
+        },
+        "build_macos_apps": "unavailable" if args.build_macos_apps_unavailable else "availability-not-reported",
+        "computer_use": (
+            "used"
+            if args.ui_provider == COMPUTER_USE_PROVIDER
+            else "unavailable"
+            if args.computer_use_unavailable
+            else "availability-not-reported"
+        ),
+    }
     summary: MappingLike = {
         "app_identity": {
             "app_name": app_name or metadata.get("app_name") or "",
@@ -1073,7 +1234,13 @@ def collect(args: argparse.Namespace, command_argv: Sequence[str]) -> tuple[int,
         },
         "signing_note": "not_checked",
         "packaging_note": "not_checked",
+        "app_bundle_hash": app_bundle_hash,
+        "capability_route": {
+            "id": ROUTE,
+            **route_status,
+        },
     }
+    runtime_asset_hash = common.compute_runtime_asset_hash(project)
     manifest_path = common.write_live_manifest(
         project,
         task=args.task,
@@ -1087,7 +1254,14 @@ def collect(args: argparse.Namespace, command_argv: Sequence[str]) -> tuple[int,
         problems=problems,
         source_hash_before=source_hash_before,
         source_hash_after=source_hash_after,
-        runtime_asset_hash=common.compute_runtime_asset_hash(project),
+        runtime_asset_hash=runtime_asset_hash,
+    )
+    envelope_path, envelope = write_evidence_envelope(
+        project,
+        out_dir,
+        manifest_path,
+        provider=str(args.build_provider),
+        route_status=route_status,
     )
     proof_argv = proof_command_argv(
         app_name=app_name,
@@ -1103,7 +1277,11 @@ def collect(args: argparse.Namespace, command_argv: Sequence[str]) -> tuple[int,
         "task": args.task,
         "artifact_dir": rel(project, out_dir),
         "manifest": rel(project, manifest_path),
+        "evidence": rel(project, envelope_path),
+        "evidence_schema": envelope["schema"],
+        "evidence_verdict": envelope["verdict"],
         "degraded": bool(unavailable),
+        "unavailable_capabilities": sorted(set(unavailable)),
         "problems": problems,
         "proof_command_argv": proof_argv,
         "proof_command": shlex.join(proof_argv),
@@ -1116,7 +1294,7 @@ def collect(args: argparse.Namespace, command_argv: Sequence[str]) -> tuple[int,
                 f"native macOS proof recording failed with exit code {record.get('returncode')}",
                 rule="native-macos-record",
             ))
-    return (1 if problems else 0), output
+    return (1 if problems or unavailable else 0), output
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1136,6 +1314,39 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--screenshot-timeout", type=float, default=10.0)
     parser.add_argument("--observe-seconds", type=float, default=0.25)
     parser.add_argument("--cleanup-timeout", type=float, default=2.0)
+    parser.add_argument(
+        "--required-capability",
+        action="append",
+        choices=sorted(CONTRACT_CAPABILITIES),
+        default=[],
+    )
+    parser.add_argument(
+        "--build-provider",
+        choices=[BUILD_MACOS_PROVIDER, PROJECT_WORKFLOW_PROVIDER],
+        default=PROJECT_WORKFLOW_PROVIDER,
+    )
+    parser.add_argument(
+        "--ui-provider",
+        choices=[COMPUTER_USE_PROVIDER, PROJECT_WORKFLOW_PROVIDER],
+        default=PROJECT_WORKFLOW_PROVIDER,
+    )
+    parser.add_argument(
+        "--test-provider",
+        choices=[BUILD_MACOS_PROVIDER, PROJECT_WORKFLOW_PROVIDER],
+        default=PROJECT_WORKFLOW_PROVIDER,
+    )
+    parser.add_argument(
+        "--signing-provider",
+        choices=[BUILD_MACOS_PROVIDER, PROJECT_WORKFLOW_PROVIDER],
+        default=BUILD_MACOS_PROVIDER,
+    )
+    parser.add_argument(
+        "--packaging-provider",
+        choices=[BUILD_MACOS_PROVIDER, PROJECT_WORKFLOW_PROVIDER],
+        default=BUILD_MACOS_PROVIDER,
+    )
+    parser.add_argument("--build-macos-apps-unavailable", action="store_true")
+    parser.add_argument("--computer-use-unavailable", action="store_true")
     parser.add_argument("--record", action="store_true")
     return parser
 

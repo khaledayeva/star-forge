@@ -32,6 +32,7 @@ star_forge = importlib.util.module_from_spec(STAR_SPEC)
 STAR_SPEC.loader.exec_module(star_forge)
 
 from live_collectors import common as live_common
+from starforge import evidence
 
 
 TASK = "SF-1"
@@ -450,8 +451,31 @@ def test_happy_path_writes_artifacts_manifest_and_handoff_command() -> None:
         assert manifest["schema"] == live_common.LIVE_MANIFEST_SCHEMA
         assert manifest["collector"] == "browser"
         assert manifest["source_hash_before"] == manifest["source_hash_after"]
+        envelope_path = project / payload["evidence"]
+        envelope = evidence.read_envelope(
+            envelope_path,
+            project_root=project,
+            verify_artifacts=True,
+        )
+        assert envelope["schema"] == evidence.EVIDENCE_SCHEMA
+        assert envelope["capability"] == "local-web-qa"
+        assert envelope["provider"] == "playwright-collector"
+        assert envelope["runtime_asset_hash"] == manifest["runtime_asset_hash"]
+        assert envelope["verdict"] == "DEGRADED"
+        route = envelope["provenance"]["route"]
+        assert route["preferred_provider"] == "in-app-browser"
+        assert route["selected_provider"] == "playwright-collector"
+        assert route["fallback"] is True
+        browser_policy = envelope["provenance"]["browser_state_policy"]
+        assert browser_policy["chrome"] == "reserved-for-authenticated-or-extension-dependent-state"
+        assert any(
+            item.get("rule") == "capability-fallback" and item.get("blocking") is False
+            for item in envelope["blockers"]
+        )
         expected_argv, _ = live_common.redact_sensitive_values(payload["browser_run_argv"])
         assert manifest["summary"]["browser_run_argv"] == expected_argv
+        assert manifest["summary"]["capability_route"]["preferred_provider"] == "in-app-browser"
+        assert manifest["summary"]["capability_route"]["selected_provider"] == "playwright-collector"
         assert manifest["summary"]["service_workers"] == "block"
         assert manifest["summary"]["network_control"] == browser_playwright.BROWSER_NETWORK_CONTROL_MODE
         assert_artifacts_scoped(manifest)
@@ -526,6 +550,9 @@ def test_missing_playwright_dependency_writes_degraded_manifest() -> None:
         assert manifest["degraded"] is True
         assert "playwright-browser" in manifest["unavailable_capabilities"]
         assert "playwright-dependency" in rules(payload)
+        envelope = evidence.read_envelope(project / payload["evidence"])
+        assert envelope["verdict"] == "FAIL"
+        assert any(item.get("rule") == "playwright-dependency" for item in envelope["blockers"])
         assert "--degraded" in payload["browser_run_argv"]
 
 

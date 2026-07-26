@@ -798,6 +798,63 @@ def test_complete_task_visual_requires_passing_browser_run() -> None:
         assert code == 0, payload
 
 
+def test_task_visual_classifier_exempts_browser_collector_infrastructure() -> None:
+    task = {
+        "description": "Adapt browser and preview proof with viewport tests",
+        "files": (
+            "scripts/live_collectors/browser_playwright.py, "
+            "scripts/live_collectors/preview.py, "
+            "tests/test_live_browser_playwright.py, tests/test_live_preview.py"
+        ),
+        "verify": "python3 tests/test_live_browser_playwright.py",
+        "evidence": "scripts/live_collectors/browser_playwright.py",
+        "plan_version": "legacy",
+        "proof": "",
+    }
+    assert star_forge.task_files_are_infrastructure(task)
+    assert not star_forge.task_is_visual(task)
+
+
+def test_task_visual_classifier_keeps_mixed_app_ui_ownership_visual() -> None:
+    task = {
+        "description": "Update browser collector and dashboard",
+        "files": "scripts/live_collectors/browser_playwright.py, frontend/pages/dashboard.tsx",
+        "verify": "python3 tests/test_dashboard.py",
+        "evidence": "-",
+        "plan_version": "legacy",
+        "proof": "",
+    }
+    assert not star_forge.task_files_are_infrastructure(task)
+    assert star_forge.task_owns_visual_source(task)
+    assert star_forge.task_is_visual(task)
+
+
+def test_task_visual_classifier_prefers_plan_v2_browser_proof() -> None:
+    task = {
+        "description": "Exercise the release workflow",
+        "files": "scripts/release_check.py",
+        "verify": "python3 tests/test_release.py",
+        "evidence": "-",
+        "plan_version": "v2",
+        "proof": "unit, browser",
+    }
+    assert star_forge.task_is_visual(task)
+
+
+def test_task_visual_classifier_uses_plan_v2_nonbrowser_proof_for_non_ui_code() -> None:
+    task = {
+        "description": "Validate browser terminology in lifecycle output",
+        "files": "scripts/starforge/lifecycle.py",
+        "verify": "python3 tests/test_lifecycle.py",
+        "evidence": "-",
+        "plan_version": "v2",
+        "proof": "unit, integration",
+    }
+    assert not star_forge.task_files_are_infrastructure(task)
+    assert not star_forge.task_owns_visual_source(task)
+    assert not star_forge.task_is_visual(task)
+
+
 def test_browser_run_cli_accepts_summary_argument() -> None:
     # Regression: the `browser-run` subparser once lacked --summary while
     # cmd_browser_run read args.summary, so every CLI invocation crashed.

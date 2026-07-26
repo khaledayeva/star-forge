@@ -33,6 +33,7 @@ SPEC.loader.exec_module(star_forge)
 
 from live_collectors import common as live_common
 from live_collectors import native_macos
+from starforge import evidence
 
 os.environ["STAR_FORGE_LEARNINGS_HOME"] = tempfile.mkdtemp(prefix="star-forge-native-macos-learnings-")
 
@@ -152,6 +153,20 @@ def base_args(project: Path, app: Path | None = None) -> list[str]:
 def manifest_payload(project: Path) -> dict[str, Any]:
     path = live_common.live_collector_dir(project, "SF-1", "native-macos", create=False) / "manifest.json"
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def envelope_payload(project: Path) -> dict[str, Any]:
+    path = live_common.live_collector_dir(
+        project,
+        "SF-1",
+        "native-macos",
+        create=False,
+    ) / "evidence.json"
+    return evidence.read_envelope(
+        path,
+        project_root=project,
+        verify_artifacts=True,
+    )
 
 
 def live_path(project: Path, name: str) -> Path:
@@ -371,6 +386,18 @@ def test_happy_path_prints_native_macos_proof_command_and_passes() -> None:
         assert manifest["summary"]["app_bundle_metadata"].endswith("app-bundle-metadata.json")
         assert manifest["summary"]["signing_note"] == "not_checked"
         assert manifest["summary"]["packaging_note"] == "not_checked"
+        assert len(manifest["summary"]["app_bundle_hash"]) == 64
+        assert output["evidence"].endswith("/evidence.json")
+        envelope = envelope_payload(project)
+        assert envelope["schema"] == evidence.EVIDENCE_SCHEMA
+        assert envelope["capability"] == native_macos.CAPABILITY
+        assert envelope["provider"] == native_macos.PROJECT_WORKFLOW_PROVIDER
+        assert envelope["source_hash"] == manifest["source_hash_after"]
+        assert envelope["runtime_asset_hash"] == manifest["runtime_asset_hash"]
+        assert envelope["verdict"] == "PASS"
+        assert envelope["provenance"]["route"] == native_macos.ROUTE
+        assert envelope["provenance"]["executor"] == "structured-argv"
+        assert envelope["provenance"]["capabilities"]["test"]["status"] == "passed"
         run = json.loads(live_path(project, "run.json").read_text(encoding="utf-8"))
         assert run["pid"]
         assert run["executable_path"]
@@ -386,6 +413,85 @@ def test_happy_path_prints_native_macos_proof_command_and_passes() -> None:
         assert proof_err == ""
         assert proof_code == 0, proof_payload
         assert proof_payload["verdict"] == "PASS", proof_payload
+
+
+def test_contract_required_capabilities_are_modeled_with_specific_routes() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        init_project(project)
+        app = make_app(project)
+        screenshot = py_cmd(PNG_CODE, native_macos.SCREENSHOT_PLACEHOLDER)
+        args = base_args(project, app) + [
+            "--test-command", argv(py_cmd("print('tests ok')")),
+            "--screenshot-command", argv(screenshot),
+            "--required-capability", "test",
+            "--required-capability", "ui-automation",
+            "--build-provider", native_macos.BUILD_MACOS_PROVIDER,
+            "--ui-provider", native_macos.COMPUTER_USE_PROVIDER,
+            "--test-provider", native_macos.BUILD_MACOS_PROVIDER,
+        ]
+        code, output, _ = run_collector(args)
+        assert code == 0, output
+        envelope = envelope_payload(project)
+        capabilities = envelope["provenance"]["capabilities"]
+        assert capabilities["required"] == ["test", "ui-automation"]
+        assert capabilities["build"]["provider"] == native_macos.BUILD_MACOS_PROVIDER
+        assert capabilities["ui_automation"] == {
+            "provider": native_macos.COMPUTER_USE_PROVIDER,
+            "status": "passed",
+        }
+        providers = {
+            item["id"]: item["status"]
+            for item in envelope["provenance"]["providers"]
+        }
+        assert providers[native_macos.BUILD_MACOS_PROVIDER] == "used"
+        assert providers[native_macos.COMPUTER_USE_PROVIDER] == "used"
+
+
+def test_required_signing_and_packaging_record_blockers_without_assuming_authority() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        init_project(project)
+        app = make_app(project)
+        code, output, _ = run_collector(
+            base_args(project, app)
+            + [
+                "--required-capability", "signing",
+                "--required-capability", "packaging",
+            ]
+        )
+        assert code == 1
+        assert_collector_rule(project, output, "native-macos-required-signing")
+        assert_collector_rule(project, output, "native-macos-required-packaging")
+        envelope = envelope_payload(project)
+        assert envelope["verdict"] == "FAIL"
+        assert envelope["provenance"]["capabilities"]["signing"]["status"] == "blocked-no-authority"
+        assert envelope["provenance"]["capabilities"]["packaging"]["status"] == "blocked-no-mutation"
+
+
+def test_unavailable_preferred_routes_degrade_with_explicit_provenance() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        init_project(project)
+        app = make_app(project)
+        code, output, _ = run_collector(
+            base_args(project, app)
+            + [
+                "--build-macos-apps-unavailable",
+                "--computer-use-unavailable",
+            ]
+        )
+        assert code == 1
+        assert output["degraded"] is True
+        assert output["evidence_verdict"] == "DEGRADED"
+        envelope = envelope_payload(project)
+        assert envelope["verdict"] == "DEGRADED"
+        providers = {
+            item["id"]: item["status"]
+            for item in envelope["provenance"]["providers"]
+        }
+        assert providers[native_macos.BUILD_MACOS_PROVIDER] == "unavailable"
+        assert providers[native_macos.COMPUTER_USE_PROVIDER] == "unavailable"
 
 
 def test_proof_command_uses_absolute_project_from_outside_project_cwd() -> None:

@@ -31,9 +31,14 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from live_collectors import common as live_common
+from starforge import evidence
 
 
 COLLECTOR = "browser"
+CAPABILITY = "local-web-qa"
+PREFERRED_PROVIDER = "in-app-browser"
+FALLBACK_PROVIDER = "playwright-collector"
+EVIDENCE_FILENAME = "evidence.v2.json"
 SCENARIO_SCHEMA = "star-forge.live-browser-scenarios.v1"
 DEFAULT_TIMEOUT_MS = 5000
 MAX_TIMEOUT_MS = 60000
@@ -1390,6 +1395,51 @@ def collector_argv_from_args(args: argparse.Namespace) -> list[str]:
     return argv
 
 
+def write_evidence_envelope(project: Path, manifest_path: Path) -> tuple[Path, dict[str, Any]]:
+    """Adapt the compatibility manifest to source-bound v2 fallback evidence."""
+
+    manifest = read_json_file(manifest_path)
+    envelope = evidence.adapt_v1_manifest(
+        manifest,
+        capability=CAPABILITY,
+        provider=FALLBACK_PROVIDER,
+    )
+    provenance = dict(envelope["provenance"])
+    provenance["route"] = {
+        "preferred_provider": PREFERRED_PROVIDER,
+        "selected_provider": FALLBACK_PROVIDER,
+        "fallback": True,
+        "reason": "Playwright collector was explicitly invoked for CI or headless local QA",
+    }
+    provenance["browser_state_policy"] = {
+        "ambient_profile": False,
+        "authenticated_state": False,
+        "extension_dependent_state": False,
+        "chrome": "reserved-for-authenticated-or-extension-dependent-state",
+    }
+    envelope["provenance"] = provenance
+    envelope["blockers"].append(
+        {
+            "rule": "capability-fallback",
+            "message": "In-app Browser proof was not supplied; Playwright collector evidence is the explicit fallback",
+            "capability": CAPABILITY,
+            "preferred_provider": PREFERRED_PROVIDER,
+            "selected_provider": FALLBACK_PROVIDER,
+            "blocking": False,
+        }
+    )
+    if envelope["verdict"] == "PASS":
+        envelope["verdict"] = "DEGRADED"
+    envelope_path = manifest_path.parent / EVIDENCE_FILENAME
+    written = evidence.write_envelope(
+        envelope_path,
+        envelope,
+        project_root=project,
+        verify_artifacts=True,
+    )
+    return envelope_path, written
+
+
 def collect(args: argparse.Namespace, *, runner: BrowserRunner | None = None) -> tuple[int, dict[str, Any]]:
     project = resolve_project(args.project)
     task = str(args.task)
@@ -1403,6 +1453,13 @@ def collect(args: argparse.Namespace, *, runner: BrowserRunner | None = None) ->
         "trace_requested": bool(args.trace),
         "ephemeral_context": True,
         "ambient_profile": False,
+        "capability_route": {
+            "capability": CAPABILITY,
+            "preferred_provider": PREFERRED_PROVIDER,
+            "selected_provider": FALLBACK_PROVIDER,
+            "fallback": True,
+            "chrome_policy": "reserved-for-authenticated-or-extension-dependent-state",
+        },
     }
     artifact_reports: list[dict[str, int]] = []
     source_before = live_common.compute_source_hash(project)
@@ -1553,6 +1610,7 @@ def collect(args: argparse.Namespace, *, runner: BrowserRunner | None = None) ->
         source_hash_after=source_after,
         runtime_asset_hash=runtime_hash,
     )
+    envelope_path, envelope = write_evidence_envelope(project, manifest_path)
 
     record_result: dict[str, Any] | None = None
     if args.record:
@@ -1563,6 +1621,12 @@ def collect(args: argparse.Namespace, *, runner: BrowserRunner | None = None) ->
         "collector": COLLECTOR,
         "task": task,
         "manifest": live_common.project_relative(project, manifest_path),
+        "evidence": live_common.project_relative(project, envelope_path),
+        "evidence_verdict": envelope["verdict"],
+        "capability": CAPABILITY,
+        "preferred_provider": PREFERRED_PROVIDER,
+        "provider": FALLBACK_PROVIDER,
+        "fallback": True,
         "degraded": degraded,
         "unavailable_capabilities": sorted(set(unavailable)),
         "problems": problems,

@@ -25,6 +25,7 @@ if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 from live_collectors import common as live_common
+from starforge import evidence
 
 
 STAR_FORGE_REPORT_SCHEMA = "star-forge.security-report.v1"
@@ -37,6 +38,10 @@ NORMALIZED_FINDINGS_SCHEMA = "star-forge.normalized-security-findings.v1"
 HANDOFF_INPUT_SCHEMA = "star-forge.security-handoff-input.v1"
 INPUT_HASH_SCHEMA = "star-forge.security-input-hash.v1"
 RESULT_SCHEMA = "star-forge.security-adapter-result.v1"
+CAPABILITY = "security-review"
+PREFERRED_PROVIDER = "codex-security"
+FALLBACK_PROVIDER = "security-reviewer"
+EVIDENCE_FILENAME = "evidence.v2.json"
 VALID_PROFILES = {"dependency-audit", "security-deep", "security-diff", "vulnerability-fix"}
 KIND_BY_PROFILE = {
     "dependency-audit": "dependency-audit",
@@ -616,6 +621,78 @@ def maybe_record(commands: Mapping[str, Sequence[str]], cwd: Path) -> dict[str, 
     return results
 
 
+def security_provider(schema_family: str) -> str:
+    """Return the capability provider that actually produced the imported report."""
+
+    return PREFERRED_PROVIDER if schema_family == "codex-security" else FALLBACK_PROVIDER
+
+
+def write_evidence_envelope(
+    project: Path,
+    manifest_path: Path,
+    *,
+    schema_family: str,
+    scanner: str,
+    scanner_version_value: str,
+    source_schema: str,
+    source_binding_value: Mapping[str, Any],
+) -> tuple[Path, dict[str, Any]]:
+    """Adapt the v1 manifest and record the selected security capability route."""
+
+    manifest = read_json(manifest_path)
+    provider = security_provider(schema_family)
+    envelope = evidence.adapt_v1_manifest(
+        manifest,
+        capability=CAPABILITY,
+        provider=provider,
+    )
+    preferred = provider == PREFERRED_PROVIDER
+    provenance_payload = {
+        **dict(envelope["provenance"]),
+        "route": {
+            "preferred_provider": PREFERRED_PROVIDER,
+            "selected_provider": provider,
+            "fallback": not preferred,
+        },
+        "provider": provider,
+        "scanner": scanner,
+        "scanner_version": scanner_version_value,
+        "source_schema": source_schema,
+        "schema_family": schema_family,
+        "source_binding": dict(source_binding_value),
+        "normalization": NORMALIZED_FINDINGS_SCHEMA,
+    }
+    safe_provenance, _provenance_redactions = redact_payload(
+        provenance_payload,
+        project,
+    )
+    envelope["provenance"] = safe_provenance
+    if not preferred:
+        envelope["blockers"].append(
+            {
+                "rule": "security-capability-fallback",
+                "message": (
+                    "Codex Security evidence was not supplied; dependency scanner "
+                    "or security reviewer output was normalized through the fallback route"
+                ),
+                "capability": CAPABILITY,
+                "preferred_provider": PREFERRED_PROVIDER,
+                "selected_provider": provider,
+                "blocking": False,
+            }
+        )
+        if envelope["verdict"] == "PASS":
+            envelope["verdict"] = "DEGRADED"
+    envelope_path = manifest_path.parent / EVIDENCE_FILENAME
+    written = evidence.write_envelope(
+        envelope_path,
+        envelope,
+        project_root=project,
+        verify_artifacts=True,
+    )
+    return envelope_path, written
+
+
 def adapt(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
     project = Path(args.project).resolve()
     root = live_common.live_collector_dir(project, args.task, "security")
@@ -770,16 +847,27 @@ def adapt(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
         "dependency_manifests": dependency_manifests,
         **findings_summary,
     }
+    safe_command_argv, command_report = redact_payload(command_argv, project)
+    redaction_totals = merge_reports(redaction_totals, command_report)
     manifest_path = live_common.write_live_manifest(
         project,
         task=args.task,
         collector="security",
-        command_argv=command_argv,
+        command_argv=safe_command_argv,
         tool_versions={scanner or "security-adapter": version or "unknown"},
         artifacts=artifacts,
         summary=summary,
         degraded=bool(problems),
         problems=problems,
+    )
+    envelope_path, envelope = write_evidence_envelope(
+        project,
+        manifest_path,
+        schema_family=schema_family,
+        scanner=scanner,
+        scanner_version_value=version,
+        source_schema=source_schema,
+        source_binding_value={**binding, "fresh": source_binding_ok},
     )
 
     project_arg = "."
@@ -801,6 +889,19 @@ def adapt(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
                 f"security record command {name} failed with exit code {record.get('returncode')}",
                 rule="security-record",
             )
+    if record_failed:
+        envelope["blockers"].extend(
+            dict(item)
+            for item in problems
+            if item.get("rule") == "security-record"
+        )
+        envelope["verdict"] = "FAIL"
+        evidence.write_envelope(
+            envelope_path,
+            envelope,
+            project_root=project,
+            verify_artifacts=True,
+        )
     verdict = "FAIL" if problems else "PASS"
     result = {
         "schema": RESULT_SCHEMA,
@@ -815,6 +916,12 @@ def adapt(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
             "redaction_report": live_common.project_relative(project, redaction_path),
             "manifest": live_common.project_relative(project, manifest_path),
         },
+        "evidence": live_common.project_relative(project, envelope_path),
+        "evidence_schema": envelope["schema"],
+        "evidence_verdict": envelope["verdict"],
+        "capability": CAPABILITY,
+        "preferred_provider": PREFERRED_PROVIDER,
+        "provider": security_provider(schema_family),
         "commands": commands,
         "problems": problems,
     }

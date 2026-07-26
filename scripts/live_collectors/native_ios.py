@@ -28,6 +28,7 @@ if str(SCRIPTS_ROOT) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_ROOT))
 
 from live_collectors import common
+from starforge import evidence
 
 
 COLLECTOR = "native-ios"
@@ -35,6 +36,10 @@ RESULT_SCHEMA = "star-forge.native-ios.result.v1"
 SESSION_SCHEMA = "star-forge.native-ios.session-defaults.v1"
 TRANSCRIPT_SCHEMA = "star-forge.native-ios.mcp-transcript.v1"
 APP_BUNDLE_SCHEMA = "star-forge.native-ios.app-bundle.v1"
+CAPABILITY = "native-ios-verification"
+ROUTE = "ios-verification"
+PRIMARY_PROVIDER = "xcodebuildmcp"
+SIMULATOR_BROWSER_PROVIDER = "ios-simulator-browser"
 
 SESSION_TOOLS = {"session_show_defaults"}
 BUILD_TOOLS = {
@@ -219,6 +224,52 @@ def write_text(path: Path, text: str) -> Path:
     redacted, _report = common.redact_sensitive_values(text)
     path.write_text(str(redacted), encoding="utf-8")
     return path
+
+
+def write_evidence_envelope(
+    project: Path,
+    out_dir: Path,
+    manifest_path: Path,
+    *,
+    transcript_summary: MappingLike,
+    simulator_browser_status: str,
+) -> tuple[Path, MappingLike]:
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    envelope = evidence.adapt_v1_manifest(
+        manifest,
+        capability=CAPABILITY,
+        provider=PRIMARY_PROVIDER,
+    )
+    envelope["provenance"] = {
+        **dict(envelope["provenance"]),
+        "route": ROUTE,
+        "provider": PRIMARY_PROVIDER,
+        "tool_surface": "mcp",
+        "tool": "XcodeBuildMCP",
+        "tool_details": dict(transcript_summary.get("provenance") or {}),
+        "tool_call_count": int(transcript_summary.get("tool_call_count") or 0),
+        "tool_categories": dict(transcript_summary.get("categories") or {}),
+        "providers": [
+            {
+                "id": PRIMARY_PROVIDER,
+                "kind": "mcp",
+                "status": "used",
+            },
+            {
+                "id": SIMULATOR_BROWSER_PROVIDER,
+                "kind": "plugin",
+                "status": simulator_browser_status,
+            },
+        ],
+    }
+    envelope_path = out_dir / "evidence.json"
+    written = evidence.write_envelope(
+        envelope_path,
+        envelope,
+        project_root=project,
+        verify_artifacts=True,
+    )
+    return envelope_path, written
 
 
 def input_display_path(project: Path, path: Path | str) -> str:
@@ -1173,9 +1224,10 @@ def collect(args: argparse.Namespace, command_argv: Sequence[str]) -> tuple[int,
     if log_path is not None:
         artifacts["log"] = log_path
 
-    has_ui_proof = screenshot_path is not None or ui_snapshot_payload is not None
-    if not has_ui_proof:
-        problems.append(problem("native iOS UI proof requires screenshot or UI snapshot evidence; log evidence alone is not enough", rule="native-ios-ui"))
+    if screenshot_path is None:
+        problems.append(problem("native iOS proof requires screenshot evidence", rule="native-ios-ui"))
+    if ui_snapshot_payload is None:
+        problems.append(problem("native iOS proof requires an inspectable UI snapshot", rule="native-ios-ui-snapshot"))
 
     session_info = validate_session_defaults(
         session_payload,
@@ -1197,6 +1249,18 @@ def collect(args: argparse.Namespace, command_argv: Sequence[str]) -> tuple[int,
     )
     problems.extend(transcript_problems)
     unavailable.extend(transcript_unavailable)
+    if args.simulator_browser_used and args.simulator_browser_unavailable:
+        problems.append(problem(
+            "Simulator Browser cannot be both used and unavailable",
+            rule="native-ios-simulator-browser",
+        ))
+    if args.simulator_browser_used and (screenshot_path is None or ui_snapshot_payload is None):
+        problems.append(problem(
+            "Simulator Browser use requires both screenshot and UI snapshot artifacts",
+            rule="native-ios-simulator-browser",
+        ))
+    if args.simulator_browser_unavailable:
+        unavailable.append(SIMULATOR_BROWSER_PROVIDER)
 
     for label, expected_kind, payload, path in (
         ("build result", "build", build_payload, build_path),
@@ -1239,9 +1303,27 @@ def collect(args: argparse.Namespace, command_argv: Sequence[str]) -> tuple[int,
             "build_success": result_failure(build_payload) is None,
             "launch_success": result_failure(launch_payload) is None,
             "test_success": result_failure(test_payload) is None,
-            "ui_proof": "screenshot" if screenshot_path is not None else "ui_snapshot" if ui_snapshot_payload is not None else "",
+            "ui_proof": [
+                name
+                for name, present in (
+                    ("ui_snapshot", ui_snapshot_payload is not None),
+                    ("screenshot", screenshot_path is not None),
+                )
+                if present
+            ],
             "log_is_diagnostic_only": log_path is not None,
             "strict_proof_handoff_ready": not degraded,
+        },
+        "capability_route": {
+            "id": ROUTE,
+            "primary_provider": PRIMARY_PROVIDER,
+            "simulator_browser": (
+                "used"
+                if args.simulator_browser_used
+                else "unavailable"
+                if args.simulator_browser_unavailable
+                else "availability-not-reported"
+            ),
         },
     }
     manifest_path = common.write_live_manifest(
@@ -1262,6 +1344,20 @@ def collect(args: argparse.Namespace, command_argv: Sequence[str]) -> tuple[int,
         source_hash_after=source_after,
         runtime_asset_hash=runtime_hash,
     )
+    simulator_browser_status = (
+        "used"
+        if args.simulator_browser_used
+        else "unavailable"
+        if args.simulator_browser_unavailable
+        else "availability-not-reported"
+    )
+    envelope_path, envelope = write_evidence_envelope(
+        project,
+        out_dir,
+        manifest_path,
+        transcript_summary=transcript_summary,
+        simulator_browser_status=simulator_browser_status,
+    )
     proof_argv = proof_command_argv(task=args.task, scheme=scheme, simulator=simulator, project=project, artifacts=artifacts)
     output: MappingLike = {
         "schema": "star-forge.native-ios-collector.v1",
@@ -1269,6 +1365,9 @@ def collect(args: argparse.Namespace, command_argv: Sequence[str]) -> tuple[int,
         "task": args.task,
         "artifact_dir": rel(project, out_dir),
         "manifest": rel(project, manifest_path),
+        "evidence": rel(project, envelope_path),
+        "evidence_schema": envelope["schema"],
+        "evidence_verdict": envelope["verdict"],
         "artifacts": {name: rel(project, path) for name, path in artifacts.items()},
         "degraded": degraded,
         "unavailable_capabilities": sorted(set(unavailable)),
@@ -1308,6 +1407,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--mcp-version", default="")
     parser.add_argument("--agent-id", default="")
     parser.add_argument("--mcp-unavailable", action="store_true")
+    parser.add_argument("--simulator-browser-used", action="store_true")
+    parser.add_argument("--simulator-browser-unavailable", action="store_true")
     parser.add_argument("--max-log-bytes", type=int, default=65536)
     parser.add_argument("--record", action="store_true")
     return parser

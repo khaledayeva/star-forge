@@ -34,6 +34,7 @@ security_adapter = importlib.util.module_from_spec(ADAPTER_SPEC)
 ADAPTER_SPEC.loader.exec_module(security_adapter)
 
 from live_collectors import common as live_common
+from starforge import evidence
 
 os.environ["STAR_FORGE_LEARNINGS_HOME"] = tempfile.mkdtemp(prefix="star-forge-security-test-learnings-")
 
@@ -160,6 +161,19 @@ def test_codex_security_input_normalizes_and_hands_to_core() -> None:
         report = write_report(project, read_fixture("codex-security-report.json"))
         code, payload = run_adapter(adapter_args(project, report))
         assert_adapter_pass(code, payload)
+        envelope_path = project / payload["evidence"]
+        envelope = evidence.read_envelope(
+            envelope_path,
+            project_root=project,
+            verify_artifacts=True,
+        )
+        assert envelope["schema"] == evidence.EVIDENCE_SCHEMA
+        assert envelope["capability"] == security_adapter.CAPABILITY
+        assert envelope["provider"] == security_adapter.PREFERRED_PROVIDER
+        assert envelope["verdict"] == "PASS"
+        assert envelope["provenance"]["route"]["fallback"] is False
+        assert envelope["provenance"]["source_binding"]["fresh"] is True
+        assert (project / payload["artifacts"]["manifest"]).exists()
 
         findings = load_artifact(project, payload, "normalized_findings")
         item = findings["findings"][0]
@@ -264,6 +278,15 @@ def test_signed_url_and_hyphenated_api_key_redaction_reaches_security_artifacts(
         assert "frag123" not in blob
         assert api_key_value not in blob
         assert x_api_key_value not in blob
+        envelope_blob = (project / payload["evidence"]).read_text(encoding="utf-8")
+        assert password not in envelope_blob
+        assert "amzsig123" not in envelope_blob
+        assert api_key_value not in envelope_blob
+        evidence.read_envelope(
+            project / payload["evidence"],
+            project_root=project,
+            verify_artifacts=True,
+        )
         assert "REDACTED_SECRET" in blob
         assert "[REDACTED]" in blob
 
@@ -283,6 +306,19 @@ def test_star_forge_schema_input_and_dependency_manifest_capture() -> None:
         findings = load_artifact(project, payload, "normalized_findings")
         assert findings["findings"][0]["severity"] == "medium"
         assert findings["findings"][0]["raw_severity"] == "moderate"
+        envelope = evidence.read_envelope(
+            project / payload["evidence"],
+            project_root=project,
+            verify_artifacts=True,
+        )
+        assert envelope["provider"] == security_adapter.FALLBACK_PROVIDER
+        assert envelope["verdict"] == "DEGRADED"
+        assert envelope["provenance"]["route"]["fallback"] is True
+        assert any(
+            item.get("rule") == "security-capability-fallback"
+            and item.get("blocking") is False
+            for item in envelope["blockers"]
+        )
 
 
 def test_unsupported_generic_input_fails_closed() -> None:

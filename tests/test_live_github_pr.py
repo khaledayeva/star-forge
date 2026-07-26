@@ -35,6 +35,8 @@ github_pr = importlib.util.module_from_spec(GH_SPEC)
 sys.modules["github_pr"] = github_pr
 GH_SPEC.loader.exec_module(github_pr)
 
+from starforge import evidence
+
 os.environ["STAR_FORGE_LEARNINGS_HOME"] = tempfile.mkdtemp(prefix="star-forge-github-pr-test-learnings-")
 
 PLAN_HEADER = (
@@ -80,6 +82,10 @@ def init_project(project: Path) -> None:
 
 def manifest_path(project: Path) -> Path:
     return project / ".starforge" / "live" / TASK / "github" / "manifest.json"
+
+
+def evidence_path(project: Path) -> Path:
+    return project / ".starforge" / "live" / TASK / "github" / github_pr.EVIDENCE_FILENAME
 
 
 def load_json(path: Path) -> Any:
@@ -338,7 +344,168 @@ def test_connector_input_emits_production_proof_commands_and_core_passes() -> No
         assert payload["summary"]["read_only_transcript_sha256"] == transcript_hash
         assert payload["summary"]["live_provenance"]["operation_transcript_sha256"] == transcript_hash
         assert payload["raw_artifact_hashes"][str(transcript.relative_to(project))]["sha256"] == transcript_hash
+        envelope = evidence.read_envelope(
+            evidence_path(project),
+            project_root=project,
+            verify_artifacts=True,
+        )
+        assert envelope["capability"] == github_pr.CAPABILITY
+        assert envelope["provider"] == github_pr.PREFERRED_PROVIDER
+        assert envelope["verdict"] == "PASS"
+        assert envelope["provenance"]["route"]["fallback"] is False
+        assert envelope["provenance"]["repository"]["full_name"] == REPO
+        assert envelope["provenance"]["pull_request"]["number"] == PR
+        assert envelope["provenance"]["source_binding"]["source_hash"] == payload["source_hash_after"]
         assert_core_passes(project, manifest)
+
+
+def test_connector_input_records_source_bound_foundation_identity() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        init_project(project)
+        input_path = connector_input(project)
+        source_hash = github_pr.live_common.compute_source_hash(project)
+        head = "2" * 40
+        foundation_path = project / ".starforge" / "foundation" / "evidence.json"
+        write_json(
+            foundation_path,
+            {
+                "schema": "star-forge.foundation-evidence.v1",
+                "source_hash": source_hash,
+                "checks": {
+                    "github_repository": {
+                        "state": "satisfied",
+                        "detail": {
+                            "provider": "github-connector",
+                            "owner": "star-forge",
+                            "name": "tools",
+                            "visibility": "private",
+                            "identity_verified": True,
+                            "visibility_verified": True,
+                            "created": True,
+                        },
+                    },
+                    "remote_origin": {
+                        "state": "satisfied",
+                        "detail": {
+                            "remote": "origin",
+                            "url": f"https://github.com/{REPO}.git",
+                        },
+                    },
+                    "default_branch": {
+                        "state": "satisfied",
+                        "detail": {
+                            "name": "main",
+                            "exists": True,
+                            "head_commit": head,
+                        },
+                    },
+                    "initial_commit": {
+                        "state": "satisfied",
+                        "detail": {
+                            "sha": head,
+                            "current_head": head,
+                            "tree_source_hash": source_hash,
+                        },
+                    },
+                    "ci": {
+                        "state": "satisfied",
+                        "detail": {
+                            "path": ".github/workflows/ci.yml",
+                            "sha256": "d" * 64,
+                            "committed": True,
+                        },
+                    },
+                },
+            },
+        )
+        code, out, manifest = collect_connector_input(
+            project,
+            input_path,
+            ["--foundation-evidence", str(foundation_path)],
+        )
+        assert code == 0, out
+        envelope = evidence.read_envelope(
+            evidence_path(project),
+            project_root=project,
+            verify_artifacts=True,
+        )
+        foundation = envelope["provenance"]["foundation"]
+        assert foundation["applicable"] is True
+        assert foundation["repository"]["full_name"] == REPO
+        assert foundation["repository"]["visibility"] == "private"
+        assert foundation["remote"]["name"] == "origin"
+        assert foundation["default_branch"]["name"] == "main"
+        assert foundation["initial_commit"]["tree_source_hash"] == source_hash
+        assert foundation["ci"]["path"] == ".github/workflows/ci.yml"
+        assert foundation["provider_route"]["preferred_provider"] == "github-connector"
+        assert_core_passes(project, manifest)
+
+
+def test_foundation_gh_creation_requires_the_exact_private_fallback() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        init_project(project)
+        input_path = connector_input(project)
+        source_hash = github_pr.live_common.compute_source_hash(project)
+        head = "3" * 40
+        raw = github_pr.load_connector_input(input_path)
+        raw.foundation_provenance = {
+            "schema": "star-forge.foundation-evidence.v1",
+            "source_hash": source_hash,
+            "github_repository": {
+                "provider": "gh-cli",
+                "fallback": "gh repo create --private",
+                "owner": "star-forge",
+                "name": "tools",
+                "visibility": "private",
+                "identity_verified": True,
+                "visibility_verified": True,
+                "created": True,
+            },
+            "remote_origin": {
+                "remote": "origin",
+                "url": f"https://github.com/{REPO}.git",
+            },
+            "default_branch": {
+                "name": "main",
+                "exists": True,
+                "head_commit": head,
+            },
+            "initial_commit": {
+                "sha": head,
+                "current_head": head,
+                "tree_source_hash": source_hash,
+            },
+            "ci": {
+                "path": ".github/workflows/ci.yml",
+                "sha256": "e" * 64,
+                "committed": True,
+            },
+        }
+        problems: list[dict[str, Any]] = []
+        normalized = github_pr.normalize_foundation_provenance(
+            raw,
+            repo=REPO,
+            current_source_hash=source_hash,
+            problems=problems,
+        )
+        assert problems == []
+        assert normalized["provider_route"]["recorded_fallback"] == github_pr.GH_CREATE_FALLBACK
+
+        raw.foundation_provenance["github_repository"]["fallback"] = "gh repo create --public"
+        problems = []
+        github_pr.normalize_foundation_provenance(
+            raw,
+            repo=REPO,
+            current_source_hash=source_hash,
+            problems=problems,
+        )
+        assert any(
+            item.get("rule") == "github-foundation-provenance"
+            and github_pr.GH_CREATE_FALLBACK in str(item.get("message"))
+            for item in problems
+        )
 
 
 def test_connector_input_requires_explicit_final_freshness_without_initial_ref_fallback() -> None:
@@ -705,6 +872,19 @@ def test_gh_readonly_accepts_pr_scoped_api_endpoints() -> None:
         code, out, manifest = collect_gh_readonly(project, fixture_dir)
         assert code == 0, out
         assert "source-packet-github-pr-review" in out
+        envelope = evidence.read_envelope(
+            evidence_path(project),
+            project_root=project,
+            verify_artifacts=True,
+        )
+        assert envelope["provider"] == github_pr.GH_READONLY_PROVIDER
+        assert envelope["verdict"] == "DEGRADED"
+        assert envelope["provenance"]["route"]["create_fallback"] == github_pr.GH_CREATE_FALLBACK
+        assert any(
+            item.get("rule") == "github-capability-fallback"
+            and item.get("blocking") is False
+            for item in envelope["blockers"]
+        )
         assert_core_passes(project, manifest)
 
 
@@ -1228,6 +1408,15 @@ def test_connector_redacts_signed_urls_and_hyphenated_api_key_fields() -> None:
         assert api_key_value not in blob
         assert "REDACTED_SECRET" in blob
         assert "[REDACTED]" in blob
+        envelope_blob = evidence_path(project).read_text(encoding="utf-8")
+        assert password not in envelope_blob
+        assert "shortsig" not in envelope_blob
+        assert api_key_value not in envelope_blob
+        evidence.read_envelope(
+            evidence_path(project),
+            project_root=project,
+            verify_artifacts=True,
+        )
 
 
 def test_absolute_paths_are_normalized_in_artifacts() -> None:
