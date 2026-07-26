@@ -263,19 +263,23 @@ class ArchitectureDebtTests(unittest.TestCase):
             )
             self.assertEqual(first["classification_counts"]["production"], 1)
 
-    def test_star_forge_dogfood_finds_its_cli_and_runtime_debt(self) -> None:
+    def test_star_forge_dogfood_meets_cli_runtime_and_total_budgets(self) -> None:
         report = quality.quality_report(ROOT)
-        by_rule = {
-            (item["rule"], item["file"])
-            for item in report["findings"]
+        blocking_budget_rules = {
+            "architecture-debt-cli-concentration",
+            "architecture-debt-large-file",
+            "architecture-debt-python-budget",
         }
-        self.assertIn(
-            ("architecture-debt-cli-concentration", "scripts/star_forge.py"),
-            by_rule,
-        )
-        self.assertIn(
-            ("architecture-debt-large-file", "scripts/star_forge.py"),
-            by_rule,
+        violations = [
+            item
+            for item in report["findings"]
+            if item["severity"] in {"critical", "high", "medium"}
+            and item["rule"] in blocking_budget_rules
+        ]
+        self.assertEqual(violations, [])
+        self.assertLess(
+            len((ROOT / "scripts" / "star_forge.py").read_text().splitlines()),
+            quality.MAX_CLI_MODULE_LINES,
         )
 
 

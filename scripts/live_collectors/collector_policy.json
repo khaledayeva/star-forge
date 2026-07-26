@@ -1,0 +1,2565 @@
+{
+  "browser_scenario": {
+    "ALLOWED_ACTION_KEYS": {
+      "kind": "set",
+      "value": ["key", "ms", "selector", "state", "text", "timeout_ms", "type"]
+    },
+    "ALLOWED_ACTIONS": {
+      "kind": "set",
+      "value": ["click", "fill", "press", "wait_for_selector", "wait_for_timeout"]
+    },
+    "ALLOWED_ASSERTION_KEYS": {
+      "kind": "set",
+      "value": ["equals", "selector", "text", "type"]
+    },
+    "ALLOWED_ASSERTIONS": {
+      "kind": "set",
+      "value": ["count", "hidden", "text_contains", "text_equals", "url_contains", "visible"]
+    },
+    "ALLOWED_LOAD_STATES": {
+      "kind": "set",
+      "value": ["domcontentloaded", "load", "networkidle"]
+    },
+    "ALLOWED_READY_KEYS": {
+      "kind": "set",
+      "value": ["load_state", "selector", "state", "timeout_ms", "url_contains"]
+    },
+    "ALLOWED_SCENARIO_KEYS": {
+      "kind": "set",
+      "value": [
+        "actions",
+        "assertions",
+        "description",
+        "name",
+        "ready",
+        "selectors",
+        "timeout_ms"
+      ]
+    },
+    "FORBIDDEN_SCENARIO_KEYS": {
+      "kind": "set",
+      "value": [
+        "auth",
+        "authorization",
+        "browser_profile",
+        "command",
+        "cookie",
+        "cookies",
+        "evaluate",
+        "function",
+        "headers",
+        "java_script",
+        "javascript",
+        "js",
+        "local_storage",
+        "localstorage",
+        "profile",
+        "script",
+        "session_storage",
+        "sessionstorage",
+        "shell",
+        "storage_state",
+        "storagestate",
+        "userdata_dir",
+        "userdatadir"
+      ]
+    },
+    "ALLOWED_SELECTOR_STATES": {
+      "kind": "set",
+      "value": ["attached", "detached", "hidden", "visible"]
+    },
+    "SCENARIO_TEMPLATE": {
+      "kind": "dict",
+      "value": {
+        "name": "$name",
+        "description": "$description",
+        "timeout_ms": "$timeout_ms",
+        "selectors": "$selectors",
+        "ready": "$ready",
+        "actions": "$actions",
+        "assertions": "$assertions"
+      }
+    },
+    "WEBRTC_DISABLE_SCRIPT": {
+      "kind": "list",
+      "value": [
+        "(() => {\n  const disabled = function StarForgeDisabledWebRTC() {\n    throw new Error(\"WebRTC disabled by Star Forge browser collector\");\n  };\n  for (const key of [\"RTCPeerConnection\", \"webkitRTCPeerConnection\", \"RTCDataChannel\"]) {\n    try {\n      Object.defineProperty(window, key, {\n        value: disabled,\n        configurable: false,\n        writable: false\n      });\n    } catch (_error) {}\n  }\n})();\n"
+      ]
+    }
+  },
+  "browser_playwright": {
+    "ACTION_CALLS": {
+      "kind": "dict",
+      "value": {
+        "click": {"method": "click", "args": ["$selector"], "kwargs": {"timeout": "$timeout_ms"}},
+        "fill": {"method": "fill", "args": ["$selector", "$text"], "kwargs": {"timeout": "$timeout_ms"}},
+        "press": {"method": "press", "args": ["$selector", "$key"], "kwargs": {"timeout": "$timeout_ms"}},
+        "wait_for_selector": {
+          "method": "wait_for_selector",
+          "args": ["$selector"],
+          "kwargs": {"state": "$state", "timeout": "$timeout_ms"}
+        },
+        "wait_for_timeout": {"method": "wait_for_timeout", "args": ["$ms"], "kwargs": {}}
+      }
+    },
+    "ARTIFACT_FILENAMES": {
+      "kind": "dict",
+      "value": {
+        "desktop": "desktop.png",
+        "mobile": "mobile.png",
+        "interaction": "interaction.json",
+        "console": "console.json",
+        "trace": "trace.zip"
+      }
+    },
+    "IMAGE_ARTIFACT_CHECKS": {
+      "kind": "list",
+      "value": [
+        ["exists", "truthy", true, "viewport screenshot is missing"],
+        ["valid_image", "truthy", true, "viewport screenshot is not a decodable PNG/JPEG image"],
+        ["bytes", "truthy", true, "viewport screenshot is empty"]
+      ]
+    },
+    "COLLECTOR_BASE_ARGV": {
+      "kind": "list",
+      "value": [
+        "python3",
+        "scripts/live_collectors/browser_playwright.py",
+        "--project",
+        "$project",
+        "--task",
+        "$task",
+        "--url",
+        "$url",
+        "--scenario",
+        "$scenario"
+      ]
+    },
+    "CONSTANTS": {
+      "kind": "dict",
+      "value": {
+        "COLLECTOR": "browser",
+        "CAPABILITY": "local-web-qa",
+        "PREFERRED_PROVIDER": "in-app-browser",
+        "FALLBACK_PROVIDER": "playwright-collector",
+        "EVIDENCE_FILENAME": "evidence.v2.json",
+        "DEFAULT_VIEWPORTS": [["desktop", 1280, 800], ["mobile", 390, 844]],
+        "BLOCKING_SEVERITIES": ["critical", "high", "medium"],
+        "LOCAL_HOSTNAMES": ["localhost"]
+      }
+    },
+    "EVIDENCE_BLOCKER": {
+      "kind": "dict",
+      "value": {
+        "rule": "capability-fallback",
+        "message": "In-app Browser proof was not supplied; Playwright collector evidence is the explicit fallback",
+        "capability": "local-web-qa",
+        "preferred_provider": "in-app-browser",
+        "selected_provider": "playwright-collector",
+        "blocking": false
+      }
+    },
+    "EVIDENCE_PROVENANCE": {
+      "kind": "dict",
+      "value": {
+        "route": {
+          "preferred_provider": "in-app-browser",
+          "selected_provider": "playwright-collector",
+          "fallback": true,
+          "reason": "Playwright collector was explicitly invoked for CI or headless local QA"
+        },
+        "browser_state_policy": {
+          "ambient_profile": false,
+          "authenticated_state": false,
+          "extension_dependent_state": false,
+          "chrome": "reserved-for-authenticated-or-extension-dependent-state"
+        }
+      }
+    },
+    "EXECUTION_SUMMARY_TEMPLATE": {
+      "kind": "dict",
+      "value": {
+        "console_events": "$console_events",
+        "actions": "$actions",
+        "assertions": "$assertions",
+        "ephemeral_context": true,
+        "trace_recorded": "$trace_recorded",
+        "service_workers": "block",
+        "connection_control": "leased-loopback-only",
+        "websocket_routing": "$websocket_routing",
+        "webrtc_control": "$webrtc_control",
+        "request_count": "$request_count",
+        "blocked_request_count": "$blocked_request_count",
+        "websocket_count": "$websocket_count",
+        "blocked_websocket_count": "$blocked_websocket_count",
+        "final_urls": "$final_urls",
+        "connected_ips": "$connected_ips"
+      }
+    },
+    "HANDOFF_BASE_ARGV": {
+      "kind": "list",
+      "value": [
+        "python3",
+        "scripts/star_forge.py",
+        "browser-run",
+        "--project",
+        "$project",
+        "--task",
+        "$task",
+        "--scenario",
+        "$scenario",
+        "--url",
+        "$url",
+        "--live-manifest",
+        "$manifest"
+      ]
+    },
+    "INITIAL_SUMMARY_TEMPLATE": {
+      "kind": "dict",
+      "value": {
+        "url": "$url",
+        "trace_requested": "$trace_requested",
+        "ephemeral_context": true,
+        "ambient_profile": false,
+        "capability_route": {
+          "capability": "local-web-qa",
+          "preferred_provider": "in-app-browser",
+          "selected_provider": "playwright-collector",
+          "fallback": true,
+          "chrome_policy": "reserved-for-authenticated-or-extension-dependent-state"
+        }
+      }
+    },
+    "INTERACTION_TEMPLATE": {
+      "kind": "dict",
+      "value": {
+        "schema": "star-forge.browser-interaction.v1",
+        "scenario": "$scenario",
+        "ready": "$ready",
+        "actions": "$actions",
+        "assertions": "$assertions",
+        "request_safety": "$request_safety"
+      }
+    },
+    "OUTPUT_TEMPLATE": {
+      "kind": "dict",
+      "value": {
+        "schema": "star-forge.live-browser-collector-result.v1",
+        "collector": "browser",
+        "task": "$task",
+        "manifest": "$manifest",
+        "evidence": "$evidence",
+        "evidence_verdict": "$evidence_verdict",
+        "capability": "local-web-qa",
+        "preferred_provider": "in-app-browser",
+        "provider": "playwright-collector",
+        "fallback": true,
+        "degraded": "$degraded",
+        "unavailable_capabilities": "$unavailable",
+        "problems": "$problems",
+        "browser_run_argv": "$handoff_argv",
+        "browser_run_command": "$handoff_command",
+        "recorded": "$recorded"
+      }
+    },
+    "PARSER_ARGUMENTS": {
+      "kind": "list",
+      "value": [
+        [["--project"], {"default": "."}],
+        [["--task"], {"required": true}],
+        [["--url"], {"required": true}],
+        [["--scenario"], {"required": true, "help": "Project-relative scenario JSON path, optionally path#scenario-name"}],
+        [["--viewport"], {"action": "append", "help": "NAME=WIDTHxHEIGHT. Desktop and mobile are required."}],
+        [["--server-lease"], {"default": "", "help": "Project-relative Star Forge server lease JSON for local URLs"}],
+        [["--browser"], {"default": "chromium", "choices": ["chromium", "firefox", "webkit"]}],
+        [["--trace"], {"action": "store_true", "help": "Opt in to Playwright trace.zip artifact"}],
+        [["--record"], {"action": "store_true", "help": "Invoke browser-run --strict after writing artifacts"}]
+      ]
+    },
+    "PUBLIC_SAFETY_BINDINGS": {
+      "kind": "list",
+      "value": [
+        "BROWSER_NETWORK_CONTROL_MODE",
+        "SERVICE_WORKERS_MODE",
+        "WEBRTC_CONTROL_MODE",
+        "WEBSOCKET_ROUTING_MODE",
+        "browser_url_safety_evidence",
+        "host_is_literal_loopback",
+        "is_local_origin",
+        "is_loopback_origin",
+        "is_metadata_host",
+        "lease_project_matches",
+        "normalize_origin",
+        "parse_ip",
+        "pid_is_alive",
+        "request_safety_problem_records",
+        "resolve_ips",
+        "safety_equivalent_url",
+        "unsafe_ip_reason",
+        "unsafe_url_reasons",
+        "validate_request_safety_payload",
+        "validate_server_lease",
+        "validate_url"
+      ]
+    },
+    "PUBLIC_SCENARIO_BINDINGS": {
+      "kind": "list",
+      "value": [
+        "DEFAULT_TIMEOUT_MS",
+        "SCENARIO_SCHEMA",
+        "WEBRTC_DISABLE_SCRIPT",
+        "ScenarioValidationError",
+        "ViewportSpec",
+        "load_scenario",
+        "parse_viewports",
+        "require_string",
+        "require_timeout",
+        "scan_forbidden_keys",
+        "split_scenario_ref",
+        "validate_actions",
+        "validate_assertions",
+        "validate_ready",
+        "validate_scenario",
+        "validate_selector"
+      ]
+    },
+    "REQUEST_METADATA_TEMPLATE": {
+      "kind": "dict",
+      "value": {
+        "url": "$url",
+        "method": "$method",
+        "resource_type": "$resource_type",
+        "navigation": "$navigation"
+      }
+    },
+    "REQUEST_SAFETY_TEMPLATE": {
+      "kind": "dict",
+      "value": {
+        "schema": "star-forge.browser-request-safety.v1",
+        "service_workers": "block",
+        "connection_control": "leased-loopback-only",
+        "websocket_routing": "$websocket_routing",
+        "allowed_local_origins": "$allowed_local_origins",
+        "requests": "$requests",
+        "websockets": "$websockets",
+        "final_urls": "$final_urls",
+        "blocked_count": "$blocked_count",
+        "websocket_blocked_count": "$websocket_blocked_count",
+        "webrtc": "$webrtc"
+      }
+    }
+  },
+  "browser_safety": {
+    "CONSTANTS": {
+      "kind": "dict",
+      "value": {
+        "SERVICE_WORKERS_MODE": "block",
+        "BROWSER_NETWORK_CONTROL_MODE": "leased-loopback-only",
+        "WEBSOCKET_ROUTING_MODE": "route-web-socket",
+        "WEBRTC_CONTROL_MODE": "init-script-disabled"
+      }
+    },
+    "LEASE_VALUE_CHECKS": {
+      "kind": "list",
+      "value": [
+        ["schema", "equals", "star-forge.server-lease.v1", "server lease schema is not star-forge.server-lease.v1"],
+        ["source_hash", "string_equals", "$source_hash", "server lease source_hash does not match current source"],
+        ["runtime_asset_hash", "string_equals", "$runtime_hash", "server lease runtime_asset_hash does not match current runtime assets"],
+        ["command", "truthy", true, "server lease must record the server command"]
+      ]
+    },
+    "METADATA_HOSTS": {
+      "kind": "set",
+      "value": ["169.254.169.254", "169.254.170.2", "metadata", "metadata.google.internal"]
+    },
+    "REQUEST_CONTROL_CHECKS": {
+      "kind": "list",
+      "value": [
+        ["service_workers", "equals", "block", "browser request safety evidence must record service_workers=block"],
+        ["connection_control", "equals", "leased-loopback-only", "browser request safety evidence must record leased loopback network control"],
+        ["websocket_routing", "equals", "route-web-socket", "browser request safety evidence must record installed WebSocket routing"],
+        ["webrtc.mode", "equals", "init-script-disabled", "browser request safety evidence must record disabled WebRTC"],
+        ["webrtc.init_script", "equals", true, "browser request safety evidence must record disabled WebRTC"],
+        ["blocked_count", "zero_int", 0, "browser request safety evidence recorded blocked requests"],
+        ["websocket_blocked_count", "zero_int", 0, "browser request safety evidence recorded blocked WebSocket requests"]
+      ]
+    },
+    "REQUEST_ENTRY_SPECS": {
+      "kind": "list",
+      "value": [
+        ["requests", "browser request safety evidence must record requests", "browser request safety entry must be an object", true],
+        ["final_urls", "browser request safety evidence must record final URLs", "browser final URL safety entry must be an object", true],
+        ["websockets", "browser request safety evidence must record WebSocket route observations", "browser WebSocket safety entry must be an object", false]
+      ]
+    },
+    "URL_SAFETY_TEMPLATE": {
+      "kind": "dict",
+      "value": {
+        "url": "$url",
+        "scheme": "$scheme",
+        "safety_url": "$safety_url",
+        "host": "$host",
+        "port": "$port",
+        "resolved_ips": [],
+        "requires_server_lease": false,
+        "allowed_by_server_lease": false,
+        "literal_loopback_host": false,
+        "connection_control": "leased-loopback-only",
+        "evidence_source": "",
+        "allowed": false,
+        "problems": []
+      }
+    }
+  },
+  "common": {
+    "CONSTANTS": {
+      "kind": "dict",
+      "value": {
+        "LIVE_MANIFEST_SCHEMA": "star-forge.live-manifest.v1",
+        "BLOCKING_SEVERITIES": ["critical", "high", "medium"]
+      }
+    },
+    "LIVE_MANIFEST_TEMPLATE": {
+      "kind": "dict",
+      "value": {
+        "schema": "star-forge.live-manifest.v1",
+        "collector": "$collector",
+        "created_at": "$created_at",
+        "command_argv": "$command_argv",
+        "tool_versions": "$tool_versions",
+        "project": "$project",
+        "task": "$task",
+        "source_hash_before": "$source_hash_before",
+        "source_hash_after": "$source_hash_after",
+        "runtime_asset_hash": "$runtime_asset_hash",
+        "artifacts": "$artifacts",
+        "raw_artifact_hashes": "$raw_artifact_hashes",
+        "summary": "$summary",
+        "degraded": "$degraded",
+        "unavailable_capabilities": "$unavailable_capabilities",
+        "redaction_report": {},
+        "problems": "$problems"
+      }
+    },
+    "MANIFEST_CHECKS": {
+      "kind": "list",
+      "value": [
+        ["schema", "equals", "star-forge.live-manifest.v1", "manifest schema must be star-forge.live-manifest.v1"],
+        ["command_argv", "type", "array", "manifest command_argv must be an array"],
+        ["tool_versions", "type", "object", "manifest tool_versions must be an object"],
+        ["raw_artifact_hashes", "type", "object", "manifest raw_artifact_hashes must be an object"],
+        ["degraded", "type", "boolean", "manifest degraded must be a boolean"],
+        ["unavailable_capabilities", "type", "array", "manifest unavailable_capabilities must be an array"],
+        ["problems", "type", "array", "manifest problems must be an array"]
+      ]
+    },
+    "PATH_REDACTION_RULES": {
+      "kind": "list",
+      "value": [
+        ["/Users/[^/\\s]+", "[REDACTED_HOME]", "home_paths"],
+        ["(?:/private)?/tmp/[A-Za-z0-9_./-]+", "[REDACTED_TMP]", "temp_paths"],
+        ["\\b([A-Z][A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|API_KEY|KEY))=([^\\s'\\\"]+)", "\\1=[REDACTED_ENV_VALUE]", "env_values"]
+      ]
+    },
+    "PROBLEM_TEMPLATE": {
+      "kind": "dict",
+      "value": {
+        "severity": "$severity",
+        "rule": "$rule",
+        "message": "$message",
+        "blocking": "$blocking",
+        "path": "$path"
+      }
+    },
+    "REDACTION_PATTERNS": {
+      "kind": "dict",
+      "value": {
+        "secret": "(\\bsk-[A-Za-z0-9_-]{20,}|AKIA[A-Z0-9]{16}|ghp_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|xox[baprs]-[A-Za-z0-9-]{20,}|npm_[A-Za-z0-9]{20,}|pypi-[A-Za-z0-9_-]{20,}|BEGIN [A-Z ]*PRIVATE KEY|(?:OPENAI_API_KEY|GITHUB_TOKEN|GH_TOKEN|AWS_SECRET_ACCESS_KEY|SUPABASE_SERVICE_ROLE_KEY)\\s*=\\s*['\\\"]?(?![A-Za-z0-9_./+=:@<>$-]*(?:your|placeholder|example|sample|changeme|dummy|xxx|<|\\$\\{|\\.\\.\\.))(?=[A-Za-z0-9_./+=:@-]*\\d)[A-Za-z0-9_./+=:@-]{16,}|DATABASE_URL\\s*=\\s*['\\\"]?\\w+://[^\\s:@/'\\\"]+:[^\\s@/'\\\"]{8,}@)",
+        "auth": "\\b(Authorization\\s*[:=]\\s*(?:Bearer|Basic)\\s+)(?![A-Za-z0-9_./+=:@<>$~-]*(?:your|placeholder|example|sample|changeme|dummy|xxx|<|\\$\\{|\\.\\.\\.))([A-Za-z0-9._~+/=-]{8,})",
+        "jwt": "\\beyJ[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}\\b",
+        "generic_token": "\\b((?:access|refresh|oauth|session)[_-]?token\\s*[:=]\\s*['\\\"]?)(?![A-Za-z0-9_./+=:@<>$~-]*(?:your|placeholder|example|sample|changeme|dummy|xxx|<|\\$\\{|\\.\\.\\.))([A-Za-z0-9_./+=:@~-]{12,})(['\\\"]?)",
+        "url": "https?://[^\\s'\\\"<>]+"
+      }
+    },
+    "STRING_REDACTION_RULES": {
+      "kind": "list",
+      "value": [
+        ["AUTH_CREDENTIAL_RE", "\\1[REDACTED_SECRET]", "secret_values"],
+        ["GENERIC_TOKEN_ASSIGNMENT_RE", "\\1[REDACTED_SECRET]\\3", "secret_values"],
+        ["JWT_LIKE_RE", "[REDACTED_SECRET]", "secret_values"],
+        ["SECRET_RE", "[REDACTED_SECRET]", "secret_values"]
+      ]
+    },
+    "FALLBACK_IGNORED_PARTS": {
+      "kind": "set",
+      "value": [
+        ".codex-harness",
+        ".git",
+        ".hg",
+        ".star-forge-pycache",
+        ".starforge",
+        ".svn",
+        ".venv",
+        "__pycache__",
+        "build",
+        "coverage",
+        "dist",
+        "node_modules",
+        "target",
+        "the-loop",
+        "upstream"
+      ]
+    },
+    "REQUIRED_MANIFEST_FIELDS": {
+      "kind": "tuple",
+      "value": [
+        "schema",
+        "collector",
+        "created_at",
+        "command_argv",
+        "tool_versions",
+        "project",
+        "task",
+        "source_hash_before",
+        "source_hash_after",
+        "runtime_asset_hash",
+        "artifacts",
+        "raw_artifact_hashes",
+        "summary",
+        "degraded",
+        "unavailable_capabilities",
+        "redaction_report",
+        "problems"
+      ]
+    },
+    "SENSITIVE_KEYS": {
+      "kind": "set",
+      "value": [
+        "access_token",
+        "accesskey",
+        "api-key",
+        "api_key",
+        "apikey",
+        "authorization",
+        "awsaccesskeyid",
+        "cookie",
+        "cookies",
+        "credential",
+        "key",
+        "localstorage",
+        "oauth_token",
+        "passwd",
+        "password",
+        "refresh_token",
+        "se",
+        "secret",
+        "session",
+        "sessionstorage",
+        "set-cookie",
+        "sig",
+        "signature",
+        "signed_headers",
+        "signedheaders",
+        "sp",
+        "sv",
+        "token",
+        "x-amz-credential",
+        "x-amz-signature",
+        "x-amz-signedheaders",
+        "x-api-key",
+        "x-goog-credential",
+        "x-goog-signature",
+        "x-goog-signedheaders"
+      ]
+    },
+    "SENSITIVE_KEY_MARKERS": {
+      "kind": "tuple",
+      "value": [
+        "token",
+        "secret",
+        "password",
+        "cookie",
+        "authorization",
+        "apikey",
+        "signature",
+        "credential",
+        "accesskey"
+      ]
+    },
+    "SOURCE_SNAPSHOT_NAMES": {
+      "kind": "set",
+      "value": [
+        ".dockerignore",
+        ".env",
+        ".gitignore",
+        ".node-version",
+        ".npmrc",
+        ".nvmrc",
+        ".pnp.cjs",
+        ".pnp.loader.mjs",
+        ".pnpmfile.cjs",
+        ".yarnrc",
+        ".yarnrc.yml",
+        "BSDmakefile",
+        "Blueprint.md",
+        "Caddyfile",
+        "Cargo.toml",
+        "Containerfile",
+        "Dockerfile",
+        "GNUmakefile",
+        "Makefile",
+        "Plan.md",
+        "Procfile",
+        "bun.lock",
+        "bun.lockb",
+        "compose.yaml",
+        "compose.yml",
+        "deno.lock",
+        "docker-compose.yaml",
+        "docker-compose.yml",
+        "go.mod",
+        "go.sum",
+        "npm-shrinkwrap.json",
+        "package-lock.json",
+        "package.json",
+        "pnpm-lock.yaml",
+        "pnpm-workspace.yaml",
+        "pyproject.toml",
+        "requirements.txt",
+        "yarn.lock"
+      ]
+    },
+    "SOURCE_SNAPSHOT_NAME_PREFIXES": {
+      "kind": "tuple",
+      "value": [
+        ".env.",
+        "Dockerfile.",
+        "Containerfile.",
+        "Makefile.",
+        "Procfile.",
+        "Caddyfile.",
+        "docker-compose.",
+        "compose."
+      ]
+    },
+    "SOURCE_SNAPSHOT_SUFFIXES": {
+      "kind": "set",
+      "value": [
+        ".c",
+        ".cc",
+        ".cfg",
+        ".conf",
+        ".cpp",
+        ".cs",
+        ".css",
+        ".go",
+        ".graphql",
+        ".h",
+        ".html",
+        ".ini",
+        ".java",
+        ".js",
+        ".json",
+        ".jsx",
+        ".kt",
+        ".mjs",
+        ".mk",
+        ".prisma",
+        ".proto",
+        ".py",
+        ".rb",
+        ".rs",
+        ".sh",
+        ".sql",
+        ".swift",
+        ".toml",
+        ".ts",
+        ".tsx",
+        ".vue",
+        ".yaml",
+        ".yml"
+      ]
+    }
+  },
+  "github_adapter": {
+    "FOUNDATION_CHECKS": {
+      "kind": "list",
+      "value": [
+        ["source_hash", "equals", "$current_source_hash", "Foundation evidence source hash does not match the current source"],
+        ["provider", "one_of", ["github-connector", "gh-readonly", "gh-cli"], "Foundation evidence does not identify an allowed GitHub provider"],
+        ["create_fallback_valid", "equals", true, "Foundation gh repository creation provenance must be exactly gh repo create --private"],
+        ["repository_owner", "equals", "$owner", "Foundation repository identity does not match --repo"],
+        ["repository_name", "equals", "$name", "Foundation repository identity does not match --repo"],
+        ["visibility", "one_of", ["private", "public"], "Foundation evidence requires verified repository visibility"],
+        ["created_private_valid", "equals", true, "New GitHub Foundation repositories must be private"],
+        ["readonly_create_valid", "equals", true, "Read-only gh provenance cannot claim repository creation"],
+        ["adoption_visibility_valid", "equals", true, "Adopted repository provenance must prove visibility was unchanged"],
+        ["identity_verified", "equals", true, "Foundation evidence must verify repository identity"],
+        ["visibility_verified", "equals", true, "Foundation evidence must verify repository visibility"],
+        ["remote_valid", "equals", true, "Foundation origin URL does not match --repo"],
+        ["remote_name", "equals", "origin", "Foundation GitHub remote must be named origin"],
+        ["default_branch", "truthy", true, "Foundation evidence must prove the default branch"],
+        ["branch_exists", "equals", true, "Foundation evidence must prove the default branch"],
+        ["head_commit", "regex", "[0-9a-f]{40}(?:[0-9a-f]{24})?", "Foundation default branch head commit is invalid"],
+        ["initial_commit", "regex", "[0-9a-f]{40}(?:[0-9a-f]{24})?", "Foundation initial commit is invalid"],
+        ["current_head", "regex", "[0-9a-f]{40}(?:[0-9a-f]{24})?", "Foundation current head is invalid"],
+        ["heads_match", "equals", true, "Foundation default branch head does not match current head"],
+        ["tree_hash", "equals", "$current_source_hash", "Foundation initial commit is not bound to the current source"],
+        ["ci_path", "workflow_path", true, "Foundation CI path is not a GitHub workflow YAML path"],
+        ["ci_sha", "regex", "[0-9a-f]{64}", "Foundation CI artifact SHA-256 is invalid"],
+        ["ci_committed", "equals", true, "Foundation CI artifact must be committed"]
+      ]
+    },
+    "FOUNDATION_NOT_APPLICABLE": {
+      "kind": "dict",
+      "value": {
+        "applicable": false,
+        "reason": "pull-request proof does not include Foundation evidence"
+      }
+    },
+    "FOUNDATION_SECTIONS": {
+      "kind": "dict",
+      "value": {
+        "repository": "github_repository",
+        "remote": "remote_origin",
+        "branch": "default_branch",
+        "initial": "initial_commit",
+        "ci": "ci"
+      }
+    },
+    "FOUNDATION_RULE_MESSAGES": {
+      "kind": "tuple",
+      "value": [
+        "Foundation evidence source hash does not match the current source",
+        "Foundation evidence does not identify an allowed GitHub provider",
+        "Foundation gh repository creation provenance must be exactly gh repo create --private",
+        "Foundation repository identity does not match --repo",
+        "Foundation evidence requires verified repository visibility",
+        "New GitHub Foundation repositories must be private",
+        "Read-only gh provenance cannot claim repository creation",
+        "Adopted repository provenance must prove visibility was unchanged",
+        "Foundation evidence must verify repository identity",
+        "Foundation evidence must verify repository visibility",
+        "Foundation origin URL does not match --repo",
+        "Foundation GitHub remote must be named origin",
+        "Foundation evidence must prove the default branch",
+        "Foundation default branch head commit is invalid",
+        "Foundation initial commit is invalid",
+        "Foundation current head is invalid",
+        "Foundation default branch head does not match current head",
+        "Foundation initial commit is not bound to the current source",
+        "Foundation CI path is not a GitHub workflow YAML path",
+        "Foundation CI artifact SHA-256 is invalid",
+        "Foundation CI artifact must be committed"
+      ]
+    },
+    "LIVE_IMPORT_MESSAGES": {
+      "kind": "tuple",
+      "value": [
+        "live GitHub import requires non-fixture tool versions",
+        "live GitHub import requires provenance metadata",
+        "live GitHub import requires a collection timestamp",
+        "live GitHub provenance requires a source",
+        "live GitHub provenance source does not match the import mode",
+        "live GitHub provenance requires repo matching --repo",
+        "live GitHub provenance repo does not match --repo",
+        "live GitHub provenance requires PR matching --pr",
+        "live GitHub provenance PR does not match --pr",
+        "live GitHub import requires explicit final PR or freshness payload",
+        "live GitHub import requires final freshness base and head refs",
+        "live GitHub import requires read-only command or connector operations",
+        "live GitHub import requires base and head freshness refs"
+      ]
+    },
+    "ARTIFACT_FILES": {
+      "kind": "dict",
+      "value": {
+        "pr": "pr.json",
+        "diff": "diff.patch",
+        "reviews": "reviews.json",
+        "comments": "comments.json",
+        "check-runs": "check-runs.json",
+        "annotations": "annotations.json",
+        "operation-transcript": "operation-transcript.json",
+        "ci-log-excerpts": "ci-log-excerpts.json"
+      }
+    },
+    "NORMALIZED_FILE_TEMPLATE": {
+      "kind": "dict",
+      "value": {
+        "filename": "$filename",
+        "status": "$status",
+        "additions": "$additions",
+        "deletions": "$deletions",
+        "changes": "$changes"
+      }
+    },
+    "REF_SHA_PATHS": {
+      "kind": "list",
+      "value": [
+        ["sha"], ["oid"], ["id"], ["target", "oid"], ["target", "sha"],
+        ["commit", "oid"], ["commit", "sha"]
+      ]
+    },
+    "MERGE_BASE_PATHS": {
+      "kind": "list",
+      "value": [
+        ["merge_base_sha"], ["mergeBaseOid"], ["mergeBaseCommit", "oid"],
+        ["merge_base", "sha"], ["mergeBase", "sha"]
+      ]
+    },
+    "CHECK_RUN_TEMPLATE": {
+      "kind": "dict",
+      "value": {
+        "id": "$id",
+        "run_id": "$run_id",
+        "job_id": "$job_id",
+        "name": "$name",
+        "status": "$status",
+        "conclusion": "$conclusion",
+        "head_sha": "$head_sha",
+        "started_at": "$started_at",
+        "completed_at": "$completed_at",
+        "url": "$url"
+      }
+    },
+    "LOG_ENTRY_TEMPLATE": {
+      "kind": "dict",
+      "value": {
+        "name": "$name",
+        "original_sha256": "$original_sha256",
+        "original_bytes": "$original_bytes",
+        "captured_bytes": "$captured_bytes",
+        "excerpt_sha256": "$excerpt_sha256",
+        "excerpt_bytes": "$excerpt_bytes",
+        "max_log_bytes": "$max_log_bytes",
+        "truncated": "$truncated",
+        "text": "$text"
+      }
+    },
+    "PR_TEMPLATE": {
+      "kind": "dict",
+      "value": {
+        "repo": "$repo",
+        "number": "$number",
+        "title": "$title",
+        "state": "$state",
+        "author": "$author",
+        "url": "$url",
+        "base_sha": "$base_sha",
+        "head_sha": "$head_sha",
+        "current_base_sha": "$current_base_sha",
+        "current_head_sha": "$current_head_sha",
+        "merge_base_sha": "$merge_base_sha",
+        "changed_files": "$changed_files"
+      }
+    },
+    "OPERATION_TRANSCRIPT_TEMPLATE": {
+      "kind": "dict",
+      "value": {
+        "schema": "star-forge.github-operation-transcript.v1",
+        "source": "$source",
+        "repo": "$repo",
+        "pr": "$pr",
+        "github_host": "$github_host",
+        "collected_at": "$collected_at",
+        "imported_at": "$imported_at",
+        "live_provenance": "$live_provenance",
+        "refs": {
+          "captured_base_sha": "$captured_base_sha",
+          "current_base_sha": "$current_base_sha",
+          "captured_head_sha": "$captured_head_sha",
+          "current_head_sha": "$current_head_sha",
+          "merge_base_sha": "$merge_base_sha"
+        },
+        "permission_state": {"partial_permissions": "$partial_permissions"},
+        "pagination_state": {"pagination_incomplete": "$pagination_incomplete"},
+        "operations": "$operations",
+        "commands": "$commands",
+        "allowlist": {
+          "connector_operations": "$connector_operations",
+          "gh_top_level": ["api", "pr", "run"],
+          "github_hosts": "$github_hosts"
+        }
+      }
+    },
+    "SUMMARY_TEMPLATE": {
+      "kind": "dict",
+      "value": {
+        "adapter": "github-pr",
+        "source": "$source",
+        "repo": "$repo",
+        "pr": "$pr",
+        "github_host": "$github_host",
+        "captured_base_sha": "$captured_base_sha",
+        "current_base_sha": "$current_base_sha",
+        "captured_head_sha": "$captured_head_sha",
+        "current_head_sha": "$current_head_sha",
+        "merge_base_sha": "$merge_base_sha",
+        "changed_files_count": "$changed_files_count",
+        "review_count": "$review_count",
+        "comment_count": "$comment_count",
+        "check_run_count": "$check_run_count",
+        "annotation_count": "$annotation_count",
+        "ci_log_excerpt_count": "$ci_log_excerpt_count",
+        "logs_included": "$logs_included",
+        "missing_refs": "$missing_refs",
+        "partial_permissions": "$partial_permissions",
+        "pagination_incomplete": "$pagination_incomplete",
+        "checks_bound_to_head": "$checks_bound_to_head",
+        "read_only_operations": "$read_only_operations",
+        "read_only_commands": "$read_only_commands",
+        "read_only_transcript_sha256": "$read_only_transcript_sha256",
+        "captured_at": "$captured_at",
+        "live_provenance": "$live_provenance",
+        "foundation": "$foundation"
+      }
+    },
+    "PROOF_COMMANDS": {
+      "kind": "list",
+      "value": [
+        ["python3", "scripts/star_forge.py", "source-packet-github-pr-review", "--project", "$project", "--input", "$manifest", "--strict"],
+        ["python3", "scripts/star_forge.py", "source-packet-proof", "--project", "$project", "--task", "$task", "--profile", "production-review", "--input", "$manifest", "--strict"]
+      ]
+    },
+    "ENVELOPE_BLOCKERS": {
+      "kind": "dict",
+      "value": {
+        "fallback": {
+          "rule": "github-capability-fallback",
+          "message": "GitHub connector evidence was not supplied; the recorded gh route is read-only except for the separately authorized exact private-repository fallback",
+          "capability": "github-lifecycle",
+          "preferred_provider": "github-connector",
+          "allowed_create_fallback": "gh repo create --private",
+          "blocking": false
+        },
+        "fixture": {
+          "rule": "github-fixture-provenance",
+          "message": "Fixture GitHub evidence cannot satisfy live production proof",
+          "blocking": true
+        }
+      }
+    },
+    "FOUNDATION_OUTPUT_TEMPLATE": {
+      "kind": "dict",
+      "value": {
+        "applicable": true,
+        "schema": "$schema",
+        "source_hash": "$source_hash",
+        "provider": "$provider",
+        "provider_route": "$provider_route",
+        "repository": {
+          "owner": "$repository_owner",
+          "name": "$repository_name",
+          "full_name": "$repo",
+          "visibility": "$visibility",
+          "identity_verified": "$identity_verified",
+          "visibility_verified": "$visibility_verified",
+          "created": "$created"
+        },
+        "remote": {"name": "$remote_name", "url": "$remote_url"},
+        "default_branch": {
+          "name": "$default_branch",
+          "exists": "$branch_exists",
+          "head_commit": "$head_commit"
+        },
+        "initial_commit": {
+          "sha": "$initial_commit",
+          "current_head": "$current_head",
+          "tree_source_hash": "$tree_hash"
+        },
+        "ci": {"path": "$ci_path", "sha256": "$ci_sha", "committed": "$ci_committed"}
+      }
+    },
+    "PROVIDER_ROUTE_TEMPLATE": {
+      "kind": "dict",
+      "value": {
+        "preferred_provider": "github-connector",
+        "selected_provider": "$provider",
+        "fallback": "$fallback",
+        "create_fallback": "gh repo create --private"
+      }
+    },
+    "HOST_BINDINGS": {
+      "kind": "dict",
+      "value": {
+        "github_host_from_provenance": ["github_host_evidence_from_provenance", "provenance"],
+        "github_host_from_payload": ["github_host_evidence_from_payload", "payload"]
+      }
+    },
+    "FOUNDATION_FIELDS": {
+      "kind": "dict",
+      "value": {
+        "source_hash": ["payload", "source_hash", "tree_source_hash"],
+        "provider": ["repository", "provider"],
+        "fallback": ["repository", "fallback"],
+        "repository_owner": ["repository", "owner"],
+        "repository_name": ["repository", "name"],
+        "visibility": ["repository", "visibility"],
+        "remote_url": ["remote", "url", "remote_url"],
+        "remote_name": ["remote", "remote"],
+        "default_branch": ["branch", "name", "default_branch"],
+        "head_commit": ["branch", "head_commit"],
+        "initial_commit": ["initial", "sha", "initial_commit"],
+        "current_head": ["initial", "current_head"],
+        "ci_path": ["ci", "path", "ci_path"],
+        "ci_sha": ["ci", "sha256", "ci_sha256"]
+      }
+    },
+    "ENVELOPE_PROVENANCE_TEMPLATE": {
+      "kind": "dict",
+      "value": {
+        "route": "$route",
+        "provider": "$provider",
+        "source": "$source",
+        "repository": {
+          "full_name": "$repo",
+          "owner": "$owner",
+          "name": "$name",
+          "github_host": "$github_host"
+        },
+        "pull_request": {
+          "number": "$pr_number",
+          "url": "$pr_url",
+          "captured_base_sha": "$captured_base",
+          "current_base_sha": "$current_base",
+          "captured_head_sha": "$captured_head",
+          "current_head_sha": "$current_head"
+        },
+        "source_binding": {
+          "source_hash": "$source_hash",
+          "runtime_asset_hash": "$runtime_asset_hash"
+        },
+        "foundation": "$foundation"
+      }
+    }
+  },
+  "github_identity": {
+    "CONSTANTS": {
+      "kind": "dict",
+      "value": {
+        "COLLECTOR": "github",
+        "CAPABILITY": "github-lifecycle",
+        "PREFERRED_PROVIDER": "github-connector",
+        "GH_READONLY_PROVIDER": "gh-readonly",
+        "GH_CREATE_PROVIDER": "gh-cli",
+        "GH_CREATE_FALLBACK": "gh repo create --private",
+        "EVIDENCE_FILENAME": "evidence.v2.json",
+        "DEFAULT_MAX_LOG_BYTES": 20000,
+        "HARD_MAX_LOG_BYTES": 65536,
+        "SUCCESSFUL_CONCLUSIONS": ["success"],
+        "COMPLETED_STATUSES": ["completed", "success"],
+        "PENDING_STATUSES": ["expected", "in_progress", "pending", "queued", "requested", "waiting"],
+        "APPROVED_GITHUB_HOSTS": ["github.com"],
+        "SAFE_GH_API_QUERY_PARAMS": ["page", "per_page"],
+        "SAFE_GH_API_QUERY_BOUNDS": {"page": [1, 1000], "per_page": [1, 100]},
+        "GITHUB_URL_KEYS": ["url", "html_url", "api_url", "web_url", "pull_request_url", "pullRequestUrl"],
+        "GITHUB_IDENTITY_URL_KEYS": ["repository", "pull_request", "pullRequest", "base", "head", "baseRef", "headRef"],
+        "_HOST_KEYS": ["github_host", "host", "hostname", "gh_hostname", "server_url", "api_url", "html_url", "url"]
+      }
+    },
+    "BLOCKING_CONCLUSIONS": {
+      "kind": "set",
+      "value": [
+        "action_required",
+        "cancelled",
+        "failed",
+        "failure",
+        "neutral",
+        "skipped",
+        "startup_failure",
+        "timed_out"
+      ]
+    },
+    "CONNECTOR_READ_OPERATIONS": {
+      "kind": "set",
+      "value": [
+        "annotations",
+        "changed_files",
+        "check_runs",
+        "checks",
+        "ci_logs",
+        "comments",
+        "diff",
+        "files",
+        "logs",
+        "pr",
+        "pr_metadata",
+        "pull_request",
+        "pull_request_metadata",
+        "review_comments",
+        "reviews"
+      ]
+    },
+    "GH_API_VALUE_FLAGS": {
+      "kind": "set",
+      "value": [
+        "--cache",
+        "--field",
+        "--header",
+        "--hostname",
+        "--input",
+        "--jq",
+        "--method",
+        "--preview",
+        "--raw-field",
+        "--template",
+        "-F",
+        "-H",
+        "-X",
+        "-f",
+        "-q"
+      ]
+    },
+    "GH_API_VALUE_PREFIXES": {
+      "kind": "tuple",
+      "value": [
+        "--cache=",
+        "--field=",
+        "--header=",
+        "--hostname=",
+        "--input=",
+        "--jq=",
+        "--method=",
+        "--preview=",
+        "--raw-field=",
+        "--template="
+      ]
+    },
+    "GH_COMMAND_CONFIG": {
+      "kind": "dict",
+      "value": {
+        "api_allowed_flag_only": ["--include", "--paginate", "--silent", "--slurp", "-i"],
+        "api_allowed_value_flags": ["--cache", "--hostname", "--jq", "--method", "--preview", "--template", "-X", "-q"],
+        "api_allowed_value_prefixes": ["--cache=", "--hostname=", "--jq=", "--method=", "--preview=", "--template="],
+        "api_forbidden_value_flags": ["--field", "--header", "--input", "--raw-field", "-F", "-H", "-f"],
+        "api_field_flags": ["-f", "-F", "--field", "--raw-field"],
+        "api_field_prefixes": ["--field=", "--raw-field=", "-f", "-F"],
+        "pr_view_value_flags": ["--repo", "-R", "--json", "--jq", "--template", "--hostname"],
+        "pr_view_value_prefixes": ["--repo=", "--json=", "--jq=", "--template=", "--hostname="],
+        "run_mutations": ["cancel", "delete", "download", "rerun", "watch"],
+        "run_view_flag_only": ["--log"]
+      }
+    },
+    "CI_ID_PATHS": {
+      "kind": "dict",
+      "value": {
+        "repo": [["repo"], ["repository"], ["repository", "full_name"], ["repository", "nameWithOwner"]],
+        "pr": [["pr"], ["pull_request_number"], ["pull_request", "number"], ["pullRequest", "number"]],
+        "captured_head_sha": [["captured_head_sha"], ["head_sha"], ["headSha"], ["commit", "sha"]],
+        "check_run_id": [["check_run_id"], ["checkRunId"], ["check_run", "id"], ["checkRun", "id"]],
+        "run_id": [["run_id"], ["runId"], ["workflow_run_id"], ["workflowRunId"], ["run", "id"], ["workflow_run", "id"], ["workflowRun", "id"]],
+        "job_id": [["job_id"], ["jobId"], ["workflow_job_id"], ["workflowJobId"], ["job", "id"], ["workflow_job", "id"], ["workflowJob", "id"]]
+      }
+    },
+    "CI_BINDING_PATHS": {
+      "kind": "dict",
+      "value": {
+        "check_runs": [["id"], ["databaseId"], ["check_run_id"], ["checkRunId"]],
+        "runs": [
+          ["run_id"], ["runId"], ["workflow_run_id"], ["workflowRunId"],
+          ["workflow_run_database_id"], ["workflowRunDatabaseId"], ["run", "id"],
+          ["workflow_run", "id"], ["workflowRun", "id"], ["workflowRun", "databaseId"]
+        ],
+        "jobs": [
+          ["job_id"], ["jobId"], ["workflow_job_id"], ["workflowJobId"], ["job", "id"],
+          ["workflow_job", "id"], ["workflowJob", "id"], ["workflowJob", "databaseId"]
+        ]
+      }
+    },
+    "GH_TOP_LEVEL_MUTATIONS": {
+      "kind": "set",
+      "value": [
+        "auth",
+        "browse",
+        "codespace",
+        "config",
+        "extension",
+        "gist",
+        "gpg-key",
+        "issue",
+        "label",
+        "project",
+        "release",
+        "repo",
+        "secret",
+        "ssh-key",
+        "status",
+        "variable",
+        "workflow"
+      ]
+    }
+  },
+  "native_argv": {
+    "ENV_NO_OPERAND_OPTIONS": {
+      "kind": "set",
+      "value": [
+        "--debug",
+        "--ignore-environment",
+        "--null",
+        "-0",
+        "-i",
+        "-v"
+      ]
+    },
+    "ENV_OPERAND_OPTIONS": {
+      "kind": "set",
+      "value": [
+        "--chdir",
+        "--path",
+        "--unset",
+        "-C",
+        "-P",
+        "-u"
+      ]
+    }
+  },
+  "native_ios": {
+    "CALL_FIELD_KEYS": {
+      "kind": "dict",
+      "value": {
+        "tool": ["tool", "tool_name", "name", "function", "mcp_tool", "action"],
+        "args": ["arguments", "args", "input", "parameters"],
+        "result": ["result", "output", "response"]
+      }
+    },
+    "CALL_LIST_KEYS": {
+      "kind": "tuple",
+      "value": [
+        "calls",
+        "tool_calls",
+        "events",
+        "transcript",
+        "entries",
+        "messages"
+      ]
+    },
+    "CALL_TEMPLATE": {
+      "kind": "dict",
+      "value": {
+        "index": "$index",
+        "tool": "$tool",
+        "raw_tool": "$raw_tool",
+        "args": "$args",
+        "result": "$result",
+        "parallel": "$parallel",
+        "parallel_group": "$parallel_group",
+        "type": "$type"
+      }
+    },
+    "CATEGORY_TOOLS": {
+      "kind": "dict",
+      "value": {
+        "build": ["build_app_sim", "build_for_sim", "build_ios_sim", "build_run_sim", "build_sim"],
+        "launch": ["build_run_sim", "install_launch_sim", "launch_app", "launch_app_sim", "run_app_sim", "run_sim"],
+        "test": ["build_test_sim", "run_tests_sim", "test", "test_ios_sim", "test_sim"],
+        "screenshot": ["capture_screenshot", "capture_sim_screenshot", "screenshot", "screenshot_sim", "sim_screenshot"],
+        "ui_snapshot": ["accessibility_snapshot", "capture_ui_snapshot", "describe_ui", "get_ui_snapshot", "inspect_ui", "snapshot_ui", "ui_snapshot"],
+        "log": ["capture_logs", "get_sim_logs", "log", "log_stream", "logs", "start_log_capture", "stop_log_capture", "stream_logs"]
+      }
+    },
+    "ENVELOPE_PROVENANCE_TEMPLATE": {
+      "kind": "dict",
+      "value": {
+        "route": "ios-verification",
+        "provider": "xcodebuildmcp",
+        "tool_surface": "mcp",
+        "tool": "XcodeBuildMCP",
+        "tool_details": "$tool_details",
+        "tool_call_count": "$tool_call_count",
+        "tool_categories": "$tool_categories",
+        "providers": [
+          {
+            "id": "xcodebuildmcp",
+            "kind": "mcp",
+            "status": "used"
+          },
+          {
+            "id": "ios-simulator-browser",
+            "kind": "plugin",
+            "status": "$simulator_browser_status"
+          }
+        ]
+      }
+    },
+    "NATIVE_FINALIZE": {
+      "kind": "dict",
+      "value": {
+        "collector": "native-ios",
+        "capability": "native-ios-verification",
+        "proof_command": "native-ios-proof",
+        "proof_value_flags": [["--scheme", "scheme"], ["--simulator", "simulator"]],
+        "proof_path_flags": [],
+        "proof_artifact_flags": [
+          ["build", "--build-result"],
+          ["launch", "--launch-result"],
+          ["test", "--test-result"],
+          ["screenshot", "--screenshot"],
+          ["ui_snapshot", "--ui-snapshot"]
+        ],
+        "manifest_degraded": "problems_or_unavailable",
+        "include_artifacts": true,
+        "record_key": "record",
+        "recorded_key": "recorded",
+        "omit_record_command": true,
+        "record_failure_rule": ""
+      }
+    },
+    "COLLECT_CHECKS": {
+      "kind": "list",
+      "value": [
+        ["$missing_scheme", "native iOS collection requires --scheme", "native-ios-scheme"],
+        ["$missing_simulator", "native iOS collection requires --simulator", "native-ios-simulator"],
+        ["$missing_identity", "native iOS collection requires --app-identity or --bundle-id", "native-ios-app-identity"],
+        ["$missing_screenshot", "native iOS proof requires screenshot evidence", "native-ios-ui"],
+        ["$missing_ui_snapshot", "native iOS proof requires an inspectable UI snapshot", "native-ios-ui-snapshot"],
+        ["$browser_conflict", "Simulator Browser cannot be both used and unavailable", "native-ios-simulator-browser"],
+        ["$browser_artifacts_missing", "Simulator Browser use requires both screenshot and UI snapshot artifacts", "native-ios-simulator-browser"]
+      ]
+    },
+    "OUTPUT_TEMPLATE": {
+      "kind": "dict",
+      "value": {
+        "schema": "star-forge.native-ios-collector.v1",
+        "collector": "native-ios",
+        "task": "$task",
+        "artifact_dir": "$artifact_dir",
+        "manifest": "$manifest",
+        "evidence": "$evidence",
+        "evidence_schema": "$evidence_schema",
+        "evidence_verdict": "$evidence_verdict",
+        "artifacts": "$artifacts",
+        "degraded": "$degraded",
+        "unavailable_capabilities": "$unavailable",
+        "problems": "$problems",
+        "handoff_ready": "$handoff_ready",
+        "proof_command_argv": "$proof_argv",
+        "proof_command": "$proof_command",
+        "native_ios_proof_command": "$proof_command",
+        "recorded": false
+      }
+    },
+    "PARSER_ARGUMENTS": {
+      "kind": "list",
+      "value": [
+        [["--project"], {"default": "."}],
+        [["--task"], {"required": true}],
+        [["--scheme"], {"default": ""}],
+        [["--simulator"], {"default": ""}],
+        [["--simulator-runtime"], {"default": ""}],
+        [["--simulator-udid"], {"default": ""}],
+        [["--app-identity"], {"default": ""}],
+        [["--bundle-id"], {"default": ""}],
+        [["--mcp-transcript"], {"default": ""}],
+        [["--session-defaults"], {"default": ""}],
+        [["--build-result"], {"default": ""}],
+        [["--launch-result"], {"default": ""}],
+        [["--test-result"], {"default": ""}],
+        [["--screenshot"], {"default": ""}],
+        [["--ui-snapshot"], {"default": ""}],
+        [["--log"], {"default": ""}],
+        [["--app-bundle"], {"default": ""}],
+        [["--mcp-server"], {"default": "XcodeBuildMCP"}],
+        [["--mcp-version"], {"default": ""}],
+        [["--agent-id"], {"default": ""}],
+        [["--mcp-unavailable"], {"action": "store_true"}],
+        [["--simulator-browser-used"], {"action": "store_true"}],
+        [["--simulator-browser-unavailable"], {"action": "store_true"}],
+        [["--max-log-bytes"], {"type": "int", "default": 65536}],
+        [["--record"], {"action": "store_true"}]
+      ]
+    },
+    "PROOF_ARTIFACT_FLAGS": {
+      "kind": "list",
+      "value": [
+        ["build", "--build-result"],
+        ["launch", "--launch-result"],
+        ["test", "--test-result"],
+        ["screenshot", "--screenshot"],
+        ["ui_snapshot", "--ui-snapshot"]
+      ]
+    },
+    "PROOF_BASE_ARGV": {
+      "kind": "list",
+      "value": [
+        "python3",
+        "scripts/star_forge.py",
+        "native-ios-proof",
+        "--project",
+        "$project",
+        "--task",
+        "$task",
+        "--scheme",
+        "$scheme",
+        "--simulator",
+        "$simulator"
+      ]
+    },
+    "PROVENANCE_TEMPLATE": {
+      "kind": "dict",
+      "value": {
+        "tool_surface": "$tool_surface",
+        "server": "$server",
+        "server_version": "$server_version",
+        "exported_by": "$exported_by",
+        "explicit": "$explicit"
+      }
+    },
+    "RESULT_FALLBACK_TEMPLATE": {
+      "kind": "dict",
+      "value": {
+        "schema": "star-forge.native-ios.result.v1",
+        "kind": "$kind",
+        "success": false,
+        "status": "$status"
+      }
+    },
+    "RESULT_RUNTIME_PATHS": {
+      "kind": "tuple",
+      "value": [
+        "simulator_runtime",
+        "runtime",
+        "os_version"
+      ]
+    },
+    "RESULT_UDID_PATHS": {
+      "kind": "tuple",
+      "value": [
+        "simulator_udid",
+        "udid",
+        "device_udid"
+      ]
+    },
+    "SESSION_INFO_TEMPLATE": {
+      "kind": "dict",
+      "value": {
+        "scheme": "$scheme",
+        "simulator": "$simulator",
+        "runtime": "$runtime",
+        "udid": "$udid"
+      }
+    },
+    "SESSION_INNER_KEYS": {
+      "kind": "tuple",
+      "value": [
+        "name",
+        "id",
+        "udid",
+        "runtime",
+        "scheme"
+      ]
+    },
+    "SESSION_FIELD_KEYS": {
+      "kind": "dict",
+      "value": {
+        "scheme": ["scheme", "active_scheme", "default_scheme", "configured_scheme"],
+        "simulator": ["simulator", "device", "destination", "active_simulator", "default_simulator"],
+        "runtime": ["runtime", "simulator_runtime", "os", "os_version", "platform_runtime"],
+        "udid": ["udid", "simulator_udid", "device_udid"]
+      }
+    },
+    "SUMMARY_TEMPLATE": {
+      "kind": "dict",
+      "value": {
+        "mcp_provenance": "$provenance",
+        "mcp_tool_call_count": "$tool_call_count",
+        "mcp_categories": "$categories",
+        "scheme": "$scheme",
+        "simulator": {
+          "name": "$simulator",
+          "runtime": "$runtime",
+          "udid": "$udid"
+        },
+        "simulator_runtime": "$runtime",
+        "simulator_udid": "$udid",
+        "app_identity": "$app_identity",
+        "app_bundle_hash": "$app_bundle_hash",
+        "source_hash": "$source_hash",
+        "runtime_asset_hash": "$runtime_asset_hash",
+        "artifact_semantics": {
+          "build_success": "$build_success",
+          "launch_success": "$launch_success",
+          "test_success": "$test_success",
+          "ui_proof": "$ui_proof",
+          "log_is_diagnostic_only": "$has_log",
+          "strict_proof_handoff_ready": "$handoff_ready"
+        },
+        "capability_route": {
+          "id": "ios-verification",
+          "primary_provider": "xcodebuildmcp",
+          "simulator_browser": "$simulator_browser"
+        }
+      }
+    },
+    "TOOL_NAME_MARKERS": {
+      "kind": "tuple",
+      "value": [
+        "mcp__xcodebuildmcp__",
+        "xcodebuildmcp__",
+        "mcp_xcodebuildmcp_"
+      ]
+    },
+    "TRANSCRIPT_SUMMARY_TEMPLATE": {
+      "kind": "dict",
+      "value": {
+        "provenance": "$provenance",
+        "tool_call_count": "$tool_call_count",
+        "categories": "$categories",
+        "capabilities_declared": "$capabilities_declared"
+      }
+    },
+    "TRANSCRIPT_CATEGORY_REQUIREMENTS": {
+      "kind": "list",
+      "value": [
+        ["build", "always", "MCP transcript must include a build action", "native-ios-transcript-build"],
+        ["launch", "always", "MCP transcript must include a launch or run action", "native-ios-transcript-launch"],
+        ["test", "always", "MCP transcript must include a test action", "native-ios-transcript-test"],
+        ["screenshot", "has_screenshot", "screenshot evidence requires a matching MCP screenshot action", "native-ios-transcript-ui"],
+        ["ui_snapshot", "has_ui_snapshot", "UI snapshot evidence requires a matching MCP UI snapshot action", "native-ios-transcript-ui"]
+      ]
+    },
+    "UI_SNAPSHOT_MARKERS": {
+      "kind": "tuple",
+      "value": [
+        "tree",
+        "elements",
+        "children",
+        "windows",
+        "screens",
+        "app",
+        "snapshot"
+      ]
+    },
+    "BUILD_TOOLS": {
+      "kind": "set",
+      "value": [
+        "build_app_sim",
+        "build_for_sim",
+        "build_ios_sim",
+        "build_run_sim",
+        "build_sim"
+      ]
+    },
+    "DISCOVERY_TOOLS": {
+      "kind": "set",
+      "value": [
+        "discover_projects",
+        "discover_projs",
+        "find_projects",
+        "list_schemes",
+        "list_sims",
+        "list_simulators",
+        "show_build_settings"
+      ]
+    },
+    "PREBOOT_OPEN_TOOLS": {
+      "kind": "set",
+      "value": [
+        "boot_sim",
+        "open_sim",
+        "preboot_sim",
+        "open_simulator"
+      ]
+    },
+    "SESSION_TOOLS": {
+      "kind": "set",
+      "value": [
+        "session_show_defaults"
+      ]
+    },
+    "LAUNCH_TOOLS": {
+      "kind": "set",
+      "value": [
+        "build_run_sim",
+        "install_launch_sim",
+        "launch_app",
+        "launch_app_sim",
+        "run_app_sim",
+        "run_sim"
+      ]
+    },
+    "LOG_TOOLS": {
+      "kind": "set",
+      "value": [
+        "capture_logs",
+        "get_sim_logs",
+        "log",
+        "log_stream",
+        "logs",
+        "start_log_capture",
+        "stop_log_capture",
+        "stream_logs"
+      ]
+    },
+    "SCREENSHOT_TOOLS": {
+      "kind": "set",
+      "value": [
+        "capture_screenshot",
+        "capture_sim_screenshot",
+        "screenshot",
+        "screenshot_sim",
+        "sim_screenshot"
+      ]
+    },
+    "TEST_TOOLS": {
+      "kind": "set",
+      "value": [
+        "build_test_sim",
+        "run_tests_sim",
+        "test",
+        "test_ios_sim",
+        "test_sim"
+      ]
+    },
+    "UI_SNAPSHOT_TOOLS": {
+      "kind": "set",
+      "value": [
+        "accessibility_snapshot",
+        "capture_ui_snapshot",
+        "describe_ui",
+        "get_ui_snapshot",
+        "inspect_ui",
+        "snapshot_ui",
+        "ui_snapshot"
+      ]
+    }
+  },
+  "native_macos": {
+    "APP_METADATA_TEMPLATE": {
+      "kind": "dict",
+      "value": {
+        "schema": "star-forge.native-macos.app-bundle-metadata.v1",
+        "metadata_only": true,
+        "app_bundle": "",
+        "info_plist": "",
+        "bundle_id": "",
+        "app_name": "",
+        "display_name": "",
+        "executable_name": "",
+        "executable_path": "",
+        "executable_exists": false,
+        "valid": false
+      }
+    },
+    "NOTE_PAYLOADS": {
+      "kind": "dict",
+      "value": {
+        "signing": {
+          "schema": "star-forge.native-macos.note.v1",
+          "kind": "signing",
+          "status": "not_checked",
+          "metadata_only": true,
+          "satisfies_macos_signing_proof": false,
+          "message": "Signing was not checked by the native macOS baseline collector."
+        },
+        "packaging": {
+          "schema": "star-forge.native-macos.note.v1",
+          "kind": "packaging",
+          "status": "not_checked",
+          "metadata_only": true,
+          "satisfies_macos_notarization_or_packaging_proof": false,
+          "message": "Packaging and notarization were not checked by the native macOS baseline collector."
+        }
+      }
+    },
+    "ENVELOPE_PROVENANCE_TEMPLATE": {
+      "kind": "dict",
+      "value": {
+        "route": "macos-implementation",
+        "provider": "$provider",
+        "executor": "structured-argv",
+        "capabilities": "$capabilities",
+        "providers": [
+          {"id": "build-macos-apps", "kind": "plugin", "status": "$build_status"},
+          {"id": "computer-use", "kind": "computer-use", "status": "$computer_use_status"},
+          {"id": "macos-project-workflow", "kind": "shell", "status": "$project_workflow_status"}
+        ]
+      }
+    },
+    "NATIVE_FINALIZE": {
+      "kind": "dict",
+      "value": {
+        "collector": "native-macos",
+        "capability": "native-macos-verification",
+        "route": "macos-implementation",
+        "proof_command": "native-macos-proof",
+        "proof_value_flags": [["--app-name", "app_name"], ["--bundle-id", "bundle_id"]],
+        "proof_path_flags": [["--app-bundle", "app_bundle_path"]],
+        "proof_artifact_flags": [
+          ["build", "--build-result"],
+          ["run", "--run-result"],
+          ["test", "--test-result"],
+          ["screenshot", "--screenshot"],
+          ["signing_note", "--signing-note"],
+          ["packaging_note", "--packaging-note"]
+        ],
+        "manifest_degraded": "unavailable",
+        "include_artifacts": false,
+        "record_key": "record",
+        "recorded_key": "",
+        "omit_record_command": false,
+        "record_failure_rule": "native-macos-record",
+        "record_failure_message": "native macOS proof recording failed with exit code {returncode}"
+      }
+    },
+    "COMMAND_SPECS": {
+      "kind": "list",
+      "value": [
+        ["build", "build_command", true],
+        ["run", "run_command", false],
+        ["test", "test_command", false],
+        ["screenshot", "screenshot_command", false]
+      ]
+    },
+    "REQUIREMENT_CHECKS": {
+      "kind": "list",
+      "value": [
+        ["test", "$missing_test", "test evidence, but no test command was provided"],
+        ["ui-automation", "$missing_ui", "UI automation evidence, but no UI capture command was provided"],
+        ["signing", true, "signing evidence, but this collector has no signing authority"],
+        ["packaging", true, "packaging evidence, but this collector does not mutate packaging state"]
+      ]
+    },
+    "ROUTE_CHECKS": {
+      "kind": "list",
+      "value": [
+        ["$build_conflict", "Build macOS Apps cannot be both selected and unavailable"],
+        ["$ui_conflict", "Computer Use cannot be both selected and unavailable"],
+        ["$ui_evidence_missing", "Computer Use selection requires UI capture evidence"]
+      ]
+    },
+    "UNAVAILABLE_BINDINGS": {
+      "kind": "list",
+      "value": [
+        ["build_macos_apps_unavailable", "build-macos-apps"],
+        ["computer_use_unavailable", "computer-use"]
+      ]
+    },
+    "PARSER_ARGUMENTS": {
+      "kind": "list",
+      "value": [
+        [["--project"], {"default": "."}],
+        [["--task"], {"required": true}],
+        [["--app-name"], {"default": ""}],
+        [["--bundle-id"], {"default": ""}],
+        [["--build-command", "--build-argv"], {"dest": "build_command", "required": true}],
+        [["--run-command", "--run-argv"], {"dest": "run_command", "default": ""}],
+        [["--test-command", "--test-argv"], {"dest": "test_command", "default": ""}],
+        [["--screenshot-command", "--screenshot-argv"], {"dest": "screenshot_command", "default": ""}],
+        [["--app-bundle"], {"default": ""}],
+        [["--readiness-text"], {"default": ""}],
+        [["--command-timeout"], {"type": "float", "default": 60.0}],
+        [["--run-timeout"], {"type": "float", "default": 15.0}],
+        [["--screenshot-timeout"], {"type": "float", "default": 10.0}],
+        [["--observe-seconds"], {"type": "float", "default": 0.25}],
+        [["--cleanup-timeout"], {"type": "float", "default": 2.0}],
+        [["--required-capability"], {"action": "append", "choices": "$contract_capabilities", "default": []}],
+        [["--build-provider"], {"choices": "$build_providers", "default": "$project_provider"}],
+        [["--ui-provider"], {"choices": "$ui_providers", "default": "$project_provider"}],
+        [["--test-provider"], {"choices": "$build_providers", "default": "$project_provider"}],
+        [["--signing-provider"], {"choices": "$build_providers", "default": "$build_provider"}],
+        [["--packaging-provider"], {"choices": "$build_providers", "default": "$build_provider"}],
+        [["--build-macos-apps-unavailable"], {"action": "store_true"}],
+        [["--computer-use-unavailable"], {"action": "store_true"}],
+        [["--record"], {"action": "store_true"}]
+      ]
+    },
+    "PLIST_FIELDS": {
+      "kind": "dict",
+      "value": {
+        "bundle_id": "CFBundleIdentifier",
+        "app_name": "CFBundleName",
+        "display_name": "CFBundleDisplayName",
+        "executable_name": "CFBundleExecutable",
+        "short_version": "CFBundleShortVersionString",
+        "bundle_version": "CFBundleVersion"
+      }
+    },
+    "PROOF_ARTIFACT_FLAGS": {
+      "kind": "list",
+      "value": [
+        ["build", "--build-result"],
+        ["run", "--run-result"],
+        ["test", "--test-result"],
+        ["screenshot", "--screenshot"],
+        ["signing_note", "--signing-note"],
+        ["packaging_note", "--packaging-note"]
+      ]
+    },
+    "RESULT_TEMPLATE": {
+      "kind": "dict",
+      "value": {
+        "schema": "star-forge.native-macos.result.v1",
+        "kind": "$kind",
+        "command_argv": "$command_argv",
+        "shell": false
+      }
+    },
+    "RUN_MISSING_TEMPLATE": {
+      "kind": "dict",
+      "value": {
+        "schema": "star-forge.native-macos.result.v1",
+        "kind": "run",
+        "command_argv": "$command_argv",
+        "shell": false,
+        "cwd": ".",
+        "pid": null,
+        "executable_path": "$executable_path",
+        "timeout_seconds": "$timeout",
+        "timed_out": false,
+        "returncode": null,
+        "exit_code": null,
+        "signal": null,
+        "readiness": {"status": "$readiness_status"},
+        "stdout_artifact": "$stdout_artifact",
+        "stderr_artifact": "$stderr_artifact",
+        "termination": {"attempted": false},
+        "cleanup": {"attempted": false, "success": "$cleanup_success"},
+        "cleanup_failed": "$cleanup_failed",
+        "gui_launch_failed": true,
+        "success": false
+      }
+    },
+    "RUN_RESULT_TEMPLATE": {
+      "kind": "dict",
+      "value": {
+        "schema": "star-forge.native-macos.result.v1",
+        "kind": "run",
+        "command_argv": "$command_argv",
+        "shell": false,
+        "cwd": ".",
+        "pid": "$pid",
+        "executable_path": "$executable_path",
+        "started_at": "$started_at",
+        "ended_at": "$ended_at",
+        "duration_seconds": "$duration",
+        "timeout_seconds": "$timeout",
+        "timed_out": "$timed_out",
+        "signal": "$signal",
+        "process_returncode": "$returncode",
+        "process_exit_code": "$exit_code",
+        "readiness": "$readiness",
+        "stdout_artifact": "$stdout_artifact",
+        "stderr_artifact": "$stderr_artifact",
+        "stdout_bytes": "$stdout_bytes",
+        "stderr_bytes": "$stderr_bytes",
+        "termination": "$termination",
+        "cleanup": "$cleanup",
+        "cleanup_failed": "$cleanup_failed",
+        "gui_launch_failed": "$gui_launch_failed",
+        "stop_reason": "$stop_reason",
+        "success": "$success"
+      }
+    },
+    "RUN_SKIPPED_TEMPLATE": {
+      "kind": "dict",
+      "value": {
+        "schema": "star-forge.native-macos.result.v1",
+        "kind": "run",
+        "command_argv": "$command_argv",
+        "shell": false,
+        "success": false,
+        "status": "skipped",
+        "reason": "build_failed",
+        "pid": null,
+        "executable_path": "$executable_path",
+        "timeout_seconds": "$timeout",
+        "timed_out": false,
+        "returncode": null,
+        "exit_code": null,
+        "signal": null,
+        "readiness": {"status": "not_run"},
+        "termination": {"attempted": false},
+        "cleanup": {"attempted": false, "success": true},
+        "cleanup_failed": false,
+        "gui_launch_failed": false,
+        "stdout_artifact": "$stdout_artifact",
+        "stderr_artifact": "$stderr_artifact"
+      }
+    },
+    "SUMMARY_TEMPLATE": {
+      "kind": "dict",
+      "value": {
+        "app_identity": {
+          "app_name": "$app_name",
+          "bundle_id": "$bundle_id"
+        },
+        "app_bundle": "$app_bundle",
+        "app_bundle_metadata": "$app_bundle_metadata",
+        "runtime_observation": {
+          "pid": "$pid",
+          "executable_path": "$executable_path",
+          "readiness": "$readiness",
+          "termination": "$termination",
+          "cleanup": "$cleanup"
+        },
+        "signing_note": "not_checked",
+        "packaging_note": "not_checked",
+        "app_bundle_hash": "$app_bundle_hash",
+        "capability_route": "$capability_route"
+      }
+    },
+    "OUTPUT_TEMPLATE": {
+      "kind": "dict",
+      "value": {
+        "schema": "star-forge.native-macos-collector.v1",
+        "collector": "native-macos",
+        "task": "$task",
+        "artifact_dir": "$artifact_dir",
+        "manifest": "$manifest",
+        "evidence": "$evidence",
+        "evidence_schema": "$evidence_schema",
+        "evidence_verdict": "$evidence_verdict",
+        "degraded": "$degraded",
+        "unavailable_capabilities": "$unavailable",
+        "problems": "$problems",
+        "proof_command_argv": "$proof_argv",
+        "proof_command": "$proof_command"
+      }
+    },
+    "ROUTE_STATUS_TEMPLATE": {
+      "kind": "dict",
+      "value": {
+        "required": "$required",
+        "build": {
+          "provider": "$build_provider",
+          "tool": "$build_tool",
+          "status": "$build_status"
+        },
+        "run": {
+          "provider": "$ui_provider",
+          "tool": "$run_tool",
+          "status": "$run_status"
+        },
+        "ui_automation": {
+          "provider": "$ui_provider",
+          "status": "$ui_status"
+        },
+        "test": {
+          "provider": "$test_provider",
+          "status": "$test_status"
+        },
+        "signing": {
+          "provider": "$signing_provider",
+          "status": "$signing_status"
+        },
+        "packaging": {
+          "provider": "$packaging_provider",
+          "status": "$packaging_status"
+        },
+        "build_macos_apps": "$build_macos_apps",
+        "computer_use": "$computer_use"
+      }
+    },
+    "SCREENSHOT_PERMISSION_MARKERS": {
+      "kind": "tuple",
+      "value": [
+        "permission",
+        "not authorized",
+        "privacy",
+        "screen recording"
+      ]
+    },
+    "SHELL_EXECUTABLES": {
+      "kind": "set",
+      "value": [
+        "bash",
+        "csh",
+        "dash",
+        "fish",
+        "ksh",
+        "sh",
+        "tcsh",
+        "zsh"
+      ]
+    },
+    "FORBIDDEN_SUBCOMMANDS": {
+      "kind": "set",
+      "value": [
+        "notarize",
+        "notarytool",
+        "stapler"
+      ]
+    },
+    "FORBIDDEN_EXECUTABLES": {
+      "kind": "set",
+      "value": [
+        "altool",
+        "automator",
+        "cliclick",
+        "codesign",
+        "notarytool",
+        "osascript",
+        "pkgbuild",
+        "productbuild",
+        "stapler",
+        "sudo"
+      ]
+    },
+    "IGNORED_DISCOVERY_PARTS": {
+      "kind": "set",
+      "value": [
+        ".git",
+        ".starforge",
+        ".venv",
+        "__pycache__",
+        "node_modules",
+        "the-loop"
+      ]
+    }
+  },
+  "native_transcript": {
+    "ARGV_EXECUTABLE_FIELD_NAMES": {
+      "kind": "set",
+      "value": [
+        "argv",
+        "command_argv",
+        "commandargv"
+      ]
+    },
+    "COMMAND_EXECUTION_FIELD_NAMES": {
+      "kind": "set",
+      "value": [
+        "cmd",
+        "cmd_line",
+        "cmdline",
+        "command",
+        "command_args",
+        "command_line",
+        "commandargs",
+        "commandline"
+      ]
+    },
+    "COMMAND_FIELD_NAMES": {
+      "kind": "set",
+      "value": [
+        "argv",
+        "cmd",
+        "cmd_line",
+        "cmdline",
+        "command",
+        "command_args",
+        "command_argv",
+        "command_line",
+        "commandargs",
+        "commandargv",
+        "commandline",
+        "shell_cmd",
+        "shell_command",
+        "shellcmd",
+        "shellcommand"
+      ]
+    },
+    "SHELL_COMMAND_FIELD_NAMES": {
+      "kind": "set",
+      "value": [
+        "shell_cmd",
+        "shell_command",
+        "shellcmd",
+        "shellcommand"
+      ]
+    },
+    "SHELL_EXECUTABLE_NAMES": {
+      "kind": "set",
+      "value": [
+        "bash",
+        "fish",
+        "powershell",
+        "pwsh",
+        "sh",
+        "zsh"
+      ]
+    },
+    "SHELL_FALLBACK_TOOLS": {
+      "kind": "set",
+      "value": [
+        "cmd",
+        "command",
+        "exec_command",
+        "execute_command",
+        "executecommand",
+        "osascript",
+        "run_command",
+        "runcommand",
+        "shell",
+        "simctl",
+        "subprocess",
+        "terminal",
+        "xcodebuild",
+        "xcrun"
+      ]
+    }
+  },
+  "preview": {
+    "SETTINGS": {
+      "kind": "dict",
+      "value": {
+        "default_user_agent": "star-forge-preview-collector/1 read-only",
+        "local_hostnames": ["localhost"],
+        "collector_mode": "provider-neutral-read-only-http",
+        "default_provider": "provider-neutral"
+      }
+    },
+    "BLOCKED_IP_RULES": {
+      "kind": "list",
+      "value": [
+        ["is_unspecified", "unspecified IP targets are not allowed"],
+        ["is_link_local", "link-local targets are not allowed"],
+        ["is_private", "private network targets are not allowed"],
+        ["is_reserved", "reserved IP targets are not allowed"],
+        ["is_multicast", "multicast targets are not allowed"]
+      ]
+    },
+    "SMOKE_MESSAGES": {
+      "kind": "dict",
+      "value": {
+        "contains_pass": "body contained expected text",
+        "contains_fail": "body did not contain expected text",
+        "not_contains_pass": "body omitted forbidden text",
+        "not_contains_fail": "body contained forbidden text"
+      }
+    },
+    "ARTIFACT_FILES": {
+      "kind": "dict",
+      "value": {
+        "http": "http.json",
+        "deployment": "deployment.json",
+        "smoke": "smoke.json",
+        "headers": "headers.json"
+      }
+    },
+    "PAYLOAD_TEMPLATES": {
+      "kind": "dict",
+      "value": {
+        "skipped_http": {
+          "schema": "star-forge.preview-http.v1",
+          "attempted": false,
+          "method": "GET",
+          "url": "$safe_url",
+          "expected_status": "$expect_status",
+          "ok": false,
+          "problems": "$problems"
+        },
+        "http": {
+          "schema": "star-forge.preview-http.v1",
+          "attempted": "$attempted",
+          "method": "GET",
+          "url": "$safe_url",
+          "final_url": "$safe_final_url",
+          "status": "$status",
+          "expected_status": "$expect_status",
+          "ok": "$http_ok",
+          "redirect_chain": "$redirects",
+          "elapsed_ms": "$elapsed_ms",
+          "body_sha256": "$body_sha",
+          "body_bytes_read": "$body_bytes_read",
+          "body_truncated": "$body_truncated",
+          "connected_ips": "$connected_ips",
+          "connection_pinning": {
+            "strategy": "http-connect-vetted-ip",
+            "https": "fail-closed"
+          }
+        },
+        "headers": {
+          "schema": "star-forge.preview-headers.v1",
+          "final_url": "$safe_final_url",
+          "response_headers": "$response_headers",
+          "request_headers": "$request_headers"
+        },
+        "smoke": {
+          "schema": "star-forge.preview-smoke.v1",
+          "passed": "$smoke_passed",
+          "checks": "$checks"
+        },
+        "smoke_item": {
+          "name": "$name",
+          "kind": "$kind",
+          "passed": "$passed",
+          "observed": "$observed"
+        },
+        "deployment": {
+          "schema": "star-forge.preview-deployment.v1",
+          "provider": "$provider",
+          "url": "$url"
+        },
+        "summary": {
+          "url": "$url",
+          "capability": "preview-verification",
+          "provider": "$provider",
+          "status": "$status",
+          "expected_status": "$expect_status",
+          "smoke_passed": "$smoke_passed",
+          "source_bound": "$source_bound",
+          "local_preview_mode": "$local_preview_mode",
+          "server_lease": "$server_lease",
+          "server_lease_artifact": "$server_lease_artifact",
+          "redacted_artifacts": "$redacted_artifacts"
+        },
+        "result": {
+          "schema": "star-forge.preview-collector.v1",
+          "collector": "preview",
+          "manifest": "$manifest",
+          "evidence": "$evidence",
+          "evidence_verdict": "$evidence_verdict",
+          "capability": "preview-verification",
+          "provider": "$provider",
+          "artifacts": "$artifacts",
+          "degraded": "$degraded",
+          "problems": "$problems",
+          "proof_command": "$proof_command",
+          "proof_command_shell": "$proof_command_shell",
+          "recorded": false
+        },
+        "evidence_provenance": {
+          "collector_mode": "provider-neutral-read-only-http",
+          "deployment_provider": "$provider"
+        }
+      }
+    },
+    "COMMAND_TEMPLATE": {
+      "kind": "list",
+      "value": [
+        "python3", "scripts/star_forge.py", "preview-proof",
+        "--project", "{project}", "--task", "{task}", "--url", "{url}",
+        "--expect-status", "{expect_status}",
+        "--deployment-metadata", "{deployment}",
+        "--smoke-checks", "{smoke}", "--strict"
+      ]
+    },
+    "PARSER_OPTIONS": {
+      "kind": "list",
+      "value": [
+        {"name": "--project", "default": "."},
+        {"name": "--task", "required": true},
+        {"name": "--url", "required": true},
+        {"name": "--expect-status", "type": "int", "default": 200},
+        {"name": "--smoke-check", "action": "append", "default": []},
+        {"name": "--header", "action": "append", "default": []},
+        {"name": "--timeout", "type": "float", "default": 10.0},
+        {"name": "--max-redirects", "type": "int", "default": 5},
+        {"name": "--max-body-bytes", "type": "int", "default": 262144},
+        {"name": "--server-lease", "default": ""},
+        {"name": "--local-preview-mode", "action": "store_true"},
+        {"name": "--provider", "default": "provider-neutral"},
+        {"name": "--deployment-id", "default": ""},
+        {"name": "--deployment-source-hash", "default": ""},
+        {"name": "--deployment-commit-sha", "default": ""},
+        {"name": "--local-build-artifact", "default": ""},
+        {"name": "--diagnostic-screenshot", "default": ""},
+        {"name": "--record", "action": "store_true"}
+      ]
+    }
+  },
+  "security_adapter": {
+    "CONSTANTS": {
+      "kind": "dict",
+      "value": {
+        "STAR_FORGE_REPORT_SCHEMA": "star-forge.security-report.v1",
+        "NORMALIZED_FINDINGS_SCHEMA": "star-forge.normalized-security-findings.v1",
+        "HANDOFF_INPUT_SCHEMA": "star-forge.security-handoff-input.v1",
+        "INPUT_HASH_SCHEMA": "star-forge.security-input-hash.v1",
+        "RESULT_SCHEMA": "star-forge.security-adapter-result.v1",
+        "CAPABILITY": "security-review",
+        "PREFERRED_PROVIDER": "codex-security",
+        "FALLBACK_PROVIDER": "security-reviewer",
+        "EVIDENCE_FILENAME": "evidence.v2.json"
+      }
+    },
+    "CODEX_SECURITY_SCHEMAS": {
+      "kind": "set",
+      "value": [
+        "codex-security.report.v1",
+        "codex.security.report.v1",
+        "codex.security.v1"
+      ]
+    },
+    "KIND_BY_PROFILE": {
+      "kind": "dict",
+      "value": {
+        "dependency-audit": "dependency-audit",
+        "security-deep": "security-deep",
+        "security-diff": "security-diff",
+        "vulnerability-fix": "vulnerability-fix"
+      }
+    },
+    "VALID_PROFILES": {
+      "kind": "set",
+      "value": ["dependency-audit", "security-deep", "security-diff", "vulnerability-fix"]
+    },
+    "PATH_KEYS": {
+      "kind": "set",
+      "value": ["path", "file", "filepath", "file_path", "filename", "uri", "source", "target"]
+    },
+    "SENSITIVE_TEXT_KEYS": {
+      "kind": "set",
+      "value": ["snippet", "code", "line_text", "context", "evidence", "message", "description"]
+    },
+    "CANDIDATES": {
+      "kind": "dict",
+      "value": {
+        "scanner": ["scanner.name", "scanner", "tool.name", "tool", "provenance.scanner", "provenance.tool"],
+        "scanner_version": ["scanner.version", "tool.version", "provenance.scanner_version", "provenance.version"],
+        "ruleset": ["ruleset", "ruleset_metadata", "scan.ruleset", "metadata.ruleset"],
+        "scan_scope": ["scan_scope", "scope", "scan.scope", "metadata.scan_scope"],
+        "source_hash": ["source_hash", "source.source_hash", "source.sourceHash", "metadata.source_hash"],
+        "commit_sha": ["commit_sha", "commit", "source.commit_sha", "source.commit", "source.git_head", "git_head"],
+        "base_sha": ["base_sha", "source.base_sha"],
+        "head_sha": ["head_sha", "source.head_sha"],
+        "input_hash": ["input_hash", "input.sha256", "input.input_hash", "metadata.input_hash", "provenance.input_hash"],
+        "dependency_manifests": ["dependency_manifests", "dependencies.manifests", "scan.dependency_manifests"],
+        "finding_path": ["file", "path", "file_path", "location.file", "location.path", "primary_location.file", "primary_location.path"],
+        "finding_line": ["line", "start_line", "location.line", "location.start_line", "primary_location.line"],
+        "finding_id": ["id", "finding_id", "findingId", "issue_id", "uuid", "fingerprint"],
+        "rule_id": ["rule_id", "ruleId", "rule", "check_id", "checkId", "cwe", "cve"],
+        "severity": ["severity", "level", "priority", "risk", "impact", "cvss_score", "cvss.score"],
+        "confidence": ["confidence", "certainty", "likelihood"],
+        "title": ["title", "name", "summary"],
+        "message": ["message", "description", "details"],
+        "remediation": ["remediation", "recommendation", "fix", "fix_text", "help"]
+      }
+    },
+    "SEVERITY_NORMALIZATION": {
+      "kind": "dict",
+      "value": {
+        "thresholds": [[9.0, "critical"], [7.0, "high"], [4.0, "medium"], [0.0000001, "low"], [0.0, "info"]],
+        "aliases": {
+          "critical": ["blocker", "severe", "critical", "crit"],
+          "high": ["high", "error", "major"],
+          "medium": ["medium", "moderate", "warning", "warn"],
+          "low": ["low", "minor"],
+          "info": ["info", "informational", "notice", "note", "none", "negligible"]
+        }
+      }
+    },
+    "CONFIDENCE_NORMALIZATION": {
+      "kind": "dict",
+      "value": {
+        "thresholds": [[0.8, "high"], [0.4, "medium"], [0.0, "low"]],
+        "aliases": {
+          "high": ["certain", "confirmed", "high", "likely"],
+          "medium": ["medium", "moderate", "possible"],
+          "low": ["low", "tentative"],
+          "unknown": ["unknown"]
+        }
+      }
+    },
+    "FINGERPRINT_TEMPLATE": {
+      "kind": "dict",
+      "value": {
+        "scanner": "$scanner",
+        "rule_id": "$rule_id",
+        "raw_id": "$raw_id",
+        "path": "$path",
+        "line": "$line",
+        "severity": "$severity",
+        "message": "$message"
+      }
+    },
+    "EVIDENCE_KEYS": {
+      "kind": "tuple",
+      "value": ["file", "path", "line", "start_line", "end_line", "snippet", "message", "package", "dependency", "vulnerability", "url"]
+    },
+    "REQUIRED_METADATA": {
+      "kind": "list",
+      "value": [
+        {"field": "trusted_schema", "message": "unsupported security report schema", "rule": "security-schema"},
+        {"field": "scanner", "message": "security report requires scanner provenance", "rule": "security-provenance"},
+        {"field": "version", "message": "security report requires scanner version", "rule": "security-provenance"},
+        {"field": "ruleset", "message": "security report requires ruleset metadata", "rule": "security-ruleset"},
+        {"field": "scope", "message": "security report requires scan scope", "rule": "security-scope"},
+        {"field": "input_hash_ok", "message": "security report requires a declared input hash matching the input bytes", "rule": "security-input-hash"},
+        {"field": "source_binding_ok", "message": "security report requires a fresh source hash or commit binding", "rule": "security-source-binding"}
+      ]
+    },
+    "SOURCE_BINDING_MESSAGES": {
+      "kind": "tuple",
+      "value": [
+        "commit binding was provided but the project has no git HEAD",
+        "security report commit binding requires a clean source tree at HEAD",
+        "security report source_hash is stale",
+        "security report commit binding is stale",
+        "security report requires source_hash or commit binding"
+      ]
+    },
+    "ARTIFACT_FILES": {
+      "kind": "dict",
+      "value": {
+        "normalized_findings": "normalized-findings.json",
+        "input_hash": "input-hash.json",
+        "handoff_input": "handoff-input.json",
+        "redaction_report": "redaction-report.json",
+        "manifest": "manifest.json"
+      }
+    },
+    "PAYLOAD_TEMPLATES": {
+      "kind": "dict",
+      "value": {
+        "normalized_findings": {
+          "schema": "star-forge.normalized-security-findings.v1",
+          "task": "$task",
+          "profile": "$profile",
+          "source_schema": "$source_schema",
+          "scanner": "$scanner",
+          "scanner_version": "$version",
+          "findings": "$findings",
+          "summary": "$findings_summary"
+        },
+        "input_hash": {
+          "schema": "star-forge.security-input-hash.v1",
+          "input_path": "$input_path",
+          "declared_sha256": "$declared_hash",
+          "actual_sha256": "$actual_input_hash",
+          "matches": "$input_hash_ok"
+        },
+        "provenance": {
+          "scanner": "$scanner",
+          "scanner_version": "$version",
+          "source_schema": "$source_schema",
+          "schema_family": "$schema_family",
+          "trusted_schema": "$trusted_schema",
+          "report_provenance": "$report_provenance"
+        },
+        "handoff": {
+          "schema": "star-forge.security-handoff-input.v1",
+          "task": "$task",
+          "profile": "$profile",
+          "kind": "$kind",
+          "provenance": "$provenance",
+          "scanner": "$scanner",
+          "scanner_version": "$version",
+          "ruleset": "$ruleset",
+          "scan_scope": "$scope",
+          "source_binding": "$binding",
+          "input_hash": "$input_hash_payload",
+          "dependency_manifests": "$dependency_manifests",
+          "normalized_findings": "$normalized_findings_record",
+          "problems": "$problems"
+        },
+        "redaction_report": {
+          "schema": "star-forge.security-redaction-report.v1",
+          "counts": "$redaction_totals",
+          "notes": ["Secrets, sensitive keys, home paths, temp paths, env values, and scanner snippets are redacted before handoff."]
+        },
+        "summary": {
+          "trusted_provenance": "$trusted_provenance",
+          "scanner": "$scanner",
+          "scanner_version": "$version",
+          "source_schema": "$source_schema",
+          "schema_family": "$schema_family",
+          "ruleset": "$summary_ruleset",
+          "scan_scope": "$summary_scope",
+          "input_hash": "$summary_input_hash",
+          "source_binding": "$fresh_binding",
+          "dependency_manifests": "$dependency_manifests"
+        },
+        "result": {
+          "schema": "star-forge.security-adapter-result.v1",
+          "verdict": "$verdict",
+          "task": "$task",
+          "profile": "$profile",
+          "kind": "$kind",
+          "artifacts": "$result_artifacts",
+          "evidence": "$evidence_path",
+          "evidence_schema": "$evidence_schema",
+          "evidence_verdict": "$evidence_verdict",
+          "capability": "security-review",
+          "preferred_provider": "codex-security",
+          "provider": "$provider",
+          "commands": "$commands",
+          "problems": "$problems"
+        },
+        "finding": {
+          "schema": "star-forge.normalized-security-finding.v1",
+          "id": "$raw_id",
+          "raw_id": "$raw_id",
+          "scanner": "$scanner",
+          "scanner_version": "$version",
+          "rule_id": "$rule_id",
+          "raw_severity": "$raw_severity_output",
+          "severity": "$severity",
+          "normalized_severity": "$severity",
+          "severity_known": "$severity_known",
+          "confidence": "$confidence",
+          "raw_confidence": "$raw_confidence_output",
+          "title": "$title",
+          "message": "$message",
+          "evidence": "$evidence",
+          "remediation": "$remediation",
+          "fingerprint": "$fingerprint",
+          "source_schema": "$source_schema"
+        }
+      }
+    },
+    "COMMAND_TEMPLATES": {
+      "kind": "dict",
+      "value": {
+        "security_handoff_packet": ["python3", "scripts/star_forge.py", "security-handoff-packet", "--project", "$project", "--kind", "$kind", "--input", "$handoff", "--strict"],
+        "security_proof": ["python3", "scripts/star_forge.py", "security-proof", "--project", "$project", "--task", "$task", "--profile", "$profile", "--scanner", "$scanner", "--scanner-version", "$version", "--findings", "$findings", "--artifact", "$manifest", "--strict"]
+      }
+    },
+    "REDACTION_COUNTS": {
+      "kind": "dict",
+      "value": {
+        "secret_values": 0,
+        "sensitive_keys": 0,
+        "home_paths": 0,
+        "temp_paths": 0,
+        "env_values": 0
+      }
+    },
+    "EVIDENCE_ROUTES": {
+      "kind": "dict",
+      "value": {
+        "codex-security": {"provider": "codex-security", "preferred_provider": "codex-security", "fallback": false},
+        "fallback": {"provider": "security-reviewer", "preferred_provider": "codex-security", "fallback": true}
+      }
+    },
+    "FALLBACK_BLOCKER": {
+      "kind": "dict",
+      "value": {
+        "rule": "security-capability-fallback",
+        "message": "Codex Security evidence was not supplied; dependency scanner or security reviewer output was normalized through the fallback route",
+        "capability": "security-review",
+        "preferred_provider": "codex-security",
+        "selected_provider": "$provider",
+        "blocking": false
+      }
+    },
+    "EVIDENCE_PROVENANCE_TEMPLATE": {
+      "kind": "dict",
+      "value": {
+        "route": "$route",
+        "provider": "$provider",
+        "scanner": "$scanner",
+        "scanner_version": "$version",
+        "source_schema": "$source_schema",
+        "schema_family": "$schema_family",
+        "source_binding": "$source_binding",
+        "normalization": "star-forge.normalized-security-findings.v1"
+      }
+    },
+    "PARSER_OPTIONS": {
+      "kind": "list",
+      "value": [
+        {"name": "--project", "default": "."},
+        {"name": "--task", "required": true},
+        {"name": "--profile", "required": true, "choices": "profiles"},
+        {"name": "--input", "required": true},
+        {"name": "--scanner", "default": ""},
+        {"name": "--scanner-version", "default": ""},
+        {"name": "--ruleset", "default": ""},
+        {"name": "--ruleset-version", "default": ""},
+        {"name": "--scan-scope", "default": ""},
+        {"name": "--input-hash", "default": ""},
+        {"name": "--source-hash", "default": ""},
+        {"name": "--commit-sha", "default": ""},
+        {"name": "--base-sha", "default": ""},
+        {"name": "--head-sha", "default": ""},
+        {"name": "--dependency-manifest", "action": "append", "default": []},
+        {"name": "--record", "action": "store_true"},
+        {"name": "--strict", "action": "store_true", "default": true},
+        {"name": "--no-strict", "action": "store_false", "dest": "strict"}
+      ]
+    }
+  }
+}

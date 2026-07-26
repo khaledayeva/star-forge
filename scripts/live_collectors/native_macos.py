@@ -10,11 +10,9 @@ argv commands, writes task-scoped evidence under
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import plistlib
-import shlex
 import shutil
 import subprocess
 import sys
@@ -23,360 +21,85 @@ import time
 from pathlib import Path
 from typing import Any, Sequence
 
-SCRIPT_DIR = Path(__file__).resolve().parent
-SCRIPTS_ROOT = SCRIPT_DIR.parent
-STAR_FORGE = SCRIPTS_ROOT / "star_forge.py"
+SCRIPTS_ROOT = Path(__file__).resolve().parent.parent
 if str(SCRIPTS_ROOT) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_ROOT))
 
-from live_collectors import common
-from starforge import evidence
+from live_collectors import common, native_argv, native_transcript as native
+from live_collectors.policy_data import policy_dict, policy_list, policy_set, policy_tuple
+from live_collectors.provider_engine import render_descriptor
 
 
 MappingLike = dict[str, Any]
 
-COLLECTOR = "native-macos"
 SCREENSHOT_PLACEHOLDER = "{screenshot}"
-RESULT_SCHEMA = "star-forge.native-macos.result.v1"
-NOTE_SCHEMA = "star-forge.native-macos.note.v1"
-APP_METADATA_SCHEMA = "star-forge.native-macos.app-bundle-metadata.v1"
-CAPABILITY = "native-macos-verification"
-ROUTE = "macos-implementation"
 BUILD_MACOS_PROVIDER = "build-macos-apps"
 COMPUTER_USE_PROVIDER = "computer-use"
 PROJECT_WORKFLOW_PROVIDER = "macos-project-workflow"
 CONTRACT_CAPABILITIES = {"ui-automation", "signing", "packaging", "test"}
 
-FORBIDDEN_EXECUTABLES = {
-    "sudo",
-    "codesign",
-    "pkgbuild",
-    "productbuild",
-    "notarytool",
-    "altool",
-    "stapler",
-    "osascript",
-    "automator",
-    "cliclick",
-}
-FORBIDDEN_SUBCOMMANDS = {"notarytool", "notarize", "stapler"}
-SHELL_EXECUTABLES = {"sh", "bash", "zsh", "fish", "csh", "tcsh", "dash", "ksh"}
-IGNORED_DISCOVERY_PARTS = {
-    ".git",
-    ".starforge",
-    ".venv",
-    "__pycache__",
-    "node_modules",
-    "the-loop",
-}
+FORBIDDEN_EXECUTABLES = policy_set("native_macos", "FORBIDDEN_EXECUTABLES")
+FORBIDDEN_SUBCOMMANDS = policy_set("native_macos", "FORBIDDEN_SUBCOMMANDS")
+SHELL_EXECUTABLES = policy_set("native_macos", "SHELL_EXECUTABLES")
+IGNORED_DISCOVERY_PARTS = policy_set("native_macos", "IGNORED_DISCOVERY_PARTS")
+SCREENSHOT_PERMISSION_MARKERS = policy_tuple("native_macos", "SCREENSHOT_PERMISSION_MARKERS")
+APP_METADATA_TEMPLATE = policy_dict("native_macos", "APP_METADATA_TEMPLATE")
+NOTE_PAYLOADS = policy_dict("native_macos", "NOTE_PAYLOADS")
+ENVELOPE_PROVENANCE_TEMPLATE = policy_dict("native_macos", "ENVELOPE_PROVENANCE_TEMPLATE")
+NATIVE_FINALIZE = policy_dict("native_macos", "NATIVE_FINALIZE")
+COMMAND_SPECS = policy_list("native_macos", "COMMAND_SPECS")
+REQUIREMENT_CHECKS = policy_list("native_macos", "REQUIREMENT_CHECKS")
+ROUTE_CHECKS = policy_list("native_macos", "ROUTE_CHECKS")
+UNAVAILABLE_BINDINGS = policy_list("native_macos", "UNAVAILABLE_BINDINGS")
+CAPABILITY, ROUTE = NATIVE_FINALIZE["capability"], NATIVE_FINALIZE["route"]
+STAR_FORGE = SCRIPTS_ROOT / "star_forge.py"
+PLIST_FIELDS = policy_dict("native_macos", "PLIST_FIELDS")
+RESULT_TEMPLATE = policy_dict("native_macos", "RESULT_TEMPLATE")
+RUN_MISSING_TEMPLATE = policy_dict("native_macos", "RUN_MISSING_TEMPLATE")
+RUN_RESULT_TEMPLATE = policy_dict("native_macos", "RUN_RESULT_TEMPLATE")
+RUN_SKIPPED_TEMPLATE = policy_dict("native_macos", "RUN_SKIPPED_TEMPLATE")
+ROUTE_STATUS_TEMPLATE = policy_dict("native_macos", "ROUTE_STATUS_TEMPLATE")
+SUMMARY_TEMPLATE = policy_dict("native_macos", "SUMMARY_TEMPLATE")
+OUTPUT_TEMPLATE = policy_dict("native_macos", "OUTPUT_TEMPLATE")
+PARSER_ARGUMENTS = policy_list("native_macos", "PARSER_ARGUMENTS")
 
 
-def now() -> str:
-    return common.now_utc()
+descriptor = render_descriptor
 
 
-def rel(project: Path, path: Path) -> str:
-    return common.project_relative(project, path)
+def result_payload(kind: str, argv: Sequence[str], **fields: Any) -> MappingLike:
+    return {**descriptor(RESULT_TEMPLATE, kind=kind, command_argv=list(argv)), **fields}
 
 
-def write_json(path: Path, payload: MappingLike) -> Path:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    redacted, _ = common.redact_sensitive_values(payload)
-    path.write_text(json.dumps(redacted, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    return path
+now = common.now_utc
+rel = common.project_relative
 
 
-def write_text(path: Path, text: str) -> Path:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    redacted, _ = common.redact_sensitive_values(text)
-    path.write_text(str(redacted), encoding="utf-8")
-    return path
+write_json = native.write_json
+write_text = native.write_text
 
 
-def tree_sha256(path: Path | None) -> str:
-    if path is None or not path.is_dir():
-        return ""
-    digest = hashlib.sha256()
-    files = sorted(item for item in path.glob("**/*") if item.is_file() and not item.is_symlink())
-    for item in files:
-        digest.update(str(item.relative_to(path)).encode("utf-8"))
-        digest.update(b"\0")
-        digest.update(common.file_sha256(item).encode("ascii"))
-        digest.update(b"\0")
-    return digest.hexdigest()
+tree_sha256 = common.tree_sha256
 
 
-def write_evidence_envelope(
-    project: Path,
-    out_dir: Path,
-    manifest_path: Path,
-    *,
-    provider: str,
-    route_status: MappingLike,
-) -> tuple[Path, MappingLike]:
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    envelope = evidence.adapt_v1_manifest(
-        manifest,
-        capability=CAPABILITY,
-        provider=provider,
-    )
-    envelope["provenance"] = {
-        **dict(envelope["provenance"]),
-        "route": ROUTE,
-        "provider": provider,
-        "executor": "structured-argv",
-        "capabilities": dict(route_status),
-        "providers": [
-            {
-                "id": BUILD_MACOS_PROVIDER,
-                "kind": "plugin",
-                "status": (
-                    "used"
-                    if provider == BUILD_MACOS_PROVIDER
-                    else "unavailable"
-                    if route_status.get("build_macos_apps") == "unavailable"
-                    else "not-selected"
-                ),
-            },
-            {
-                "id": COMPUTER_USE_PROVIDER,
-                "kind": "computer-use",
-                "status": str(route_status.get("computer_use") or "not-selected"),
-            },
-            {
-                "id": PROJECT_WORKFLOW_PROVIDER,
-                "kind": "shell",
-                "status": "used" if provider == PROJECT_WORKFLOW_PROVIDER else "not-selected",
-            },
-        ],
-    }
-    envelope_path = out_dir / "evidence.json"
-    written = evidence.write_envelope(
-        envelope_path,
-        envelope,
-        project_root=project,
-        verify_artifacts=True,
-    )
-    return envelope_path, written
-
-
-def problem(message: str, *, rule: str, path: str = "", severity: str = "high") -> MappingLike:
-    return common.blocking_problem(message, rule=rule, path=path, severity=severity)
+problem = common.blocking_problem
 
 
 def parse_argv_json(raw: str | None, label: str, *, required: bool) -> tuple[list[str] | None, list[MappingLike]]:
-    problems: list[MappingLike] = []
-    text = str(raw or "").strip()
-    if not text:
-        if required:
-            problems.append(problem(f"{label} argv is required", rule=f"native-macos-{label}-argv"))
-        return None, problems
-    try:
-        parsed = json.loads(text)
-    except json.JSONDecodeError as exc:
-        problems.append(problem(f"{label} argv must be a JSON array: {exc}", rule=f"native-macos-{label}-argv"))
-        return None, problems
-    if not isinstance(parsed, list):
-        problems.append(problem(f"{label} argv must be a JSON array", rule=f"native-macos-{label}-argv"))
-        return None, problems
-    argv: list[str] = []
-    for idx, item in enumerate(parsed):
-        if not isinstance(item, str) or not item:
-            problems.append(problem(f"{label} argv item {idx + 1} must be a non-empty string", rule=f"native-macos-{label}-argv"))
-            return None, problems
-        if "\0" in item:
-            problems.append(problem(f"{label} argv item {idx + 1} contains a null byte", rule=f"native-macos-{label}-argv"))
-            return None, problems
-        argv.append(item)
-    problems.extend(validate_argv(argv, label))
-    return argv if not problems else None, problems
+    return native_argv.parse_argv_json(
+        raw, label, required=required, validate=validate_argv,
+        make_problem=lambda message: problem(message, rule=f"native-macos-{label}-argv"),
+    )
 
 
-def executable_name(value: str) -> str:
-    return Path(value).name.lower()
-
-
-def is_env_assignment(value: str) -> bool:
-    return bool(value) and "=" in value and not value.startswith("-") and value.split("=", 1)[0].isidentifier()
-
-
-ENV_NO_OPERAND_OPTIONS = {
-    "-i",
-    "--ignore-environment",
-    "-0",
-    "--null",
-    "-v",
-    "--debug",
-}
-ENV_OPERAND_OPTIONS = {
-    "-u",
-    "--unset",
-    "-C",
-    "--chdir",
-    "-P",
-    "--path",
-}
-ENV_OPERAND_PREFIXES = (
-    "--unset=",
-    "--chdir=",
-    "--path=",
-)
-ENV_SPLIT_OPTIONS = {"-S", "--split-string"}
-MAX_ENV_WRAPPER_DEPTH = 16
-
-
-def split_env_string(raw: str, label: str) -> tuple[list[str], list[MappingLike]]:
-    try:
-        return shlex.split(raw), []
-    except ValueError as exc:
-        return [], [problem(f"{label} env split string is malformed: {exc}", rule="native-macos-shell")]
-
-
-def validate_env_tail(tokens: Sequence[str], label: str, *, depth: int = 0) -> list[MappingLike]:
-    problems: list[MappingLike] = []
-    if depth > MAX_ENV_WRAPPER_DEPTH:
-        return [problem(f"{label} env wrapper chain is too deep", rule="native-macos-shell")]
-    idx = 1
-    if tokens and executable_name(str(tokens[0])) != "env":
-        idx = 0
-    while idx < len(tokens):
-        item = str(tokens[idx])
-        if item == "--":
-            idx += 1
-            break
-        if is_env_assignment(item):
-            idx += 1
-            continue
-        if item in ENV_SPLIT_OPTIONS:
-            if idx + 1 >= len(tokens):
-                problems.append(problem(f"{label} env split string is missing", rule="native-macos-shell"))
-                return problems
-            if idx + 2 < len(tokens):
-                problems.append(problem(f"{label} env split string has ambiguous trailing arguments", rule="native-macos-shell"))
-                return problems
-            split_tokens, split_problems = split_env_string(str(tokens[idx + 1]), label)
-            problems.extend(split_problems)
-            if not split_problems:
-                if not split_tokens:
-                    problems.append(problem(f"{label} env split string did not contain a command", rule="native-macos-shell"))
-                else:
-                    problems.extend(validate_env_tail(split_tokens, label, depth=depth + 1))
-            return problems
-        if item.startswith("--split-string="):
-            split_tokens, split_problems = split_env_string(item.split("=", 1)[1], label)
-            problems.extend(split_problems)
-            if idx + 1 < len(tokens):
-                problems.append(problem(f"{label} env split string has ambiguous trailing arguments", rule="native-macos-shell"))
-                return problems
-            if not split_problems:
-                if not split_tokens:
-                    problems.append(problem(f"{label} env split string did not contain a command", rule="native-macos-shell"))
-                else:
-                    problems.extend(validate_env_tail(split_tokens, label, depth=depth + 1))
-            return problems
-        if item.startswith("-S") and item != "-S":
-            split_tokens, split_problems = split_env_string(item[2:], label)
-            problems.extend(split_problems)
-            if idx + 1 < len(tokens):
-                problems.append(problem(f"{label} env split string has ambiguous trailing arguments", rule="native-macos-shell"))
-                return problems
-            if not split_problems:
-                if not split_tokens:
-                    problems.append(problem(f"{label} env split string did not contain a command", rule="native-macos-shell"))
-                else:
-                    problems.extend(validate_env_tail(split_tokens, label, depth=depth + 1))
-            return problems
-        if item in ENV_OPERAND_OPTIONS:
-            if idx + 1 >= len(tokens):
-                problems.append(problem(f"{label} env option `{item}` is missing its operand", rule="native-macos-shell"))
-                return problems
-            idx += 2
-            continue
-        if item.startswith(ENV_OPERAND_PREFIXES):
-            idx += 1
-            continue
-        if item.startswith("-P") and item != "-P":
-            idx += 1
-            continue
-        if item.startswith("-u") and item != "-u":
-            idx += 1
-            continue
-        if item.startswith("-C") and item != "-C":
-            idx += 1
-            continue
-        if item.startswith("-"):
-            if item in ENV_NO_OPERAND_OPTIONS:
-                idx += 1
-                continue
-            problems.append(problem(f"{label} env option `{item}` is not allowed", rule="native-macos-shell"))
-            return problems
-        break
-    if idx >= len(tokens):
-        problems.append(problem(f"{label} env wrapper must include a command", rule="native-macos-shell"))
-        return problems
-    target_tokens = [str(item) for item in tokens[idx:]]
-    target = target_tokens[0]
-    target_name = executable_name(target)
-    if target_name in SHELL_EXECUTABLES:
-        problems.append(problem(f"{label} argv must not invoke shell `{target_name}` through env", rule="native-macos-shell"))
-    elif target_name == "env":
-        problems.extend(validate_env_tail(target_tokens, label, depth=depth + 1))
-    return problems
+executable_name = native_argv.executable_name
 
 
 def validate_env_wrapper(argv: Sequence[str], label: str) -> list[MappingLike]:
-    if not argv or executable_name(argv[0]) != "env":
-        return []
-    return validate_env_tail(argv, label, depth=0)
-
-
-def env_shell_wrapper_target(argv: Sequence[str]) -> str:
-    if not argv or executable_name(argv[0]) != "env":
-        return ""
-    return next_env_shell_target([str(item) for item in argv])
-
-
-def next_env_shell_target(tokens: Sequence[str], *, depth: int = 0) -> str:
-    if depth > MAX_ENV_WRAPPER_DEPTH:
-        return ""
-    idx = 1 if tokens and executable_name(str(tokens[0])) == "env" else 0
-    while idx < len(tokens):
-        item = str(tokens[idx])
-        if item == "--":
-            idx += 1
-            break
-        if is_env_assignment(item):
-            idx += 1
-            continue
-        if item in ENV_SPLIT_OPTIONS and idx + 1 < len(tokens):
-            split_tokens, split_problems = split_env_string(str(tokens[idx + 1]), "env")
-            return "" if split_problems else next_env_shell_target(split_tokens, depth=depth + 1)
-        if item.startswith("--split-string="):
-            split_tokens, split_problems = split_env_string(item.split("=", 1)[1], "env")
-            return "" if split_problems else next_env_shell_target(split_tokens, depth=depth + 1)
-        if item.startswith("-S") and item != "-S":
-            split_tokens, split_problems = split_env_string(item[2:], "env")
-            return "" if split_problems else next_env_shell_target(split_tokens, depth=depth + 1)
-        if item in ENV_OPERAND_OPTIONS:
-            idx += 2
-            continue
-        if item.startswith(ENV_OPERAND_PREFIXES) or item.startswith("-P") or item.startswith("-u") or item.startswith("-C"):
-            idx += 1
-            continue
-        if item.startswith("-") and item in ENV_NO_OPERAND_OPTIONS:
-            idx += 1
-            continue
-        break
-    if idx >= len(tokens):
-        return ""
-    target_tokens = [str(item) for item in tokens[idx:]]
-    target = target_tokens[0]
-    target_name = executable_name(target)
-    if target_name in SHELL_EXECUTABLES:
-        return target
-    if target_name == "env":
-        return next_env_shell_target(target_tokens, depth=depth + 1)
-    return ""
+    return native_argv.validate_env_wrapper(
+        argv, label, shell_names=SHELL_EXECUTABLES,
+        make_problem=lambda message: problem(message, rule="native-macos-shell"),
+    )
 
 
 def validate_argv(argv: Sequence[str], label: str) -> list[MappingLike]:
@@ -402,20 +125,15 @@ def resolve_executable(project: Path, argv: Sequence[str]) -> str:
         return ""
     raw = argv[0]
     candidate = Path(raw)
-    if candidate.is_absolute():
-        return str(candidate)
-    if "/" in raw:
-        return str((project / candidate).resolve())
-    found = shutil.which(raw)
-    return found or raw
+    if not candidate.is_absolute() and "/" in raw:
+        candidate = (project / candidate).resolve()
+    return str(candidate) if candidate.is_absolute() else shutil.which(raw) or raw
 
 
 def exit_details(returncode: int | None) -> tuple[int | None, int | None]:
     if returncode is None:
         return None, None
-    if returncode < 0:
-        return None, abs(returncode)
-    return returncode, None
+    return (None, abs(returncode)) if returncode < 0 else (returncode, None)
 
 
 def run_command(
@@ -461,11 +179,8 @@ def run_command(
     write_text(stdout_path, stdout)
     write_text(stderr_path, stderr)
     exit_code, sig = exit_details(returncode)
-    payload: MappingLike = {
-        "schema": RESULT_SCHEMA,
-        "kind": label,
-        "command_argv": list(argv),
-        "shell": False,
+    payload = {
+        **result_payload(label, argv),
         "cwd": ".",
         "executable_path": resolve_executable(project, argv),
         "started_at": started_at,
@@ -533,28 +248,12 @@ def observe_runtime(
     if not argv:
         write_text(stdout_path, "")
         write_text(stderr_path, "run argv was not provided\n")
-        payload: MappingLike = {
-            "schema": RESULT_SCHEMA,
-            "kind": "run",
-            "command_argv": [],
-            "shell": False,
-            "cwd": ".",
-            "pid": None,
-            "executable_path": "",
-            "timeout_seconds": timeout,
-            "timed_out": False,
-            "returncode": None,
-            "exit_code": None,
-            "signal": None,
-            "readiness": {"status": "missing_command"},
-            "stdout_artifact": rel(project, stdout_path),
-            "stderr_artifact": rel(project, stderr_path),
-            "termination": {"attempted": False},
-            "cleanup": {"attempted": False, "success": True},
-            "cleanup_failed": False,
-            "gui_launch_failed": True,
-            "success": False,
-        }
+        payload = descriptor(
+            RUN_MISSING_TEMPLATE, command_argv=[], executable_path="", timeout=timeout,
+            readiness_status="missing_command", stdout_artifact=rel(project, stdout_path),
+            stderr_artifact=rel(project, stderr_path), cleanup_success=True,
+            cleanup_failed=False,
+        )
         return write_json(out_dir / "run.json", payload), payload
 
     stdout_chunks: list[str] = []
@@ -596,29 +295,14 @@ def observe_runtime(
     if proc is None:
         write_text(stdout_path, "")
         write_text(stderr_path, launch_error + "\n")
-        payload = {
-            "schema": RESULT_SCHEMA,
-            "kind": "run",
-            "command_argv": list(argv),
-            "shell": False,
-            "cwd": ".",
-            "pid": None,
-            "executable_path": resolve_executable(project, argv),
-            "timeout_seconds": timeout,
-            "timed_out": False,
-            "returncode": None,
-            "exit_code": None,
-            "signal": None,
-            "readiness": {"status": "launch_failed"},
-            "stdout_artifact": rel(project, stdout_path),
-            "stderr_artifact": rel(project, stderr_path),
-            "termination": {"attempted": False},
-            "cleanup": {"attempted": False, "success": False},
-            "cleanup_failed": True,
-            "gui_launch_failed": True,
-            "success": False,
-            "error": launch_error,
-        }
+        payload = descriptor(
+            RUN_MISSING_TEMPLATE, command_argv=list(argv),
+            executable_path=resolve_executable(project, argv), timeout=timeout,
+            readiness_status="launch_failed", stdout_artifact=rel(project, stdout_path),
+            stderr_artifact=rel(project, stderr_path), cleanup_success=False,
+            cleanup_failed=True,
+        )
+        payload["error"] = launch_error
         return write_json(out_dir / "run.json", payload), payload
 
     threads: list[threading.Thread] = []
@@ -678,34 +362,17 @@ def observe_runtime(
     gui_launch_failed = bool(returncode not in (0, None) and not timed_out and not intentional_stop)
     readiness_ok = readiness.get("status") in {"observed", "not_requested"} or (readiness.get("status") == "missing" and returncode == 0 and not readiness_text)
     success = bool(not timed_out and not cleanup_failed and not gui_launch_failed and readiness_ok)
-    payload = {
-        "schema": RESULT_SCHEMA,
-        "kind": "run",
-        "command_argv": list(argv),
-        "shell": False,
-        "cwd": ".",
-        "pid": proc.pid,
-        "executable_path": resolve_executable(project, argv),
-        "started_at": started_at,
-        "ended_at": now(),
-        "duration_seconds": round(max(0.0, time.monotonic() - started), 3),
-        "timeout_seconds": timeout,
-        "timed_out": timed_out,
-        "signal": sig,
-        "process_returncode": returncode,
-        "process_exit_code": exit_code,
-        "readiness": readiness,
-        "stdout_artifact": rel(project, stdout_path),
-        "stderr_artifact": rel(project, stderr_path),
-        "stdout_bytes": stdout_path.stat().st_size,
-        "stderr_bytes": stderr_path.stat().st_size,
-        "termination": termination,
-        "cleanup": cleanup,
-        "cleanup_failed": cleanup_failed,
-        "gui_launch_failed": gui_launch_failed,
-        "stop_reason": stop_reason,
-        "success": success,
-    }
+    payload = descriptor(
+        RUN_RESULT_TEMPLATE, command_argv=list(argv), pid=proc.pid,
+        executable_path=resolve_executable(project, argv), started_at=started_at,
+        ended_at=now(), duration=round(max(0.0, time.monotonic() - started), 3),
+        timeout=timeout, timed_out=timed_out, signal=sig, returncode=returncode,
+        exit_code=exit_code, readiness=readiness,
+        stdout_artifact=rel(project, stdout_path), stderr_artifact=rel(project, stderr_path),
+        stdout_bytes=stdout_path.stat().st_size, stderr_bytes=stderr_path.stat().st_size,
+        termination=termination, cleanup=cleanup, cleanup_failed=cleanup_failed,
+        gui_launch_failed=gui_launch_failed, stop_reason=stop_reason, success=success,
+    )
     if not intentional_stop or timed_out or cleanup_failed or gui_launch_failed:
         payload["returncode"] = returncode
         payload["exit_code"] = exit_code
@@ -733,14 +400,8 @@ def app_bundle_candidates(project: Path, app_name: str, bundle_id: str) -> list[
 def metadata_matches(metadata: MappingLike, path: Path, app_name: str, bundle_id: str) -> bool:
     if bundle_id and metadata.get("bundle_id") == bundle_id:
         return True
-    if app_name:
-        names = {
-            str(metadata.get("app_name") or ""),
-            str(metadata.get("display_name") or ""),
-            path.stem,
-        }
-        return app_name in names
-    return False
+    names = {str(metadata.get(key) or "") for key in ("app_name", "display_name")}
+    return bool(app_name and app_name in {*names, path.stem})
 
 
 def read_app_bundle_metadata(
@@ -752,19 +413,7 @@ def read_app_bundle_metadata(
     validate_identity: bool = True,
 ) -> tuple[MappingLike, list[MappingLike]]:
     problems: list[MappingLike] = []
-    metadata: MappingLike = {
-        "schema": APP_METADATA_SCHEMA,
-        "metadata_only": True,
-        "app_bundle": "",
-        "info_plist": "",
-        "bundle_id": "",
-        "app_name": "",
-        "display_name": "",
-        "executable_name": "",
-        "executable_path": "",
-        "executable_exists": False,
-        "valid": False,
-    }
+    metadata = dict(APP_METADATA_TEMPLATE)
     try:
         bundle_path = common.safe_project_path(project, raw_path, must_exist=True)
     except ValueError as exc:
@@ -789,12 +438,8 @@ def read_app_bundle_metadata(
         problems.append(problem("app bundle Info.plist must be a dictionary", rule="native-macos-bundle-metadata", path=rel(project, info_plist)))
         return metadata, problems
     metadata.update({
-        "bundle_id": str(plist.get("CFBundleIdentifier") or ""),
-        "app_name": str(plist.get("CFBundleName") or bundle_path.stem),
-        "display_name": str(plist.get("CFBundleDisplayName") or ""),
-        "executable_name": str(plist.get("CFBundleExecutable") or ""),
-        "short_version": str(plist.get("CFBundleShortVersionString") or ""),
-        "bundle_version": str(plist.get("CFBundleVersion") or ""),
+        field: str(plist.get(plist_key) or (bundle_path.stem if field == "app_name" else ""))
+        for field, plist_key in PLIST_FIELDS.items()
     })
     executable_name_value = str(metadata.get("executable_name") or "")
     if executable_name_value:
@@ -827,45 +472,27 @@ def resolve_app_bundle(
         try:
             bundle_path = common.safe_project_path(project, app_bundle, must_exist=True)
         except ValueError as exc:
-            metadata = {"schema": APP_METADATA_SCHEMA, "metadata_only": True, "valid": False}
+            metadata = dict(APP_METADATA_TEMPLATE)
             return None, metadata, [problem(f"app bundle path is invalid: {exc}", rule="native-macos-bundle-metadata")]
         metadata, problems = read_app_bundle_metadata(project, bundle_path, app_name=app_name, bundle_id=bundle_id)
         return bundle_path, metadata, problems
 
     candidates = app_bundle_candidates(project, app_name, bundle_id)
     if not candidates:
-        metadata = {"schema": APP_METADATA_SCHEMA, "metadata_only": True, "valid": False}
+        metadata = dict(APP_METADATA_TEMPLATE)
         return None, metadata, [problem("no app bundle matched the requested app identity", rule="native-macos-bundle-metadata")]
     if len(candidates) > 1:
-        metadata = {
-            "schema": APP_METADATA_SCHEMA,
-            "metadata_only": True,
-            "valid": False,
-            "candidates": [rel(project, item) for item in candidates],
-        }
+        metadata = {**APP_METADATA_TEMPLATE, "candidates": [rel(project, item) for item in candidates]}
         return None, metadata, [problem("app bundle discovery is ambiguous", rule="native-macos-app-discovery")]
     metadata, problems = read_app_bundle_metadata(project, candidates[0], app_name=app_name, bundle_id=bundle_id)
     return candidates[0], metadata, problems
 
 
 def write_notes(out_dir: Path) -> tuple[Path, Path]:
-    signing = {
-        "schema": NOTE_SCHEMA,
-        "kind": "signing",
-        "status": "not_checked",
-        "metadata_only": True,
-        "satisfies_macos_signing_proof": False,
-        "message": "Signing was not checked by the native macOS baseline collector.",
-    }
-    packaging = {
-        "schema": NOTE_SCHEMA,
-        "kind": "packaging",
-        "status": "not_checked",
-        "metadata_only": True,
-        "satisfies_macos_notarization_or_packaging_proof": False,
-        "message": "Packaging and notarization were not checked by the native macOS baseline collector.",
-    }
-    return write_json(out_dir / "signing-note.json", signing), write_json(out_dir / "packaging-note.json", packaging)
+    return tuple(
+        write_json(out_dir / f"{kind}-note.json", NOTE_PAYLOADS[kind])
+        for kind in ("signing", "packaging")
+    )
 
 
 def image_is_valid(path: Path) -> bool:
@@ -883,8 +510,7 @@ def image_is_valid(path: Path) -> bool:
 
 
 def screenshot_permission_failed(stderr: str) -> bool:
-    lowered = stderr.lower()
-    return any(marker in lowered for marker in ("permission", "not authorized", "privacy", "screen recording"))
+    return any(marker in stderr.lower() for marker in SCREENSHOT_PERMISSION_MARKERS)
 
 
 def run_screenshot_command(
@@ -899,10 +525,7 @@ def run_screenshot_command(
     screenshot_path = out_dir / "screenshot.png"
     if not any(SCREENSHOT_PLACEHOLDER in item for item in argv):
         result = {
-            "schema": RESULT_SCHEMA,
-            "kind": "screenshot",
-            "command_argv": list(argv),
-            "shell": False,
+            **result_payload("screenshot", argv),
             "success": False,
             "screenshot_permission_failed": False,
             "error": f"screenshot argv must include {SCREENSHOT_PLACEHOLDER}",
@@ -931,22 +554,20 @@ def run_screenshot_command(
 
 
 def result_problems(project: Path, label: str, result_path: Path, payload: MappingLike) -> list[MappingLike]:
-    out: list[MappingLike] = []
-    result_path_text = rel(project, result_path)
-    if label == "build" and not payload.get("success"):
-        out.append(problem("build command failed", rule="native-macos-build", path=result_path_text))
-    if label == "test" and not payload.get("success"):
-        out.append(problem("test command failed", rule="native-macos-test", path=result_path_text))
-    if label == "run":
-        if payload.get("timed_out") is True:
-            out.append(problem("run command timed out", rule="native-macos-run-timeout", path=result_path_text))
-        if payload.get("gui_launch_failed") is True:
-            out.append(problem("run command failed to launch the macOS app", rule="native-macos-gui-launch", path=result_path_text))
-        if payload.get("cleanup_failed") is True:
-            out.append(problem("runtime cleanup failed", rule="native-macos-cleanup", path=result_path_text))
-        if payload.get("readiness", {}).get("status") == "missing":
-            out.append(problem("runtime readiness signal was not observed", rule="native-macos-readiness", path=result_path_text))
-    return out
+    failures = {
+        "build": [(not payload.get("success"), "build command failed", "native-macos-build")],
+        "test": [(not payload.get("success"), "test command failed", "native-macos-test")],
+        "run": [
+            (payload.get("timed_out") is True, "run command timed out", "native-macos-run-timeout"),
+            (payload.get("gui_launch_failed") is True, "run command failed to launch the macOS app", "native-macos-gui-launch"),
+            (payload.get("cleanup_failed") is True, "runtime cleanup failed", "native-macos-cleanup"),
+            (payload.get("readiness", {}).get("status") == "missing", "runtime readiness signal was not observed", "native-macos-readiness"),
+        ],
+    }
+    return [
+        problem(message, rule=rule, path=rel(project, result_path))
+        for failed, message, rule in failures.get(label, []) if failed
+    ]
 
 
 def add_result_stream_artifacts(project: Path, artifacts: dict[str, Path], prefix: str, payload: MappingLike) -> None:
@@ -961,65 +582,9 @@ def add_result_stream_artifacts(project: Path, artifacts: dict[str, Path], prefi
         artifacts[f"{prefix}_{stream}"] = path
 
 
-def proof_command_argv(
-    *,
-    app_name: str,
-    bundle_id: str,
-    app_bundle: Path | None,
-    project: Path,
-    task: str,
-    artifacts: dict[str, Path],
-) -> list[str]:
-    argv = [
-        "python3",
-        "scripts/star_forge.py",
-        "native-macos-proof",
-        "--project",
-        common.project_cli_arg(project),
-        "--task",
-        task,
-    ]
-    if app_name:
-        argv.extend(["--app-name", app_name])
-    if bundle_id:
-        argv.extend(["--bundle-id", bundle_id])
-    argv.extend(["--build-result", rel(project, artifacts["build"])])
-    argv.extend(["--run-result", rel(project, artifacts["run"])])
-    if "test" in artifacts:
-        argv.extend(["--test-result", rel(project, artifacts["test"])])
-    if "screenshot" in artifacts:
-        argv.extend(["--screenshot", rel(project, artifacts["screenshot"])])
-    if app_bundle is not None:
-        argv.extend(["--app-bundle", rel(project, app_bundle)])
-    argv.extend(["--signing-note", rel(project, artifacts["signing_note"])])
-    argv.extend(["--packaging-note", rel(project, artifacts["packaging_note"])])
-    argv.append("--strict")
-    return argv
-
-
-def trusted_proof_command(command: Sequence[str]) -> list[str]:
-    actual = [str(item) for item in command]
-    if actual and actual[0] == "python3":
-        actual[0] = sys.executable
-    if len(actual) > 1 and actual[1] == "scripts/star_forge.py":
-        actual[1] = str(STAR_FORGE)
-    return actual
-
-
-def record_proof(project: Path, command: Sequence[str]) -> MappingLike:
-    actual = trusted_proof_command(command)
-    proc = subprocess.run(actual, cwd=str(project), shell=False, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
-    return {
-        "returncode": proc.returncode,
-        "stdout": proc.stdout,
-        "stderr": proc.stderr,
-        "command_argv": actual,
-    }
-
-
 def collect(args: argparse.Namespace, command_argv: Sequence[str]) -> tuple[int, MappingLike]:
     project = Path(args.project).resolve()
-    out_dir = common.live_collector_dir(project, args.task, COLLECTOR)
+    out_dir = common.live_collector_dir(project, args.task, NATIVE_FINALIZE["collector"])
     source_hash_before = common.compute_source_hash(project)
     problems: list[MappingLike] = []
     unavailable: list[str] = []
@@ -1029,54 +594,33 @@ def collect(args: argparse.Namespace, command_argv: Sequence[str]) -> tuple[int,
     if not app_name and not bundle_id:
         problems.append(problem("native macOS collection requires --app-name or --bundle-id", rule="native-macos-app-identity"))
 
-    build_argv, parse_problems = parse_argv_json(args.build_command, "build", required=True)
-    problems.extend(parse_problems)
-    run_argv, parse_problems = parse_argv_json(args.run_command, "run", required=False)
-    problems.extend(parse_problems)
-    test_argv, parse_problems = parse_argv_json(args.test_command, "test", required=False)
-    problems.extend(parse_problems)
-    screenshot_argv, parse_problems = parse_argv_json(args.screenshot_command, "screenshot", required=False)
-    problems.extend(parse_problems)
+    commands: dict[str, list[str] | None] = {}
+    for label, field, required in COMMAND_SPECS:
+        commands[label], parse_problems = parse_argv_json(
+            getattr(args, field), label, required=required
+        )
+        problems.extend(parse_problems)
+    build_argv, run_argv, test_argv, screenshot_argv = (
+        commands[name] for name in ("build", "run", "test", "screenshot")
+    )
     required_capabilities = set(args.required_capability or [])
-    if "test" in required_capabilities and not test_argv:
-        problems.append(problem(
-            "the macOS contract requires test evidence, but no test command was provided",
-            rule="native-macos-required-test",
-        ))
-    if "ui-automation" in required_capabilities and not screenshot_argv:
-        problems.append(problem(
-            "the macOS contract requires UI automation evidence, but no UI capture command was provided",
-            rule="native-macos-required-ui-automation",
-        ))
-    if "signing" in required_capabilities:
-        problems.append(problem(
-            "the macOS contract requires signing evidence, but this collector has no signing authority",
-            rule="native-macos-required-signing",
-        ))
-    if "packaging" in required_capabilities:
-        problems.append(problem(
-            "the macOS contract requires packaging evidence, but this collector does not mutate packaging state",
-            rule="native-macos-required-packaging",
-        ))
-    if args.build_macos_apps_unavailable:
-        unavailable.append(BUILD_MACOS_PROVIDER)
-    if args.computer_use_unavailable:
-        unavailable.append(COMPUTER_USE_PROVIDER)
-    if args.build_provider == BUILD_MACOS_PROVIDER and args.build_macos_apps_unavailable:
-        problems.append(problem(
-            "Build macOS Apps cannot be both selected and unavailable",
-            rule="native-macos-capability-route",
-        ))
-    if args.ui_provider == COMPUTER_USE_PROVIDER and args.computer_use_unavailable:
-        problems.append(problem(
-            "Computer Use cannot be both selected and unavailable",
-            rule="native-macos-capability-route",
-        ))
-    if args.ui_provider == COMPUTER_USE_PROVIDER and not screenshot_argv:
-        problems.append(problem(
-            "Computer Use selection requires UI capture evidence",
-            rule="native-macos-capability-route",
-        ))
+    requirement_checks = descriptor(
+        REQUIREMENT_CHECKS, missing_test=not test_argv, missing_ui=not screenshot_argv,
+    )
+    problems.extend(
+        problem(f"the macOS contract requires {message}", rule=f"native-macos-required-{capability}")
+        for capability, missing, message in requirement_checks
+        if capability in required_capabilities and missing
+    )
+    unavailable.extend(provider for field, provider in UNAVAILABLE_BINDINGS if getattr(args, field))
+    route_checks = descriptor(
+        ROUTE_CHECKS,
+        build_conflict=args.build_provider == BUILD_MACOS_PROVIDER and args.build_macos_apps_unavailable,
+        ui_conflict=args.ui_provider == COMPUTER_USE_PROVIDER and args.computer_use_unavailable,
+        ui_evidence_missing=args.ui_provider == COMPUTER_USE_PROVIDER and not screenshot_argv,
+    )
+    problems.extend(problem(message, rule="native-macos-capability-route")
+                    for failed, message in route_checks if failed)
 
     app_bundle_path, metadata, metadata_problems = resolve_app_bundle(
         project,
@@ -1097,7 +641,7 @@ def collect(args: argparse.Namespace, command_argv: Sequence[str]) -> tuple[int,
     if build_argv:
         build_path, build_payload = run_command(project, out_dir, "build", build_argv, timeout=float(args.command_timeout))
     else:
-        build_payload = {"success": False, "schema": RESULT_SCHEMA, "kind": "build", "command_argv": []}
+        build_payload = result_payload("build", [], success=False)
         build_path = write_json(out_dir / "build.json", build_payload)
     artifacts["build"] = build_path
     add_result_stream_artifacts(project, artifacts, "build", build_payload)
@@ -1114,31 +658,14 @@ def collect(args: argparse.Namespace, command_argv: Sequence[str]) -> tuple[int,
             cleanup_timeout=float(args.cleanup_timeout),
         )
     else:
-        run_payload = {
-            "schema": RESULT_SCHEMA,
-            "kind": "run",
-            "command_argv": list(run_argv or []),
-            "shell": False,
-            "success": False,
-            "status": "skipped",
-            "reason": "build_failed",
-            "pid": None,
-            "executable_path": resolve_executable(project, run_argv or []),
-            "timeout_seconds": float(args.run_timeout),
-            "timed_out": False,
-            "returncode": None,
-            "exit_code": None,
-            "signal": None,
-            "readiness": {"status": "not_run"},
-            "termination": {"attempted": False},
-            "cleanup": {"attempted": False, "success": True},
-            "cleanup_failed": False,
-            "gui_launch_failed": False,
-        }
         write_text(out_dir / "stdout.txt", "")
         write_text(out_dir / "stderr.txt", "")
-        run_payload["stdout_artifact"] = rel(project, out_dir / "stdout.txt")
-        run_payload["stderr_artifact"] = rel(project, out_dir / "stderr.txt")
+        run_payload = descriptor(
+            RUN_SKIPPED_TEMPLATE, command_argv=list(run_argv or []),
+            executable_path=resolve_executable(project, run_argv or []),
+            timeout=float(args.run_timeout), stdout_artifact=rel(project, out_dir / "stdout.txt"),
+            stderr_artifact=rel(project, out_dir / "stderr.txt"),
+        )
         run_path = write_json(out_dir / "run.json", run_payload)
     artifacts["run"] = run_path
     artifacts["stdout"] = out_dir / "stdout.txt"
@@ -1149,7 +676,7 @@ def collect(args: argparse.Namespace, command_argv: Sequence[str]) -> tuple[int,
         if build_payload.get("success"):
             test_path, test_payload = run_command(project, out_dir, "test", test_argv, timeout=float(args.command_timeout))
         else:
-            test_payload = {"success": False, "schema": RESULT_SCHEMA, "kind": "test", "command_argv": list(test_argv), "status": "skipped", "reason": "build_failed"}
+            test_payload = result_payload("test", test_argv, success=False, status="skipped", reason="build_failed")
             test_path = write_json(out_dir / "test.json", test_payload)
         artifacts["test"] = test_path
         add_result_stream_artifacts(project, artifacts, "test", test_payload)
@@ -1171,184 +698,67 @@ def collect(args: argparse.Namespace, command_argv: Sequence[str]) -> tuple[int,
         problems.extend(screenshot_problems)
         unavailable.append("screenshot")
 
-    source_hash_after = common.compute_source_hash(project)
-    app_bundle_hash = tree_sha256(app_bundle_path)
-    route_status: MappingLike = {
-        "required": sorted(required_capabilities),
-        "build": {
-            "provider": args.build_provider,
-            "tool": resolve_executable(project, build_argv or []),
-            "status": "passed" if build_payload.get("success") else "failed",
-        },
-        "run": {
-            "provider": args.ui_provider,
-            "tool": resolve_executable(project, run_argv or []),
-            "status": "passed" if run_payload.get("success") else "failed",
-        },
-        "ui_automation": {
-            "provider": args.ui_provider,
-            "status": "passed" if screenshot_path else "not-collected",
-        },
-        "test": {
-            "provider": args.test_provider,
-            "status": (
-                "passed"
-                if test_argv and test_payload.get("success")
-                else "failed"
-                if test_argv
-                else "not-required"
-                if "test" not in required_capabilities
-                else "missing"
-            ),
-        },
-        "signing": {
-            "provider": args.signing_provider,
-            "status": "blocked-no-authority" if "signing" in required_capabilities else "not-required",
-        },
-        "packaging": {
-            "provider": args.packaging_provider,
-            "status": "blocked-no-mutation" if "packaging" in required_capabilities else "not-required",
-        },
-        "build_macos_apps": "unavailable" if args.build_macos_apps_unavailable else "availability-not-reported",
-        "computer_use": (
-            "used"
-            if args.ui_provider == COMPUTER_USE_PROVIDER
-            else "unavailable"
-            if args.computer_use_unavailable
-            else "availability-not-reported"
-        ),
-    }
-    summary: MappingLike = {
-        "app_identity": {
-            "app_name": app_name or metadata.get("app_name") or "",
-            "bundle_id": bundle_id or metadata.get("bundle_id") or "",
-        },
-        "app_bundle": rel(project, app_bundle_path) if app_bundle_path else "",
-        "app_bundle_metadata": rel(project, metadata_path),
-        "runtime_observation": {
-            "pid": run_payload.get("pid"),
-            "executable_path": run_payload.get("executable_path"),
-            "readiness": run_payload.get("readiness"),
-            "termination": run_payload.get("termination"),
-            "cleanup": run_payload.get("cleanup"),
-        },
-        "signing_note": "not_checked",
-        "packaging_note": "not_checked",
-        "app_bundle_hash": app_bundle_hash,
-        "capability_route": {
-            "id": ROUTE,
-            **route_status,
-        },
-    }
+    test_status = ("passed" if test_argv and test_payload.get("success") else
+                   "failed" if test_argv else
+                   "not-required" if "test" not in required_capabilities else "missing")
+    route_status = descriptor(
+        ROUTE_STATUS_TEMPLATE, required=sorted(required_capabilities),
+        build_provider=args.build_provider, build_tool=resolve_executable(project, build_argv or []),
+        build_status="passed" if build_payload.get("success") else "failed",
+        ui_provider=args.ui_provider, run_tool=resolve_executable(project, run_argv or []),
+        run_status="passed" if run_payload.get("success") else "failed",
+        ui_status="passed" if screenshot_path else "not-collected",
+        test_provider=args.test_provider, test_status=test_status,
+        signing_provider=args.signing_provider,
+        signing_status="blocked-no-authority" if "signing" in required_capabilities else "not-required",
+        packaging_provider=args.packaging_provider,
+        packaging_status="blocked-no-mutation" if "packaging" in required_capabilities else "not-required",
+        build_macos_apps="unavailable" if args.build_macos_apps_unavailable else "availability-not-reported",
+        computer_use=("used" if args.ui_provider == COMPUTER_USE_PROVIDER else
+                      "unavailable" if args.computer_use_unavailable else "availability-not-reported"),
+    )
+    summary = descriptor(
+        SUMMARY_TEMPLATE, app_name=app_name or metadata.get("app_name") or "",
+        bundle_id=bundle_id or metadata.get("bundle_id") or "",
+        app_bundle=rel(project, app_bundle_path) if app_bundle_path else "",
+        app_bundle_metadata=rel(project, metadata_path), pid=run_payload.get("pid"),
+        executable_path=run_payload.get("executable_path"),
+        readiness=run_payload.get("readiness"), termination=run_payload.get("termination"),
+        cleanup=run_payload.get("cleanup"), app_bundle_hash=tree_sha256(app_bundle_path),
+        capability_route={"id": ROUTE, **route_status},
+    )
     runtime_asset_hash = common.compute_runtime_asset_hash(project)
-    manifest_path = common.write_live_manifest(
-        project,
-        task=args.task,
-        collector=COLLECTOR,
-        command_argv=list(command_argv),
+    provider = str(args.build_provider)
+    provenance = descriptor(
+        ENVELOPE_PROVENANCE_TEMPLATE, provider=provider, capabilities=dict(route_status),
+        build_status=("used" if provider == BUILD_MACOS_PROVIDER else
+                      "unavailable" if route_status.get("build_macos_apps") == "unavailable"
+                      else "not-selected"),
+        computer_use_status=str(route_status.get("computer_use") or "not-selected"),
+        project_workflow_status="used" if provider == PROJECT_WORKFLOW_PROVIDER else "not-selected",
+    )
+    return native.finalize_collection(
+        project, out_dir, task=args.task, command_argv=command_argv, artifacts=artifacts,
+        summary=summary, problems=problems, unavailable=unavailable,
+        source_hash_before=source_hash_before, runtime_asset_hash=runtime_asset_hash,
         tool_versions={"python": sys.version.split()[0], "platform": sys.platform},
-        artifacts=artifacts,
-        summary=summary,
-        degraded=bool(unavailable),
-        unavailable_capabilities=unavailable,
-        problems=problems,
-        source_hash_before=source_hash_before,
-        source_hash_after=source_hash_after,
-        runtime_asset_hash=runtime_asset_hash,
+        provider=provider, provenance=provenance, config=NATIVE_FINALIZE,
+        output_template=OUTPUT_TEMPLATE,
+        values={"app_name": app_name,
+                "bundle_id": bundle_id or str(metadata.get("bundle_id") or ""),
+                "app_bundle_path": app_bundle_path},
+        record=args.record, script_path=STAR_FORGE,
     )
-    envelope_path, envelope = write_evidence_envelope(
-        project,
-        out_dir,
-        manifest_path,
-        provider=str(args.build_provider),
-        route_status=route_status,
-    )
-    proof_argv = proof_command_argv(
-        app_name=app_name,
-        bundle_id=bundle_id or str(metadata.get("bundle_id") or ""),
-        app_bundle=app_bundle_path,
-        project=project,
-        task=args.task,
-        artifacts=artifacts,
-    )
-    output = {
-        "schema": "star-forge.native-macos-collector.v1",
-        "collector": COLLECTOR,
-        "task": args.task,
-        "artifact_dir": rel(project, out_dir),
-        "manifest": rel(project, manifest_path),
-        "evidence": rel(project, envelope_path),
-        "evidence_schema": envelope["schema"],
-        "evidence_verdict": envelope["verdict"],
-        "degraded": bool(unavailable),
-        "unavailable_capabilities": sorted(set(unavailable)),
-        "problems": problems,
-        "proof_command_argv": proof_argv,
-        "proof_command": shlex.join(proof_argv),
-    }
-    if args.record:
-        record = record_proof(project, proof_argv)
-        output["record"] = record
-        if int(record.get("returncode") or 0) != 0:
-            problems.append(problem(
-                f"native macOS proof recording failed with exit code {record.get('returncode')}",
-                rule="native-macos-record",
-            ))
-    return (1 if problems or unavailable else 0), output
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Collect native macOS baseline artifacts for Star Forge")
-    parser.add_argument("--project", default=".")
-    parser.add_argument("--task", required=True)
-    parser.add_argument("--app-name", default="")
-    parser.add_argument("--bundle-id", default="")
-    parser.add_argument("--build-command", "--build-argv", dest="build_command", required=True)
-    parser.add_argument("--run-command", "--run-argv", dest="run_command", default="")
-    parser.add_argument("--test-command", "--test-argv", dest="test_command", default="")
-    parser.add_argument("--screenshot-command", "--screenshot-argv", dest="screenshot_command", default="")
-    parser.add_argument("--app-bundle", default="")
-    parser.add_argument("--readiness-text", default="")
-    parser.add_argument("--command-timeout", type=float, default=60.0)
-    parser.add_argument("--run-timeout", type=float, default=15.0)
-    parser.add_argument("--screenshot-timeout", type=float, default=10.0)
-    parser.add_argument("--observe-seconds", type=float, default=0.25)
-    parser.add_argument("--cleanup-timeout", type=float, default=2.0)
-    parser.add_argument(
-        "--required-capability",
-        action="append",
-        choices=sorted(CONTRACT_CAPABILITIES),
-        default=[],
+    arguments = descriptor(
+        PARSER_ARGUMENTS, contract_capabilities=sorted(CONTRACT_CAPABILITIES),
+        build_providers=[BUILD_MACOS_PROVIDER, PROJECT_WORKFLOW_PROVIDER],
+        ui_providers=[COMPUTER_USE_PROVIDER, PROJECT_WORKFLOW_PROVIDER],
+        project_provider=PROJECT_WORKFLOW_PROVIDER, build_provider=BUILD_MACOS_PROVIDER,
     )
-    parser.add_argument(
-        "--build-provider",
-        choices=[BUILD_MACOS_PROVIDER, PROJECT_WORKFLOW_PROVIDER],
-        default=PROJECT_WORKFLOW_PROVIDER,
-    )
-    parser.add_argument(
-        "--ui-provider",
-        choices=[COMPUTER_USE_PROVIDER, PROJECT_WORKFLOW_PROVIDER],
-        default=PROJECT_WORKFLOW_PROVIDER,
-    )
-    parser.add_argument(
-        "--test-provider",
-        choices=[BUILD_MACOS_PROVIDER, PROJECT_WORKFLOW_PROVIDER],
-        default=PROJECT_WORKFLOW_PROVIDER,
-    )
-    parser.add_argument(
-        "--signing-provider",
-        choices=[BUILD_MACOS_PROVIDER, PROJECT_WORKFLOW_PROVIDER],
-        default=BUILD_MACOS_PROVIDER,
-    )
-    parser.add_argument(
-        "--packaging-provider",
-        choices=[BUILD_MACOS_PROVIDER, PROJECT_WORKFLOW_PROVIDER],
-        default=BUILD_MACOS_PROVIDER,
-    )
-    parser.add_argument("--build-macos-apps-unavailable", action="store_true")
-    parser.add_argument("--computer-use-unavailable", action="store_true")
-    parser.add_argument("--record", action="store_true")
-    return parser
+    return native.build_parser("Collect native macOS baseline artifacts for Star Forge", arguments)
 
 
 def main(argv: Sequence[str] | None = None) -> int:

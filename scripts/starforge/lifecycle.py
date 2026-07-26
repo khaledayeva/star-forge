@@ -6,70 +6,42 @@ filesystem, subprocess, or network mutation.
 """
 
 from __future__ import annotations
+from .policy_data import value as _policy_value
 
 import datetime as dt
 import hashlib
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import PurePosixPath
 from typing import Any, Mapping, Sequence
-
-
+from .validation import boolean_fields, flag as _flag, mapping_sections, rules
 FOUNDATION_CONTRACT_SCHEMA = "star-forge.foundation-contract.v1"
 FOUNDATION_EVIDENCE_SCHEMA = "star-forge.foundation-evidence.v1"
 FOUNDATION_GATE_SCHEMA = "star-forge.foundation-gate.v1"
 DELIVERY_CONTRACT_SCHEMA = "star-forge.delivery-contract.v1"
 DELIVERY_EVIDENCE_SCHEMA = "star-forge.delivery-evidence.v1"
 DELIVERY_GATE_SCHEMA = "star-forge.delivery-gate.v1"
-TARGET_LIFECYCLE = (
-    "intake",
-    "design",
-    "plan",
-    "foundation",
-    "build",
-    "review",
-    "deliver",
-    "done",
-)
+TARGET_LIFECYCLE = _policy_value('lifecycle.TARGET_LIFECYCLE')
 LEGACY_LIFECYCLE = ("plan", "build", "review", "done")
-COMPATIBILITY_PHASES = frozenset(
-    {*TARGET_LIFECYCLE, *LEGACY_LIFECYCLE, "setup", "blocked", "amend"}
-)
+COMPATIBILITY_PHASES = frozenset({*TARGET_LIFECYCLE, *LEGACY_LIFECYCLE, "setup", "blocked", "amend"})
 FOUNDATION_CONTRACT_PATH = ".starforge/foundation/contract.json"
 FOUNDATION_EVIDENCE_PATH = ".starforge/foundation/evidence.json"
 DELIVERY_CONTRACT_PATH = ".starforge/delivery/contract.json"
 DELIVERY_EVIDENCE_PATH = ".starforge/delivery/evidence.json"
-
 REQUIREMENT_STATES = frozenset({"requested", "not-applicable", "blocking"})
 EVIDENCE_STATES = frozenset({"satisfied", "not-applicable", "blocking"})
-FOUNDATION_REQUIREMENTS = (
-    "source_scaffold",
-    "local_git",
-    "github_repository",
-    "remote_origin",
-    "default_branch",
-    "initial_commit",
-    "ci",
-    "environment_example",
-    "secret_scan",
-    "dependency_audit",
-    "security_plan",
-)
-DELIVERY_REQUIREMENTS = (
-    "source_binding",
-    "repository_commit",
-    "delivery_identity",
-    "live_url",
-    "smoke_result",
-)
-GENERIC_DELIVERY_TARGETS = frozenset(
-    {"source-only", "private-repo", "preview", "production", "package"}
-)
+FOUNDATION_REQUIREMENTS = _policy_value('lifecycle.FOUNDATION_REQUIREMENTS')
+DELIVERY_REQUIREMENTS = _policy_value('lifecycle.DELIVERY_REQUIREMENTS')
+GENERIC_DELIVERY_TARGETS = frozenset({"source-only", "private-repo", "preview", "production", "package"})
 WEB_DELIVERY_TARGETS = frozenset({"preview", "production"})
 WEB_DELIVERY_PROVIDERS = frozenset({"sites", "vercel"})
 DELIVERY_IDENTITY_KINDS = frozenset({
-    "source-handoff", "repository", "deployment", "package", "platform-release",
+    "source-handoff",
+    "repository",
+    "deployment",
+    "package",
+    "platform-release",
 })
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -93,17 +65,11 @@ _GITHUB_PROVIDERS = frozenset({"github-connector", "gh-cli"})
 _ADOPTION_PROVIDERS = frozenset({"github-connector", "gh-readonly"})
 _NAMED_TARGET_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{1,63}$")
 _IDENTITY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,255}$")
-_SITES_FIT_RE = re.compile(
-    r"\b(?:simple|static|internal|landing|documentation|docs|portal|dashboard)\b"
-)
-_VERCEL_FIT_RE = re.compile(
-    r"\b(?:next(?:\.js)?|react|full[- ]stack|server[- ]rendered|ssr|ai|production)\b"
-)
-
+_SITES_FIT_RE = re.compile(r"\b(?:simple|static|internal|landing|documentation|docs|portal|dashboard)\b")
+_VERCEL_FIT_RE = re.compile(r"\b(?:next(?:\.js)?|react|full[- ]stack|server[- ]rendered|ssr|ai|production)\b")
 
 class LifecycleContractError(ValueError):
     """A lifecycle contract cannot be represented safely."""
-
 
 def resolve_phase(
     *,
@@ -122,71 +88,49 @@ def resolve_phase(
     completion_complete: bool,
 ) -> str:
     """Resolve one canonical phase while preserving the v0.3 phase sequence.
-
     Compatibility projects never acquire intake, design, foundation, or deliver
     gates retroactively. Modern projects advance only when each target lifecycle
     gate has passed. Amend remains an out-of-band re-entry after planning and
     foundation are established.
     """
-
-    if not setup_complete:
-        return "setup"
-    if blocked:
-        return "blocked"
+    transitions = [
+        ("setup", not setup_complete),
+        ("blocked", blocked),
+    ]
     if legacy:
-        if not plan_complete:
-            return "plan"
-        if amendment_required:
-            return "amend"
-        if not build_complete:
-            return "build"
-        if not review_complete:
-            return "review"
-        return "done" if completion_complete else "review"
-
-    if not intake_complete:
-        return "intake"
-    if design_required is not False and not design_complete:
-        return "design"
-    if not plan_complete:
-        return "plan"
-    if not foundation_complete:
-        return "foundation"
-    if amendment_required:
-        return "amend"
-    if not build_complete:
-        return "build"
-    if not review_complete:
-        return "review"
-    if not delivery_complete:
-        return "deliver"
+        transitions.extend([
+            ("plan", not plan_complete), ("amend", amendment_required),
+            ("build", not build_complete), ("review", not review_complete),
+            ("review", not completion_complete),
+        ])
+    else:
+        transitions.extend([
+            ("intake", not intake_complete),
+            ("design", design_required is not False and not design_complete),
+            ("plan", not plan_complete), ("foundation", not foundation_complete),
+            ("amend", amendment_required), ("build", not build_complete),
+            ("review", not review_complete), ("deliver", not delivery_complete),
+        ])
+    for phase, active in transitions:
+        if active:
+            return phase
     return "done"
-
 
 @dataclass(frozen=True)
 class FoundationGate:
     """Deterministic decision about whether feature work may begin."""
-
     status: str
     ready_for_feature_work: bool
     source_hash: str | None
     contract_sha256: str | None
     checks: Mapping[str, str]
     blockers: tuple[str, ...]
-
     def to_dict(self) -> dict[str, Any]:
-        return {
-            "schema": FOUNDATION_GATE_SCHEMA, "status": self.status,
-            "ready_for_feature_work": self.ready_for_feature_work,
-            "source_hash": self.source_hash, "contract_sha256": self.contract_sha256,
-            "checks": dict(self.checks), "blockers": list(self.blockers),
-        }
-
+        return _gate_dict(self, FOUNDATION_GATE_SCHEMA)
 
 @dataclass(frozen=True)
 class DeliveryGate:
     """Deterministic decision about strict completion eligibility."""
-
     status: str
     delivery_satisfied: bool
     ready_for_completion: bool
@@ -197,35 +141,21 @@ class DeliveryGate:
     provider: str | None
     checks: Mapping[str, str]
     blockers: tuple[str, ...]
-
     def to_dict(self) -> dict[str, Any]:
-        return {
-            "schema": DELIVERY_GATE_SCHEMA, "status": self.status,
-            "delivery_satisfied": self.delivery_satisfied,
-            "ready_for_completion": self.ready_for_completion,
-            "source_hash": self.source_hash, "repository_commit": self.repository_commit,
-            "contract_sha256": self.contract_sha256, "target": self.target,
-            "provider": self.provider, "checks": dict(self.checks),
-            "blockers": list(self.blockers),
-        }
+        return _gate_dict(self, DELIVERY_GATE_SCHEMA)
 
+def _gate_dict(gate: Any, schema: str) -> dict[str, Any]:
+    payload = asdict(gate)
+    payload["checks"], payload["blockers"] = dict(gate.checks), list(gate.blockers)
+    return {"schema": schema, **payload}
 
 def _requirement(state: str, reason: str) -> dict[str, str]:
     return {"state": state, "reason": reason}
 
-
 def _optional_requirement(required: bool, required_reason: str, absent_reason: str) -> dict[str, str]:
     return _requirement("requested" if required else "not-applicable", required_reason if required else absent_reason)
 
-
-def _flag(problems: list[str], condition: bool, message: str) -> None:
-    if condition:
-        problems.append(message)
-
-
-def _requirement_problems(
-    requirements: Mapping[str, Any], names: Sequence[str]
-) -> list[str]:
+def _requirement_problems(requirements: Mapping[str, Any], names: Sequence[str]) -> list[str]:
     problems: list[str] = []
     missing = [name for name in names if name not in requirements]
     extra = sorted(str(name) for name in set(requirements) - set(names))
@@ -249,7 +179,6 @@ def _requirement_problems(
         )
     return problems
 
-
 def make_foundation_contract(
     *,
     github_requested: bool,
@@ -265,11 +194,9 @@ def make_foundation_contract(
     security_plan_required: bool = True,
 ) -> dict[str, Any]:
     """Build a Foundation Contract from an approved Repository Contract.
-
     A missing authorization or identity is represented as a blocking state so
     the caller can present one honest foundation blocker. No operation is run.
     """
-
     mode = str(repository_mode or "").strip().lower()
     expected_visibility = str(visibility or "").strip().lower()
     repo_blocker = ""
@@ -284,13 +211,8 @@ def make_foundation_contract(
             repo_blocker = "new GitHub repositories must be private"
         elif mode == "adopt" and expected_visibility not in {"private", "public"}:
             repo_blocker = "adopted repository visibility must be explicit"
-
-    repository_state = "not-applicable" if not github_requested else (
-        "blocking" if repo_blocker else "requested"
-    )
-    github_reason = "approved contract does not request GitHub" if not github_requested else (
-        repo_blocker or "approved Repository Contract requests GitHub"
-    )
+    repository_state = "not-applicable" if not github_requested else ("blocking" if repo_blocker else "requested")
+    github_reason = "approved contract does not request GitHub" if not github_requested else (repo_blocker or "approved Repository Contract requests GitHub")
     requirements = {
         "source_scaffold": _requirement("requested", "source scaffold must exist before feature work"),
         "local_git": _requirement("requested", "local Git initialization is an automatic foundation outcome"),
@@ -299,19 +221,10 @@ def make_foundation_contract(
         "default_branch": _requirement("requested", "the initial commit must establish the approved default branch"),
         "initial_commit": _requirement("requested", "foundation artifacts must be committed before feature work"),
         "ci": _requirement("requested", "CI configuration must be installed before feature work"),
-        "environment_example": _optional_requirement(
-            environment_example_required, "an environment example is required",
-            "the project has no configurable environment",
-        ),
+        "environment_example": _optional_requirement(environment_example_required, "an environment example is required", "the project has no configurable environment"),
         "secret_scan": _requirement("requested", "the committed foundation requires a clean secret scan"),
-        "dependency_audit": _optional_requirement(
-            dependency_audit_required, "declared dependencies require an audit",
-            "the foundation declares no third-party dependencies",
-        ),
-        "security_plan": _optional_requirement(
-            security_plan_required, "risk flags require a threat model or security plan",
-            "approved risk flags make a security plan not applicable",
-        ),
+        "dependency_audit": _optional_requirement(dependency_audit_required, "declared dependencies require an audit", "the foundation declares no third-party dependencies"),
+        "security_plan": _optional_requirement(security_plan_required, "risk flags require a threat model or security plan", "approved risk flags make a security plan not applicable"),
     }
     return {
         "schema": FOUNDATION_CONTRACT_SCHEMA,
@@ -327,34 +240,28 @@ def make_foundation_contract(
             "create_fallback": "gh repo create --private" if github_requested else "not-applicable",
             "mutation_policy": "never-change-visibility",
         },
-        "expectations": {"default_branch": default_branch, "ci_path": ci_path},
+        "expectations": {
+            "default_branch": default_branch,
+            "ci_path": ci_path
+        },
         "requirements": requirements,
     }
-
 
 def _safe_relative_path(value: object) -> bool:
     if not isinstance(value, str) or not value or "\\" in value:
         return False
     path = PurePosixPath(value)
-    return (
-        not path.is_absolute()
-        and value not in {".", ".."}
-        and all(part not in {"", ".", ".."} for part in path.parts)
-    )
-
+    return (not path.is_absolute() and value not in {".", ".."} and all(part not in {"", ".", ".."} for part in path.parts))
 
 def _valid_timestamp(value: object) -> bool:
     if not isinstance(value, str) or not value.strip():
         return False
     candidate = value.strip()
     try:
-        parsed = dt.datetime.fromisoformat(
-            candidate[:-1] + "+00:00" if candidate.endswith("Z") else candidate
-        )
+        parsed = dt.datetime.fromisoformat(candidate[:-1] + "+00:00" if candidate.endswith("Z") else candidate)
     except ValueError:
         return False
     return parsed.tzinfo is not None and parsed.utcoffset() is not None
-
 
 def _secret_problems(value: object, path: str = "evidence") -> list[str]:
     problems: list[str] = []
@@ -376,42 +283,23 @@ def _secret_problems(value: object, path: str = "evidence") -> list[str]:
             problems.append(f"{path} must not embed credentials in a URL")
     return problems
 
-
 def validate_foundation_contract(contract: object) -> list[str]:
     """Validate contract structure, states, authority, and mutation boundaries."""
-
     if not isinstance(contract, Mapping):
         return ["foundation contract must be an object"]
     problems: list[str] = []
     if contract.get("schema") != FOUNDATION_CONTRACT_SCHEMA:
         problems.append(f"schema must be {FOUNDATION_CONTRACT_SCHEMA}")
-
-    repository = contract.get("repository")
-    expectations = contract.get("expectations")
-    requirements = contract.get("requirements")
-    if not isinstance(repository, Mapping):
-        problems.append("repository must be an object")
-        repository = {}
-    if not isinstance(expectations, Mapping):
-        problems.append("expectations must be an object")
-        expectations = {}
-    if not isinstance(requirements, Mapping):
-        problems.append("requirements must be an object")
-        requirements = {}
-
+    sections = mapping_sections(contract, ("repository", "expectations", "requirements"), problems)
+    repository, expectations, requirements = sections["repository"], sections["expectations"], sections["requirements"]
     problems.extend(_requirement_problems(requirements, FOUNDATION_REQUIREMENTS))
-
     branch = expectations.get("default_branch")
     if not isinstance(branch, str) or not _BRANCH_RE.fullmatch(branch):
         problems.append("expectations.default_branch is invalid")
     ci_path = expectations.get("ci_path")
-    if (
-        not _safe_relative_path(ci_path)
-        or PurePosixPath(str(ci_path)).parent != PurePosixPath(".github/workflows")
-        or PurePosixPath(str(ci_path)).suffix not in {".yml", ".yaml"}
-    ):
+    if (not _safe_relative_path(ci_path) or PurePosixPath(str(ci_path)).parent != PurePosixPath(".github/workflows") or
+            PurePosixPath(str(ci_path)).suffix not in {".yml", ".yaml"}):
         problems.append("expectations.ci_path must be a workflow YAML path")
-
     github_requested = repository.get("github_requested")
     repo_state = repository.get("state")
     if not isinstance(github_requested, bool):
@@ -422,7 +310,6 @@ def validate_foundation_contract(contract: object) -> list[str]:
         item = requirements.get(name)
         if isinstance(item, Mapping) and item.get("state") != repo_state:
             problems.append(f"requirement {name} must match repository.state")
-
     if repository.get("mutation_policy") != "never-change-visibility":
         problems.append("repository visibility mutation must be forbidden")
     if github_requested:
@@ -449,26 +336,18 @@ def validate_foundation_contract(contract: object) -> list[str]:
             problems.append("repository must be not-applicable when GitHub is not requested")
         if repository.get("write_authorized") is not False:
             problems.append("local-only foundation cannot claim repository write authority")
-
     problems.extend(_secret_problems(contract, "contract"))
     return problems
 
-
 def foundation_contract_sha256(contract: Mapping[str, Any]) -> str:
     """Hash a valid contract using deterministic JSON encoding."""
-
     problems = validate_foundation_contract(contract)
     if problems:
         raise LifecycleContractError("; ".join(problems))
-    serialized = json.dumps(
-        contract, ensure_ascii=False, separators=(",", ":"), sort_keys=True
-    ).encode("utf-8")
+    serialized = json.dumps(contract, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
     return hashlib.sha256(serialized).hexdigest()
 
-
-def _evidence_detail(
-    evidence: Mapping[str, Any], name: str
-) -> tuple[Mapping[str, Any], Mapping[str, Any]]:
+def _evidence_detail(evidence: Mapping[str, Any], name: str) -> tuple[Mapping[str, Any], Mapping[str, Any]]:
     checks = evidence.get("checks")
     if not isinstance(checks, Mapping):
         return {}, {}
@@ -477,7 +356,6 @@ def _evidence_detail(
         return {}, {}
     detail = record.get("detail")
     return record, detail if isinstance(detail, Mapping) else {}
-
 
 def _artifact_problem(
     detail: Mapping[str, Any],
@@ -496,18 +374,13 @@ def _artifact_problem(
         return "artifact must be committed"
     return None
 
-
 def _github_remote_matches(remote_url: object, owner: str, repository: str) -> bool:
     if not isinstance(remote_url, str) or not remote_url:
         return False
     if re.match(r"^https?://[^/@\s]+@", remote_url):
         return False
     escaped = re.escape(f"{owner}/{repository}")
-    return bool(
-        re.fullmatch(rf"https://github\.com/{escaped}(?:\.git)?", remote_url)
-        or re.fullmatch(rf"git@github\.com:{escaped}(?:\.git)?", remote_url)
-    )
-
+    return bool(re.fullmatch(rf"https://github\.com/{escaped}(?:\.git)?", remote_url) or re.fullmatch(rf"git@github\.com:{escaped}(?:\.git)?", remote_url))
 
 def _specific_evidence_problems(
     name: str,
@@ -518,7 +391,6 @@ def _specific_evidence_problems(
     problems: list[str] = []
     repository = contract["repository"]
     expectations = contract["expectations"]
-
     if name == "source_scaffold":
         artifacts = detail.get("artifacts")
         if not isinstance(artifacts, list) or not artifacts:
@@ -563,9 +435,7 @@ def _specific_evidence_problems(
     elif name == "remote_origin":
         if detail.get("remote") != "origin":
             problems.append("GitHub remote must be named origin")
-        if not _github_remote_matches(
-            detail.get("url"), repository["owner"], repository["name"]
-        ):
+        if not _github_remote_matches(detail.get("url"), repository["owner"], repository["name"]):
             problems.append("origin URL does not match the approved GitHub identity")
     elif name == "default_branch":
         if detail.get("name") != expectations["default_branch"]:
@@ -591,9 +461,7 @@ def _specific_evidence_problems(
         if detail.get("tree_source_hash") != current_source_hash:
             problems.append("initial commit tree is not bound to the current source hash")
     elif name == "ci":
-        artifact_problem = _artifact_problem(
-            detail, required_path=expectations["ci_path"]
-        )
+        artifact_problem = _artifact_problem(detail, required_path=expectations["ci_path"])
         if artifact_problem:
             problems.append("CI " + artifact_problem)
     elif name == "environment_example":
@@ -623,7 +491,6 @@ def _specific_evidence_problems(
             problems.append("security evidence must be a threat model or security plan")
     return problems
 
-
 def evaluate_foundation(
     contract: Mapping[str, Any],
     evidence: Mapping[str, Any],
@@ -631,7 +498,6 @@ def evaluate_foundation(
     current_source_hash: str,
 ) -> FoundationGate:
     """Gate feature work on complete, current, non-secret foundation evidence."""
-
     blockers: list[str] = []
     checks: dict[str, str] = {}
     contract_problems = validate_foundation_contract(contract)
@@ -645,7 +511,6 @@ def evaluate_foundation(
             checks=checks,
             blockers=tuple(blockers),
         )
-
     contract_hash = foundation_contract_sha256(contract)
     if not isinstance(evidence, Mapping):
         blockers.append("foundation evidence must be an object")
@@ -661,7 +526,6 @@ def evaluate_foundation(
     if evidence.get("contract_sha256") != contract_hash:
         blockers.append("foundation evidence is not bound to the current contract")
     blockers.extend(_secret_problems(evidence))
-
     evidence_checks = evidence.get("checks")
     if not isinstance(evidence_checks, Mapping):
         blockers.append("foundation evidence checks must be an object")
@@ -669,7 +533,6 @@ def evaluate_foundation(
     extra_checks = sorted(str(key) for key in set(evidence_checks) - set(FOUNDATION_REQUIREMENTS))
     if extra_checks:
         blockers.append("unknown foundation evidence checks: " + ", ".join(extra_checks))
-
     for name in FOUNDATION_REQUIREMENTS:
         requirement = contract["requirements"][name]
         required_state = requirement["state"]
@@ -686,31 +549,22 @@ def evaluate_foundation(
             if evidence_state != "not-applicable":
                 blockers.append(f"{name}: evidence must record not-applicable")
             continue
-
         checks[name] = "satisfied" if evidence_state == "satisfied" else "blocking"
         if evidence_state != "satisfied":
             blockers.append(f"{name}: requested foundation evidence is missing")
             continue
         if record.get("source_hash") != current_source_hash:
             blockers.append(f"{name}: evidence is not bound to the current source hash")
-        specific = _specific_evidence_problems(
-            name, detail, contract, current_source_hash
-        )
+        specific = _specific_evidence_problems(name, detail, contract, current_source_hash)
         blockers.extend(f"{name}: {problem}" for problem in specific)
         if specific:
             checks[name] = "blocking"
-
     _, branch_detail = _evidence_detail(evidence, "default_branch")
     _, commit_detail = _evidence_detail(evidence, "initial_commit")
-    if (
-        branch_detail
-        and commit_detail
-        and branch_detail.get("head_commit") != commit_detail.get("current_head")
-    ):
+    if (branch_detail and commit_detail and branch_detail.get("head_commit") != commit_detail.get("current_head")):
         blockers.append("default_branch: head commit does not match the foundation head")
         checks["default_branch"] = "blocking"
         checks["initial_commit"] = "blocking"
-
     ready = not blockers
     return FoundationGate(
         status="PASS" if ready else "BLOCKED",
@@ -721,7 +575,6 @@ def evaluate_foundation(
         blockers=tuple(blockers),
     )
 
-
 def validate_foundation_evidence(
     contract: Mapping[str, Any],
     evidence: Mapping[str, Any],
@@ -729,15 +582,11 @@ def validate_foundation_evidence(
     current_source_hash: str,
 ) -> list[str]:
     """Return foundation blockers for callers that do not need the full gate."""
-
-    return list(
-        evaluate_foundation(
-            contract,
-            evidence,
-            current_source_hash=current_source_hash,
-        ).blockers
-    )
-
+    return list(evaluate_foundation(
+        contract,
+        evidence,
+        current_source_hash=current_source_hash,
+    ).blockers)
 
 def _delivery_identity_kind(target: str) -> str:
     if target == "source-only":
@@ -750,7 +599,6 @@ def _delivery_identity_kind(target: str) -> str:
         return "package"
     return "platform-release"
 
-
 def _provider_names(value: object) -> tuple[str, ...]:
     if isinstance(value, str):
         values = re.split(r"[,|+]", value)
@@ -759,7 +607,6 @@ def _provider_names(value: object) -> tuple[str, ...]:
     else:
         values = []
     return tuple(dict.fromkeys(item.strip().lower() for item in values if item.strip()))
-
 
 def _select_delivery_provider(
     target: str,
@@ -793,7 +640,6 @@ def _select_delivery_provider(
         return platform_target or target, ""
     return "not-applicable", ""
 
-
 def _authority_blocker(target: str, authority: Mapping[str, Any]) -> str:
     checks = (
         (target != "source-only" and not authority.get("external_write_authorized"), "delivery authority"),
@@ -804,7 +650,6 @@ def _authority_blocker(target: str, authority: Mapping[str, Any]) -> str:
     )
     reasons = [reason for unresolved, reason in checks if unresolved]
     return "unresolved " + ", ".join(reasons) if reasons else ""
-
 
 def make_delivery_contract(
     *,
@@ -826,12 +671,10 @@ def make_delivery_contract(
     production_authorized: bool = False,
 ) -> dict[str, Any]:
     """Build an explicit Delivery Contract without performing delivery.
-
     Provider selection is deterministic for obvious web fits. Ambiguous web
     projects become blocked until the approved contract selects one route.
     Authority failures are combined into one honest blocker.
     """
-
     raw_target = str(delivery_target or "").strip().lower()
     named_platform = str(platform_target or "").strip().lower()
     if raw_target == "platform-specific":
@@ -840,10 +683,7 @@ def make_delivery_contract(
         target = raw_target
         if target and target not in GENERIC_DELIVERY_TARGETS:
             named_platform = named_platform or target
-
-    selected_provider, route_blocker = _select_delivery_provider(
-        target, str(project_class or ""), provider, named_platform
-    )
+    selected_provider, route_blocker = _select_delivery_provider(target, str(project_class or ""), provider, named_platform)
     authority = {
         "external_write_authorized": bool(external_write_authorized),
         "credentials_required": bool(credentials_required),
@@ -856,27 +696,16 @@ def make_delivery_contract(
     }
     authority_blocker = _authority_blocker(target, authority)
     authority["blocker"] = authority_blocker
-    needs_live_url = (
-        target in WEB_DELIVERY_TARGETS
-        if live_url_required is None
-        else bool(live_url_required)
-    )
+    needs_live_url = (target in WEB_DELIVERY_TARGETS if live_url_required is None else bool(live_url_required))
     identity_kind = _delivery_identity_kind(target)
     requirements = {
         "source_binding": _requirement("requested", "delivery evidence must match the current source hash"),
         "repository_commit": _requirement("requested", "delivery evidence must identify the delivered repository commit"),
-        "delivery_identity": _requirement(
-            "blocking" if authority_blocker or route_blocker else "requested",
-            authority_blocker or route_blocker or f"delivery requires a {identity_kind} identity",
-        ),
-        "live_url": _optional_requirement(
-            needs_live_url, "the approved delivery result requires a live URL",
-            "the approved delivery result has no live URL",
-        ),
-        "smoke_result": _optional_requirement(
-            smoke_result_required, "the delivered result requires a passing smoke result",
-            "the approved contract does not require a smoke result",
-        ),
+        "delivery_identity": _requirement("blocking" if authority_blocker or route_blocker else "requested",
+                                          authority_blocker or route_blocker or f"delivery requires a {identity_kind} identity"),
+        "live_url": _optional_requirement(needs_live_url, "the approved delivery result requires a live URL", "the approved delivery result has no live URL"),
+        "smoke_result": _optional_requirement(smoke_result_required, "the delivered result requires a passing smoke result",
+                                              "the approved contract does not require a smoke result"),
     }
     return {
         "schema": DELIVERY_CONTRACT_SCHEMA,
@@ -902,57 +731,57 @@ def make_delivery_contract(
         "requirements": requirements,
     }
 
-
 def validate_delivery_contract(contract: object) -> list[str]:
     """Validate delivery target, route, evidence requirements, and authority."""
-
     if not isinstance(contract, Mapping):
         return ["delivery contract must be an object"]
     problems: list[str] = []
     _flag(problems, contract.get("schema") != DELIVERY_CONTRACT_SCHEMA, f"schema must be {DELIVERY_CONTRACT_SCHEMA}")
-    sections: dict[str, Mapping[str, Any]] = {}
-    for name in ("target", "route", "result", "authority", "requirements"):
-        value = contract.get(name)
-        _flag(problems, not isinstance(value, Mapping), f"{name} must be an object")
-        sections[name] = value if isinstance(value, Mapping) else {}
+    sections = mapping_sections(contract, ("target", "route", "result", "authority", "requirements"), problems)
     target, route = sections["target"], sections["route"]
     result, authority = sections["result"], sections["authority"]
     requirements = sections["requirements"]
-
     kind = str(target.get("kind") or "")
     platform = str(target.get("platform") or "")
     named_target = kind not in GENERIC_DELIVERY_TARGETS | {"platform-specific"}
-    _flag(problems, not kind, "delivery target must be explicit")
-    _flag(problems, bool(kind and named_target and not _NAMED_TARGET_RE.fullmatch(kind)), "named platform delivery target is invalid")
-    _flag(problems, bool(kind == "platform-specific" and not _NAMED_TARGET_RE.fullmatch(platform)), "platform-specific delivery requires a named platform target")
-    _flag(problems, bool(named_target and platform != kind), "named delivery target must match target.platform")
-
+    rules(
+        problems,
+        (not kind, "delivery target must be explicit"),
+        (bool(kind and named_target and not _NAMED_TARGET_RE.fullmatch(kind)), "named platform delivery target is invalid"),
+        (bool(kind == "platform-specific" and not _NAMED_TARGET_RE.fullmatch(platform)), "platform-specific delivery requires a named platform target"),
+        (bool(named_target and platform != kind), "named delivery target must match target.platform"),
+    )
     problems.extend(_requirement_problems(requirements, DELIVERY_REQUIREMENTS))
-
     provider = str(route.get("provider") or "")
     sites_selected = route.get("sites_selected")
     vercel_selected = route.get("vercel_selected")
-    _flag(problems, not isinstance(sites_selected, bool) or not isinstance(vercel_selected, bool), "route selection flags must be boolean")
-    _flag(problems, bool(sites_selected and vercel_selected), "Sites and Vercel cannot both be selected")
-    _flag(problems, sites_selected != (provider == "sites") or vercel_selected != (provider == "vercel"), "route selection flags must match the selected provider")
+    rules(
+        problems,
+        (not isinstance(sites_selected, bool) or not isinstance(vercel_selected, bool), "route selection flags must be boolean"),
+        (bool(sites_selected and vercel_selected), "Sites and Vercel cannot both be selected"),
+        (sites_selected != (provider == "sites") or vercel_selected != (provider == "vercel"), "route selection flags must match the selected provider"),
+    )
     if kind in WEB_DELIVERY_TARGETS and provider not in WEB_DELIVERY_PROVIDERS:
         _flag(problems, not route.get("selection_blocker"), "web delivery requires exactly one Sites or Vercel route")
     _flag(problems, kind not in WEB_DELIVERY_TARGETS and provider in WEB_DELIVERY_PROVIDERS, "Sites or Vercel route requires preview or production delivery")
-
     identity_kind = result.get("identity_kind")
     _flag(problems, identity_kind not in DELIVERY_IDENTITY_KINDS, "result.identity_kind is invalid")
-    _flag(problems, bool(kind and identity_kind in DELIVERY_IDENTITY_KINDS and identity_kind != _delivery_identity_kind(kind)), "result.identity_kind does not match the delivery target")
+    _flag(problems, bool(kind and identity_kind in DELIVERY_IDENTITY_KINDS and identity_kind != _delivery_identity_kind(kind)),
+          "result.identity_kind does not match the delivery target")
     needs_url = result.get("live_url_required")
     needs_smoke = result.get("smoke_result_required")
     _flag(problems, not isinstance(needs_url, bool) or not isinstance(needs_smoke, bool), "delivery result requirement flags must be boolean")
     authority_fields = (
-        "external_write_authorized", "credentials_required", "credentials_available",
-        "signing_required", "signing_authorized", "billing_required",
-        "billing_authorized", "production_authorized",
+        "external_write_authorized",
+        "credentials_required",
+        "credentials_available",
+        "signing_required",
+        "signing_authorized",
+        "billing_required",
+        "billing_authorized",
+        "production_authorized",
     )
-    for field in authority_fields:
-        _flag(problems, not isinstance(authority.get(field), bool), f"authority.{field} must be boolean")
-
+    boolean_fields(authority, authority_fields, problems, prefix="authority.")
     expected_blocker = _authority_blocker(kind, authority)
     _flag(problems, authority.get("blocker") != expected_blocker, "authority.blocker must aggregate every unresolved authority")
     expected_states = {
@@ -963,30 +792,24 @@ def validate_delivery_contract(contract: object) -> list[str]:
     for name, expected_state in expected_states.items():
         requirement = requirements.get(name)
         if isinstance(requirement, Mapping):
-            _flag(problems, requirement.get("state") != expected_state, f"{name} requirement does not match " + ("blockers" if name == "delivery_identity" else "the approved result"))
-
+            _flag(problems,
+                  requirement.get("state") != expected_state, f"{name} requirement does not match " + ("blockers" if name == "delivery_identity" else "the approved result"))
     problems.extend(_secret_problems(contract, "contract"))
     return problems
 
-
 def delivery_contract_sha256(contract: Mapping[str, Any]) -> str:
     """Hash a valid Delivery Contract using deterministic JSON encoding."""
-
     problems = validate_delivery_contract(contract)
     if problems:
         raise LifecycleContractError("; ".join(problems))
-    serialized = json.dumps(
-        contract, ensure_ascii=False, separators=(",", ":"), sort_keys=True
-    ).encode("utf-8")
+    serialized = json.dumps(contract, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
     return hashlib.sha256(serialized).hexdigest()
-
 
 def _valid_live_url(value: object, *, production: bool) -> bool:
     if not isinstance(value, str) or not value:
         return False
     pattern = r"https://" if production else r"https?://"
     return bool(re.fullmatch(pattern + r"[^/@\s]+(?::[0-9]+)?(?:/[^\s]*)?", value))
-
 
 def _delivery_specific_problems(
     name: str,
@@ -1010,7 +833,8 @@ def _delivery_specific_problems(
         _flag(problems, detail.get("repository_commit") != repository_commit, "delivery identity is not bound to the repository commit")
         _flag(problems, detail.get("source_hash") != current_source_hash, "delivery identity is not bound to the current source hash")
         _flag(problems, identity_kind == "deployment" and detail.get("provider") != provider, "deployment provider does not match the selected route")
-        _flag(problems, identity_kind in {"package", "platform-release"} and not _SHA256_RE.fullmatch(str(detail.get("artifact_sha256") or "")), "package or platform identity requires an artifact SHA-256")
+        _flag(problems, identity_kind in {"package", "platform-release"} and not _SHA256_RE.fullmatch(str(detail.get("artifact_sha256") or "")),
+              "package or platform identity requires an artifact SHA-256")
     elif name == "live_url":
         _flag(problems, not _valid_live_url(detail.get("url"), production=target == "production"), "live URL is invalid")
         _flag(problems, detail.get("provider") != provider, "live URL provider does not match the selected route")
@@ -1022,7 +846,6 @@ def _delivery_specific_problems(
         _flag(problems, not str(detail.get("scenario") or "").strip(), "delivery smoke result requires a scenario")
     return problems
 
-
 def evaluate_delivery(
     contract: Mapping[str, Any],
     evidence: Mapping[str, Any],
@@ -1030,14 +853,12 @@ def evaluate_delivery(
     current_source_hash: str,
 ) -> DeliveryGate:
     """Gate strict completion on the exact approved delivery result."""
-
     blockers: list[str] = []
     checks: dict[str, str] = {}
     contract_problems = validate_delivery_contract(contract)
     if contract_problems:
         blockers.extend(f"contract: {problem}" for problem in contract_problems)
         return DeliveryGate("BLOCKED", False, False, None, None, None, None, None, checks, tuple(blockers))
-
     target = str(contract["target"]["kind"])
     provider = str(contract["route"]["provider"])
     contract_hash = delivery_contract_sha256(contract)
@@ -1047,10 +868,17 @@ def evaluate_delivery(
         reason = authority_blocker or route_blocker
         checks["delivery_identity"] = "blocking"
         return DeliveryGate(
-            "BLOCKED", False, False, current_source_hash, None, contract_hash,
-            target, provider or None, checks, (f"delivery blocked: {reason}",),
+            "BLOCKED",
+            False,
+            False,
+            current_source_hash,
+            None,
+            contract_hash,
+            target,
+            provider or None,
+            checks,
+            (f"delivery blocked: {reason}", ),
         )
-
     if not isinstance(evidence, Mapping):
         blockers.append("delivery evidence must be an object")
         evidence = {}
@@ -1064,7 +892,6 @@ def evaluate_delivery(
     _flag(blockers, evidence.get("target") != target, "delivery evidence target does not match the approved contract")
     _flag(blockers, evidence.get("provider") != provider, "delivery evidence provider does not match the selected route")
     blockers.extend(_secret_problems(evidence))
-
     evidence_checks = evidence.get("checks")
     if not isinstance(evidence_checks, Mapping):
         blockers.append("delivery evidence checks must be an object")
@@ -1072,7 +899,6 @@ def evaluate_delivery(
     extra = sorted(str(key) for key in set(evidence_checks) - set(DELIVERY_REQUIREMENTS))
     if extra:
         blockers.append("unknown delivery evidence checks: " + ", ".join(extra))
-
     for name in DELIVERY_REQUIREMENTS:
         requirement = contract["requirements"][name]
         required_state = requirement["state"]
@@ -1090,20 +916,23 @@ def evaluate_delivery(
         if record.get("source_hash") != current_source_hash:
             blockers.append(f"{name}: evidence is not bound to the current source hash")
             checks[name] = "blocking"
-        specific = _delivery_specific_problems(
-            name, detail, contract, current_source_hash, repository_commit
-        )
+        specific = _delivery_specific_problems(name, detail, contract, current_source_hash, repository_commit)
         blockers.extend(f"{name}: {problem}" for problem in specific)
         if specific:
             checks[name] = "blocking"
-
     satisfied = not blockers
     return DeliveryGate(
-        "PASS" if satisfied else "BLOCKED", satisfied, satisfied,
-        current_source_hash, repository_commit or None, contract_hash,
-        target, provider or None, checks, tuple(blockers),
+        "PASS" if satisfied else "BLOCKED",
+        satisfied,
+        satisfied,
+        current_source_hash,
+        repository_commit or None,
+        contract_hash,
+        target,
+        provider or None,
+        checks,
+        tuple(blockers),
     )
-
 
 def validate_delivery_evidence(
     contract: Mapping[str, Any],
@@ -1112,7 +941,4 @@ def validate_delivery_evidence(
     current_source_hash: str,
 ) -> list[str]:
     """Return delivery blockers for callers that do not need the full gate."""
-
-    return list(evaluate_delivery(
-        contract, evidence, current_source_hash=current_source_hash
-    ).blockers)
+    return list(evaluate_delivery(contract, evidence, current_source_hash=current_source_hash).blockers)

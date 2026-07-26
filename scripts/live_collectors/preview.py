@@ -14,13 +14,12 @@ import hashlib
 import http.client
 import ipaddress
 import json
-import os
 import shlex
 import socket
-import subprocess
 import sys
 import time
 import urllib.parse
+from functools import partial
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -30,7 +29,9 @@ PLUGIN_ROOT = SCRIPTS_ROOT.parent
 if str(SCRIPTS_ROOT) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_ROOT))
 
-from live_collectors import common
+from live_collectors import browser_safety, common
+from live_collectors.policy_data import policy_dict, policy_list
+from live_collectors.provider_engine import render_descriptor
 from starforge import evidence
 
 
@@ -38,95 +39,19 @@ COLLECTOR = "preview"
 CAPABILITY = "preview-verification"
 EVIDENCE_FILENAME = "evidence.v2.json"
 STAR_FORGE = PLUGIN_ROOT / "scripts" / "star_forge.py"
-DEFAULT_USER_AGENT = "star-forge-preview-collector/1 read-only"
-METADATA_HOSTS = {"metadata.google.internal", "metadata", "169.254.169.254", "169.254.170.2"}
-LOCAL_HOSTNAMES = {"localhost"}
-def now_ms() -> int:
-    return int(time.time() * 1000)
+SETTINGS = policy_dict("preview", "SETTINGS")
+DEFAULT_USER_AGENT = SETTINGS["default_user_agent"]
+LOCAL_HOSTNAMES = set(SETTINGS["local_hostnames"])
+TEMPLATES = policy_dict("preview", "PAYLOAD_TEMPLATES")
 
 
-def git_head(project: Path) -> str | None:
-    proc = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=str(project),
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=False,
-    )
-    if proc.returncode != 0:
-        return None
-    head = proc.stdout.strip()
-    return head or None
+git_head = common.git_head
+git_status_path = common.git_status_path
+source_tree_clean_at_head = common.source_tree_clean_at_head
+dirty_paths_missing_from_source_snapshot = common.dirty_paths_missing_from_source_snapshot
 
 
-def git_status(project: Path) -> list[str]:
-    proc = subprocess.run(
-        ["git", "status", "--short", "--untracked-files=all", "--", "."],
-        cwd=str(project),
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=False,
-    )
-    if proc.returncode != 0:
-        return ["?? <git status unavailable>"]
-    return [line for line in proc.stdout.splitlines() if line.strip()]
-
-
-def git_status_path(line: str) -> str:
-    path = line[3:] if len(line) > 3 else line.strip()
-    path = path.strip().strip('"')
-    if " -> " in path:
-        path = path.split(" -> ", 1)[1].strip().strip('"')
-    return path
-
-
-def source_dirty_entries(project: Path) -> list[str]:
-    return common.source_hash_dirty_entries(project, git_status(project))
-
-
-def source_tree_clean_at_head(project: Path) -> bool:
-    return bool(git_head(project)) and not source_dirty_entries(project)
-
-
-def source_snapshot_rel_paths(project: Path) -> set[str]:
-    return {common.project_relative(project, path) for path in common.snapshot_file_candidates(project)}
-
-
-def dirty_paths_missing_from_source_snapshot(project: Path) -> list[str]:
-    snapshot_paths = source_snapshot_rel_paths(project)
-    missing: list[str] = []
-    for line in source_dirty_entries(project):
-        rel = git_status_path(line)
-        if not rel or rel in snapshot_paths:
-            continue
-        missing.append(line)
-    return missing
-
-
-def json_write(path: Path, payload: Any, *, preserve_fields: Sequence[str] = ()) -> dict[str, Any]:
-    redacted, report = common.redact_sensitive_values(payload)
-    if isinstance(payload, Mapping) and isinstance(redacted, dict):
-        for field in preserve_fields:
-            if field in payload:
-                redacted[field] = payload[field]
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(redacted, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    return report
-
-
-def merge_reports(reports: Sequence[Mapping[str, Any]]) -> dict[str, int]:
-    merged: dict[str, int] = {}
-    for report in reports:
-        for key, value in report.items():
-            if isinstance(value, int):
-                merged[key] = merged.get(key, 0) + value
-    return merged
-
-
-def evidence_provider(raw_provider: str) -> str:
-    return common.sanitize_segment(raw_provider, fallback="provider-neutral")
+evidence_provider = partial(common.sanitize_segment, fallback="provider-neutral")
 
 
 def write_evidence_envelope(
@@ -135,167 +60,80 @@ def write_evidence_envelope(
     *,
     provider: str,
 ) -> tuple[Path, dict[str, Any]]:
-    """Adapt the compatibility manifest to validated source-bound v2 evidence."""
-
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest = common.read_json(manifest_path)
     provider_id = evidence_provider(provider)
     envelope = evidence.adapt_v1_manifest(
-        manifest,
-        capability=CAPABILITY,
-        provider=provider_id,
+        manifest, capability=CAPABILITY, provider=provider_id,
     )
-    provenance = dict(envelope["provenance"])
-    provenance["collector_mode"] = "provider-neutral-read-only-http"
-    provenance["deployment_provider"] = provider_id
-    envelope["provenance"] = provenance
+    envelope["provenance"] = {
+        **dict(envelope["provenance"]),
+        **render_descriptor(TEMPLATES["evidence_provenance"], {"provider": provider_id}),
+    }
     envelope_path = manifest_path.parent / EVIDENCE_FILENAME
     written = evidence.write_envelope(
-        envelope_path,
-        envelope,
-        project_root=project,
-        verify_artifacts=True,
+        envelope_path, envelope, project_root=project, verify_artifacts=True,
     )
     return envelope_path, written
 
 
-def problem(message: str, *, rule: str, severity: str = "high", path: str = "", blocking: bool = True) -> dict[str, Any]:
-    return {
-        "severity": severity,
-        "rule": rule,
-        "message": message,
-        "path": path,
-        "blocking": blocking,
-    }
+problem = partial(common.problem, include_empty_path=True)
 
 
-def sensitive_name(name: str) -> bool:
-    return common.sensitive_key_name(name)
+sensitive_name = common.sensitive_key_name
 
 
 def sensitive_value(value: str) -> bool:
     lowered = value.lower()
-    return (
-        bool(common.SECRET_RE.search(value))
-        or lowered.startswith("bearer ")
-        or lowered.startswith("basic ")
-        or "authorization:" in lowered
-    )
-
-
-def sensitive_query_pair(key: str, value: str) -> bool:
-    return sensitive_name(key) or sensitive_value(value)
+    return bool(common.SECRET_RE.search(value)) or lowered.startswith(
+        ("bearer ", "basic ")
+    ) or "authorization:" in lowered
 
 
 def safe_url_for_artifact(url: str) -> str:
     parsed = urllib.parse.urlparse(url or "")
     if not parsed.scheme:
         return "[invalid-url]"
-    host = parsed.hostname or ""
-    netloc = host
-    if parsed.port:
-        netloc = f"{host}:{parsed.port}"
-    pairs: list[tuple[str, str]] = []
-    for key, value in urllib.parse.parse_qsl(parsed.query, keep_blank_values=True):
-        pairs.append((key, "[REDACTED]" if sensitive_query_pair(key, value) else value))
-    query = urllib.parse.urlencode(pairs, doseq=True)
-    fragment = "[REDACTED]" if sensitive_query_pair("fragment", parsed.fragment) else parsed.fragment
-    return urllib.parse.urlunparse((parsed.scheme, netloc, parsed.path, parsed.params, query, fragment))
+    cleaned, _ = common.redact_sensitive_values(url)
+    return str(cleaned).replace("[REDACTED_SECRET]", "[REDACTED]")
 
 
-def is_metadata_host(host: str) -> bool:
-    lowered = host.lower().strip("[]")
-    return lowered in METADATA_HOSTS or lowered.endswith(".metadata.google.internal")
-
-
-def parse_ip(host: str) -> ipaddress._BaseAddress | None:
-    try:
-        return ipaddress.ip_address(host.strip("[]"))
-    except ValueError:
-        return None
-
-
-def is_loopback_ip(ip: ipaddress._BaseAddress) -> bool:
-    return ip.is_loopback
+parse_ip = browser_safety.parse_ip
 
 
 def is_blocked_ip(ip: ipaddress._BaseAddress, *, explicit_local_allowed: bool) -> str | None:
-    if is_loopback_ip(ip):
+    if ip.is_loopback:
         if explicit_local_allowed:
             return None
         return "loopback targets require --server-lease or --local-preview-mode"
-    if ip.is_unspecified:
-        return "unspecified IP targets are not allowed"
-    if ip.is_link_local:
-        return "link-local targets are not allowed"
-    if ip.is_private:
-        return "private network targets are not allowed"
-    if ip.is_reserved:
-        return "reserved IP targets are not allowed"
-    if ip.is_multicast:
-        return "multicast targets are not allowed"
-    if not ip.is_global:
-        return "non-global IP targets are not allowed"
-    return None
+    reason = next((
+        message for attribute, message in policy_list("preview", "BLOCKED_IP_RULES")
+        if getattr(ip, attribute)
+    ), None)
+    return reason or ("non-global IP targets are not allowed" if not ip.is_global else None)
 
 
-def resolve_ips(host: str, port: int | None) -> tuple[list[ipaddress._BaseAddress], str | None]:
-    direct = parse_ip(host)
-    if direct:
-        return [direct], None
-    try:
-        infos = socket.getaddrinfo(host, port or 443, type=socket.SOCK_STREAM)
-    except OSError as exc:
-        return [], f"preview URL host could not be resolved: {exc}"
-    ips: list[ipaddress._BaseAddress] = []
-    for info in infos:
-        address = info[4][0]
-        ip = parse_ip(address)
-        if ip and ip not in ips:
-            ips.append(ip)
-    return ips, None
-
-
-def is_local_url(url: str) -> bool:
-    parsed = urllib.parse.urlparse(url or "")
-    host = parsed.hostname or ""
-    ip = parse_ip(host)
-    return host.lower() in LOCAL_HOSTNAMES or bool(ip and ip.is_loopback)
+def _preview_lease_problems(items: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {**item, "rule": "preview-localhost"} if item.get("rule") == "server-lease"
+        else dict(item) for item in items
+    ]
 
 
 def validate_server_lease(project: Path, raw_lease: str, url: str, *, source_hash: str, runtime_hash: str) -> tuple[bool, list[dict[str, Any]]]:
-    problems: list[dict[str, Any]] = []
     if not raw_lease:
-        return False, problems
+        return False, []
     try:
-        from live_collectors import browser_playwright
-        parsed_url, url_problems = browser_playwright.validate_url(url)
-        for item in url_problems:
-            mapped = dict(item)
-            if mapped.get("rule") == "server-lease":
-                mapped["rule"] = "preview-localhost"
-            problems.append(mapped)
+        parsed_url, url_problems = browser_safety.validate_url(url)
+        problems = _preview_lease_problems(url_problems)
         if url_problems:
             return False, problems
-        _lease_path, payload, lease_problems = browser_playwright.validate_server_lease(
-            project,
-            raw_lease,
-            parsed_url,
-            source_hash,
-            runtime_hash,
+        _lease_path, payload, lease_problems = browser_safety.validate_server_lease(
+            project, raw_lease, parsed_url, source_hash, runtime_hash,
         )
+        problems.extend(_preview_lease_problems(lease_problems))
     except Exception as exc:
         return False, [problem(f"server lease is invalid: {exc}", rule="preview-localhost", path=str(raw_lease))]
-    for item in lease_problems:
-        mapped = dict(item)
-        if mapped.get("rule") == "server-lease":
-            mapped["rule"] = "preview-localhost"
-        problems.append(mapped)
     return payload is not None and not problems, problems
-
-
-def validate_url_safety(url: str, *, allow_local: bool) -> list[dict[str, Any]]:
-    problems, _ips = validate_url_safety_with_ips(url, allow_local=allow_local)
-    return problems
 
 
 def validate_url_safety_with_ips(url: str, *, allow_local: bool) -> tuple[list[dict[str, Any]], set[str]]:
@@ -309,18 +147,20 @@ def validate_url_safety_with_ips(url: str, *, allow_local: bool) -> tuple[list[d
     if not host:
         problems.append(problem("preview URL must include a host", rule="preview-url"))
         return problems, set()
-    if is_metadata_host(host):
+    if browser_safety.is_metadata_host(host):
         problems.append(problem("preview URL must not target metadata hosts", rule="preview-url"))
     for key, value in urllib.parse.parse_qsl(parsed.query, keep_blank_values=True):
-        if sensitive_query_pair(key, value):
+        if sensitive_name(key) or sensitive_value(value):
             problems.append(problem("preview URL query appears to contain sensitive material", rule="preview-url"))
             break
     explicit_local = host.lower() in LOCAL_HOSTNAMES or bool(parse_ip(host) and parse_ip(host).is_loopback)
     if explicit_local and not allow_local:
         problems.append(problem("localhost preview URLs require --server-lease or --local-preview-mode", rule="preview-localhost"))
-    ips, resolve_problem = resolve_ips(host, parsed.port)
+    ips, resolve_problem = browser_safety.resolve_ips(host, parsed.port)
     if resolve_problem:
-        problems.append(problem(resolve_problem, rule="preview-url"))
+        problems.append(problem(
+            resolve_problem.replace("browser URL", "preview URL"), rule="preview-url",
+        ))
         return problems, set()
     for ip in ips:
         blocked = is_blocked_ip(ip, explicit_local_allowed=explicit_local and allow_local)
@@ -329,18 +169,8 @@ def validate_url_safety_with_ips(url: str, *, allow_local: bool) -> tuple[list[d
     return problems, {str(ip) for ip in ips}
 
 
-def validate_dns_stability_for_connection(url: str, *, allow_local: bool, validated_ips: set[str]) -> tuple[list[dict[str, Any]], set[str]]:
-    problems, current_ips = validate_url_safety_with_ips(url, allow_local=allow_local)
-    if problems:
-        return problems, current_ips
-    if validated_ips and current_ips != validated_ips:
-        return [
-            problem(
-                "preview URL DNS resolution changed between validation and connection setup",
-                rule="preview-url",
-            )
-        ], current_ips
-    return [], current_ips
+def validate_url_safety(url: str, *, allow_local: bool) -> list[dict[str, Any]]:
+    return validate_url_safety_with_ips(url, allow_local=allow_local)[0]
 
 
 def host_header_for_url(parsed: urllib.parse.ParseResult) -> str:
@@ -348,37 +178,12 @@ def host_header_for_url(parsed: urllib.parse.ParseResult) -> str:
     if ":" in host and not host.startswith("["):
         host = f"[{host}]"
     default_port = 443 if parsed.scheme == "https" else 80
-    if parsed.port and parsed.port != default_port:
-        return f"{host}:{parsed.port}"
-    return host
-
-
-def request_target_for_url(parsed: urllib.parse.ParseResult) -> str:
-    path = parsed.path or "/"
-    if parsed.params:
-        path = f"{path};{parsed.params}"
-    if parsed.query:
-        path = f"{path}?{parsed.query}"
-    return path
-
-
-def choose_connection_ip(validated_ips: set[str]) -> str:
-    parsed_ips = sorted(
-        (ipaddress.ip_address(raw) for raw in validated_ips),
-        key=lambda ip: (ip.version, int(ip)),
-    )
-    if not parsed_ips:
-        raise ValueError("no validated IP address is available for preview connection")
-    return str(parsed_ips[0])
+    return f"{host}:{parsed.port}" if parsed.port and parsed.port != default_port else host
 
 
 def pinned_http_get(
-    url: str,
-    *,
-    headers: Mapping[str, str],
-    timeout: float,
-    max_body_bytes: int,
-    validated_ips: set[str],
+    url: str, headers: Mapping[str, str], validated_ips: set[str],
+    args: argparse.Namespace,
 ) -> tuple[int | None, dict[str, str], bytes, bool, str, list[dict[str, Any]]]:
     parsed = urllib.parse.urlparse(url)
     if parsed.scheme == "https":
@@ -388,20 +193,22 @@ def pinned_http_get(
     if parsed.scheme != "http":
         return None, {}, b"", False, "", [problem("preview URL must use http or https", rule="preview-url")]
     try:
-        connected_ip = choose_connection_ip(validated_ips)
-    except ValueError as exc:
-        return None, {}, b"", False, "", [problem(str(exc), rule="preview-url")]
+        connected_ip = str(min(
+            map(ipaddress.ip_address, validated_ips),
+            key=lambda ip: (ip.version, int(ip)),
+        ))
+    except ValueError:
+        return None, {}, b"", False, "", [problem("no validated IP address is available for preview connection", rule="preview-url")]
     port = parsed.port or 80
-    request_headers = dict(headers)
-    request_headers["Host"] = host_header_for_url(parsed)
-    conn = http.client.HTTPConnection(connected_ip, port, timeout=timeout)
+    request_headers = {**headers, "Host": host_header_for_url(parsed)}
+    conn = http.client.HTTPConnection(connected_ip, port, timeout=args.timeout)
     try:
-        conn.request("GET", request_target_for_url(parsed), headers=request_headers)
+        target = (parsed.path or "/") + (f";{parsed.params}" if parsed.params else "") + (f"?{parsed.query}" if parsed.query else "")
+        conn.request("GET", target, headers=request_headers)
         response = conn.getresponse()
-        raw_body = response.read(max_body_bytes + 1)
-        truncated = len(raw_body) > max_body_bytes
-        if truncated:
-            raw_body = raw_body[:max_body_bytes]
+        raw_body = response.read(args.max_body_bytes + 1)
+        truncated = len(raw_body) > args.max_body_bytes
+        raw_body = raw_body[:args.max_body_bytes] if truncated else raw_body
         return int(response.status), {str(key): str(value) for key, value in response.getheaders()}, raw_body, truncated, connected_ip, []
     except (OSError, TimeoutError, http.client.HTTPException) as exc:
         return None, {}, b"", False, connected_ip, [problem(f"preview HTTP request failed: {exc}", rule="preview-http")]
@@ -413,11 +220,7 @@ def parse_headers(raw_headers: Sequence[str]) -> tuple[dict[str, str], list[dict
     headers = {"User-Agent": DEFAULT_USER_AGENT}
     problems: list[dict[str, Any]] = []
     for raw in raw_headers:
-        name, sep, value = raw.partition(":")
-        if not sep:
-            name, sep, value = raw.partition("=")
-        name = name.strip()
-        value = value.strip()
+        name, sep, value = _header_parts(raw)
         if not sep or not name:
             problems.append(problem(f"header must use Name: value or Name=value: {raw}", rule="preview-header"))
             continue
@@ -428,133 +231,91 @@ def parse_headers(raw_headers: Sequence[str]) -> tuple[dict[str, str], list[dict
     return headers, problems
 
 
+def _header_parts(raw: str) -> tuple[str, str, str]:
+    name, sep, value = raw.partition(":")
+    if not sep:
+        name, sep, value = raw.partition("=")
+    return name.strip(), sep, value.strip()
+
+
 def sanitize_headers(headers: Mapping[str, str]) -> tuple[dict[str, str], dict[str, int]]:
-    safe: dict[str, str] = {}
-    redactions = 0
-    for key, value in sorted(headers.items(), key=lambda item: item[0].lower()):
-        if sensitive_name(key) or sensitive_value(str(value)):
-            safe[key] = "[REDACTED]"
-            redactions += 1
-            continue
-        cleaned, report = common.redact_sensitive_values(str(value)[:500])
-        if report.get("secret_values") or report.get("sensitive_keys"):
-            redactions += int(report.get("secret_values") or 0) + int(report.get("sensitive_keys") or 0)
-        safe[key] = str(cleaned)
+    ordered = sorted(headers.items(), key=lambda item: item[0].lower())
+    pre_redactions = sum(
+        sensitive_value(str(value)) and not sensitive_name(key) for key, value in ordered
+    )
+    prepared = {
+        key: "[REDACTED]" if sensitive_value(str(value)) else str(value)[:500]
+        for key, value in ordered
+    }
+    safe, report = common.redact_sensitive_values(prepared)
+    redactions = pre_redactions + int(report.get("secret_values") or 0) + int(report.get("sensitive_keys") or 0)
     return safe, {"header_values": redactions}
 
 
 def safe_header_arg(raw: str) -> str:
-    name, sep, value = raw.partition(":")
-    if not sep:
-        name, sep, value = raw.partition("=")
+    name, sep, value = _header_parts(raw)
     if not sep:
         return "[REDACTED_HEADER]"
-    name = name.strip()
-    value = value.strip()
     if sensitive_name(name) or sensitive_value(value):
         return f"{name}=[REDACTED]"
     return raw
 
 
 def safe_command_argv(raw_argv: Sequence[str]) -> list[str]:
-    safe: list[str] = []
-    redact_next = ""
-    for item in raw_argv:
-        if redact_next == "url":
-            safe.append(safe_url_for_artifact(item))
-            redact_next = ""
-            continue
-        if redact_next == "header":
-            safe.append(safe_header_arg(item))
-            redact_next = ""
-            continue
-        if item == "--url":
-            safe.append(item)
-            redact_next = "url"
-            continue
-        if item == "--header":
-            safe.append(item)
-            redact_next = "header"
-            continue
-        if item.startswith("--url="):
-            safe.append("--url=" + safe_url_for_artifact(item.split("=", 1)[1]))
-            continue
-        if item.startswith("--header="):
-            safe.append("--header=" + safe_header_arg(item.split("=", 1)[1]))
-            continue
-        safe.append(item)
+    safe = list(raw_argv)
+    for index, item in enumerate(safe):
+        previous = safe[index - 1] if index else ""
+        if previous == "--url":
+            safe[index] = safe_url_for_artifact(item)
+        elif previous == "--header":
+            safe[index] = safe_header_arg(item)
+        elif item.startswith("--url="):
+            safe[index] = "--url=" + safe_url_for_artifact(item.split("=", 1)[1])
+        elif item.startswith("--header="):
+            safe[index] = "--header=" + safe_header_arg(item.split("=", 1)[1])
     return safe
 
 
 def skipped_http_payload(
-    url: str,
-    *,
-    headers: Mapping[str, str],
-    expect_status: int,
+    args: argparse.Namespace, headers: Mapping[str, str],
     problems: Sequence[Mapping[str, Any]],
 ) -> tuple[dict[str, Any], dict[str, Any], str]:
-    http_payload = {
-        "schema": "star-forge.preview-http.v1",
-        "attempted": False,
-        "method": "GET",
-        "url": safe_url_for_artifact(url),
-        "expected_status": expect_status,
-        "ok": False,
-        "problems": [dict(item) for item in problems],
-    }
-    headers_payload = {
-        "schema": "star-forge.preview-headers.v1",
-        "final_url": safe_url_for_artifact(url),
-        "response_headers": {},
-        "request_headers": sanitize_headers(headers)[0],
-    }
-    return http_payload, headers_payload, ""
+    expect_status = args.expect_status
+    safe_url = safe_final_url = safe_url_for_artifact(args.url)
+    request_headers, response_headers = sanitize_headers(headers)[0], {}
+    problem_records = [dict(item) for item in problems]
+    values = {**locals(), "problems": problem_records}
+    return (
+        render_descriptor(TEMPLATES["skipped_http"], values),
+        render_descriptor(TEMPLATES["headers"], values), "",
+    )
 
 
 def fetch_http(
-    url: str,
-    *,
-    headers: Mapping[str, str],
-    expect_status: int,
-    timeout: float,
-    max_redirects: int,
-    max_body_bytes: int,
-    allow_local: bool,
+    args: argparse.Namespace, headers: Mapping[str, str], allow_local: bool,
 ) -> tuple[dict[str, Any], dict[str, Any], str, list[dict[str, Any]]]:
     problems: list[dict[str, Any]] = []
-    current = url
-    started = now_ms()
-    redirects: list[dict[str, Any]] = []
+    url, expect_status = args.url, args.expect_status
+    current, started = url, int(time.time() * 1000)
+    redirects, connected_ips = [], []
     response_headers: dict[str, str] = {}
-    body_text = ""
-    body_sha = ""
-    body_bytes_read = 0
-    body_truncated = False
-    status: int | None = None
-    attempted = False
-    connected_ips: list[str] = []
+    body_text = body_sha = ""
+    body_bytes_read, body_truncated = 0, False
+    status, attempted = None, False
 
     initial_problems, validated_ips = validate_url_safety_with_ips(current, allow_local=allow_local)
     if initial_problems:
         problems.extend(initial_problems)
-        http_payload = {
-            "schema": "star-forge.preview-http.v1",
-            "attempted": False,
-            "method": "GET",
-            "url": safe_url_for_artifact(url),
-            "expected_status": expect_status,
-            "ok": False,
-            "problems": problems,
-        }
-        return http_payload, {"schema": "star-forge.preview-headers.v1", "response_headers": {}}, body_text, problems
+        http_payload, headers_payload, _ = skipped_http_payload(
+            args, {}, problems,
+        )
+        headers_payload.pop("final_url", None)
+        headers_payload.pop("request_headers", None)
+        return http_payload, headers_payload, body_text, problems
 
-    for _ in range(max_redirects + 1):
+    for _ in range(args.max_redirects + 1):
         status, response_headers, raw_body, body_truncated, connected_ip, request_problems = pinned_http_get(
-            current,
-            headers=headers,
-            timeout=timeout,
-            max_body_bytes=max_body_bytes,
-            validated_ips=validated_ips,
+            current, headers, validated_ips, args,
         )
         if connected_ip:
             connected_ips.append(connected_ip)
@@ -568,10 +329,7 @@ def fetch_http(
             redirect_problems, validated_ips = validate_url_safety_with_ips(next_url, allow_local=allow_local)
             redirects.append({"status": status, "url": safe_url_for_artifact(next_url), "from": safe_url_for_artifact(current)})
             if redirect_problems:
-                for item in redirect_problems:
-                    item = dict(item)
-                    item["rule"] = "preview-redirect"
-                    problems.append(item)
+                problems.extend({**item, "rule": "preview-redirect"} for item in redirect_problems)
                 break
             current = next_url
             continue
@@ -587,74 +345,52 @@ def fetch_http(
 
     safe_response_headers, header_redaction = sanitize_headers(response_headers)
     if header_redaction.get("header_values"):
-        problems.append(
-            problem(
-                "response headers contained sensitive values and were redacted",
-                rule="preview-header-redacted",
-                severity="low",
-                blocking=False,
-            )
-        )
-    elapsed_ms = now_ms() - started
-    http_payload = {
-        "schema": "star-forge.preview-http.v1",
-        "attempted": attempted,
-        "method": "GET",
-        "url": safe_url_for_artifact(url),
-        "final_url": safe_url_for_artifact(current),
-        "status": status,
-        "expected_status": expect_status,
-        "ok": status == expect_status and not any(item.get("blocking", True) for item in problems if item.get("rule") != "preview-header-redacted"),
-        "redirect_chain": redirects,
-        "elapsed_ms": elapsed_ms,
-        "body_sha256": body_sha,
-        "body_bytes_read": body_bytes_read,
-        "body_truncated": body_truncated,
-        "connected_ips": connected_ips,
-        "connection_pinning": {
-            "strategy": "http-connect-vetted-ip",
-            "https": "fail-closed",
-        },
+        problems.append(problem(
+            "response headers contained sensitive values and were redacted",
+            rule="preview-header-redacted", severity="low", blocking=False,
+        ))
+    safe_url = safe_url_for_artifact(url)
+    safe_final_url = safe_url_for_artifact(current)
+    http_ok = status == expect_status and not any(
+        item.get("blocking", True) for item in problems
+        if item.get("rule") != "preview-header-redacted"
+    )
+    elapsed_ms = int(time.time() * 1000) - started
+    request_headers = sanitize_headers(headers)[0]
+    values = {
+        **locals(), "redirects": redirects, "body_sha": body_sha,
+        "connected_ips": connected_ips, "response_headers": safe_response_headers,
     }
-    headers_payload = {
-        "schema": "star-forge.preview-headers.v1",
-        "final_url": safe_url_for_artifact(current),
-        "response_headers": safe_response_headers,
-        "request_headers": sanitize_headers(headers)[0],
-    }
+    http_payload = render_descriptor(TEMPLATES["http"], values)
+    headers_payload = render_descriptor(TEMPLATES["headers"], values)
     return http_payload, headers_payload, body_text, problems
 
 
-def parse_smoke(raw: str) -> tuple[str, str, str]:
-    kind, sep, rest = raw.partition(":")
-    if not sep:
-        return "contains", raw, raw
-    return kind.strip().lower(), rest, raw
-
-
 def run_smoke_checks(
-    raw_checks: Sequence[str],
-    *,
-    body: str,
-    headers: Mapping[str, str],
-    final_url: str,
-    status: int | None,
-    expect_status: int,
+    args: argparse.Namespace, body: str, headers_payload: Mapping[str, Any],
+    http_payload: Mapping[str, Any],
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    checks = list(raw_checks) or [f"status:{expect_status}"]
+    expect_status = args.expect_status
+    checks = list(args.smoke_check) or [f"status:{expect_status}"]
     results: list[dict[str, Any]] = []
     problems: list[dict[str, Any]] = []
+    headers = headers_payload.get("response_headers", {})
+    headers = headers if isinstance(headers, Mapping) else {}
+    final_url = str(http_payload.get("final_url") or "")
+    status_value = http_payload.get("status")
+    status = status_value if isinstance(status_value, int) else None
     header_lookup = {key.lower(): value for key, value in headers.items()}
     for raw in checks:
-        kind, value, name = parse_smoke(raw)
+        kind, sep, value = raw.partition(":")
+        kind, value = (kind.strip().lower(), value) if sep else ("contains", raw)
+        name = raw
         passed = False
         observed = ""
-        if kind == "contains":
-            passed = value in body
-            observed = "body contained expected text" if passed else "body did not contain expected text"
-        elif kind == "not-contains":
-            passed = value not in body
-            observed = "body omitted forbidden text" if passed else "body contained forbidden text"
+        if kind in {"contains", "not-contains"}:
+            contains = value in body
+            passed = contains if kind == "contains" else not contains
+            key = kind.replace("-", "_") + ("_pass" if passed else "_fail")
+            observed = policy_dict("preview", "SMOKE_MESSAGES")[key]
         elif kind == "header":
             header_name, sep, expected = value.partition("=")
             actual = header_lookup.get(header_name.strip().lower(), "")
@@ -671,13 +407,15 @@ def run_smoke_checks(
             passed = status == expected
             observed = str(status)
         else:
-            passed = False
             observed = f"unknown smoke check kind {kind}"
-        item = {"name": name, "kind": kind, "passed": passed, "observed": observed}
-        results.append(item)
-        if not passed:
-            problems.append(problem(f"smoke check failed: {name}", rule="preview-smoke"))
-    payload = {"schema": "star-forge.preview-smoke.v1", "passed": all(item["passed"] for item in results), "checks": results}
+        results.append({"name": name, "kind": kind, "passed": passed, "observed": observed})
+    problems.extend(
+        problem(f"smoke check failed: {item['name']}", rule="preview-smoke")
+        for item in results if not item["passed"]
+    )
+    payload = render_descriptor(TEMPLATES["smoke"], {
+        "smoke_passed": all(item["passed"] for item in results), "checks": results,
+    })
     return payload, problems
 
 
@@ -688,11 +426,10 @@ def build_deployment_payload(
     current_source: str,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     problems: list[dict[str, Any]] = []
-    payload: dict[str, Any] = {
-        "schema": "star-forge.preview-deployment.v1",
-        "provider": args.provider or "provider-neutral",
+    payload: dict[str, Any] = render_descriptor(TEMPLATES["deployment"], {
+        "provider": args.provider or SETTINGS["default_provider"],
         "url": safe_url_for_artifact(args.url),
-    }
+    })
     if args.deployment_id:
         payload["deployment_id"] = args.deployment_id
     if args.deployment_source_hash:
@@ -737,68 +474,38 @@ def build_deployment_payload(
 
 
 def proof_command_for_project(
-    *,
-    project: Path,
-    project_arg: str,
-    task: str,
-    url: str,
-    expect_status: int,
-    manifest: Path,
-    deployment: Path,
-    smoke: Path,
+    args: argparse.Namespace, project: Path, project_arg: str,
+    artifacts: Mapping[str, Path],
 ) -> list[str]:
-    deployment_rel = common.project_relative(project, deployment)
-    smoke_rel = common.project_relative(project, smoke)
+    values = {
+        "project": project_arg, "task": args.task, "url": safe_url_for_artifact(args.url),
+        "expect_status": args.expect_status,
+        "deployment": common.project_relative(project, artifacts["deployment"]),
+        "smoke": common.project_relative(project, artifacts["smoke"]),
+    }
     return [
-        "python3",
-        "scripts/star_forge.py",
-        "preview-proof",
-        "--project",
-        project_arg,
-        "--task",
-        task,
-        "--url",
-        url,
-        "--expect-status",
-        str(expect_status),
-        "--deployment-metadata",
-        deployment_rel,
-        "--smoke-checks",
-        smoke_rel,
-        "--strict",
+        str(token).format_map(values)
+        for token in policy_list("preview", "COMMAND_TEMPLATE")
     ]
 
 
 def run_record_command(command: Sequence[str]) -> int:
-    argv = [sys.executable if item == "python3" else str(STAR_FORGE) if item == "scripts/star_forge.py" else item for item in command]
-    proc = subprocess.run(argv, cwd=str(PLUGIN_ROOT), text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
-    if proc.stdout:
-        print(proc.stdout, end="")
-    if proc.stderr:
-        print(proc.stderr, end="", file=sys.stderr)
-    return proc.returncode
+    result = common.run_trusted_command(command, cwd=PLUGIN_ROOT, script_path=STAR_FORGE)
+    if result["stdout"]:
+        print(result["stdout"], end="")
+    if result["stderr"]:
+        print(result["stderr"], end="", file=sys.stderr)
+    return int(result["returncode"])
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Collect provider-neutral preview URL evidence")
-    parser.add_argument("--project", default=".")
-    parser.add_argument("--task", required=True)
-    parser.add_argument("--url", required=True)
-    parser.add_argument("--expect-status", type=int, default=200)
-    parser.add_argument("--smoke-check", action="append", default=[])
-    parser.add_argument("--header", action="append", default=[])
-    parser.add_argument("--timeout", type=float, default=10.0)
-    parser.add_argument("--max-redirects", type=int, default=5)
-    parser.add_argument("--max-body-bytes", type=int, default=256 * 1024)
-    parser.add_argument("--server-lease", default="")
-    parser.add_argument("--local-preview-mode", action="store_true")
-    parser.add_argument("--provider", default="provider-neutral")
-    parser.add_argument("--deployment-id", default="")
-    parser.add_argument("--deployment-source-hash", default="")
-    parser.add_argument("--deployment-commit-sha", default="")
-    parser.add_argument("--local-build-artifact", default="")
-    parser.add_argument("--diagnostic-screenshot", default="")
-    parser.add_argument("--record", action="store_true")
+    types = {"int": int, "float": float}
+    for option in policy_list("preview", "PARSER_OPTIONS"):
+        kwargs = {key: value for key, value in option.items() if key != "name"}
+        if isinstance(kwargs.get("type"), str):
+            kwargs["type"] = types[kwargs["type"]]
+        parser.add_argument(option["name"], **kwargs)
     return parser
 
 
@@ -806,10 +513,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(list(argv) if argv is not None else None)
     project = Path(args.project).resolve()
     root = common.live_collector_dir(project, args.task, COLLECTOR)
-    source_before = common.compute_source_hash(project)
-    runtime_hash = common.compute_runtime_asset_hash(project)
-    artifact_reports: list[Mapping[str, Any]] = []
-    problems: list[dict[str, Any]] = []
+    source_before, runtime_hash = (
+        common.compute_source_hash(project), common.compute_runtime_asset_hash(project),
+    )
+    artifact_reports, problems = [], []
 
     lease_runtime_hash = runtime_hash
     if args.server_lease:
@@ -828,47 +535,28 @@ def main(argv: Sequence[str] | None = None) -> int:
     problems.extend(lease_problems)
     if args.local_preview_mode and not lease_valid:
         problems.append(problem("--local-preview-mode does not authorize loopback requests without a valid server lease", rule="preview-localhost"))
-    allow_local = lease_valid
     lease_artifact_path: Path | None = None
 
     headers, header_problems = parse_headers(args.header)
-    problems.extend(header_problems)
-
-    deployment_payload, deployment_problems = build_deployment_payload(args, project=project, current_source=source_before)
-    problems.extend(deployment_problems)
-
-    pre_request_blockers = [item for item in header_problems if item.get("blocking", True)]
-    if pre_request_blockers:
-        url_problems = validate_url_safety(args.url, allow_local=allow_local)
+    deployment_payload, deployment_problems = build_deployment_payload(
+        args, project=project, current_source=source_before,
+    )
+    problems.extend([*header_problems, *deployment_problems])
+    if any(item.get("blocking", True) for item in header_problems):
+        url_problems = validate_url_safety(args.url, allow_local=lease_valid)
         http_payload, headers_payload, body = skipped_http_payload(
-            args.url,
-            headers=headers,
-            expect_status=args.expect_status,
-            problems=[*header_problems, *url_problems],
+            args, headers, [*header_problems, *url_problems],
         )
         http_problems = url_problems
     else:
         http_payload, headers_payload, body, http_problems = fetch_http(
-            args.url,
-            headers=headers,
-            expect_status=args.expect_status,
-            timeout=args.timeout,
-            max_redirects=args.max_redirects,
-            max_body_bytes=args.max_body_bytes,
-            allow_local=allow_local,
+            args, headers, lease_valid,
         )
     problems.extend(http_problems)
-
     smoke_payload, smoke_problems = run_smoke_checks(
-        args.smoke_check,
-        body=body,
-        headers=headers_payload.get("response_headers", {}),
-        final_url=str(http_payload.get("final_url") or ""),
-        status=http_payload.get("status") if isinstance(http_payload.get("status"), int) else None,
-        expect_status=args.expect_status,
+        args, body, headers_payload, http_payload,
     )
     problems.extend(smoke_problems)
-
     if args.diagnostic_screenshot:
         try:
             screenshot = common.safe_project_path(project, args.diagnostic_screenshot, must_exist=True)
@@ -878,111 +566,86 @@ def main(argv: Sequence[str] | None = None) -> int:
             }
         except ValueError as exc:
             problems.append(problem(f"diagnostic screenshot path is unsafe: {exc}", rule="preview-screenshot", path=args.diagnostic_screenshot))
-
-    http_path = root / "http.json"
-    deployment_path = root / "deployment.json"
-    smoke_path = root / "smoke.json"
-    headers_path = root / "headers.json"
-    artifact_reports.append(json_write(http_path, http_payload))
-    artifact_reports.append(json_write(deployment_path, deployment_payload))
-    artifact_reports.append(json_write(smoke_path, smoke_payload))
-    artifact_reports.append(json_write(headers_path, headers_payload))
+    payloads = {
+        "http": http_payload, "deployment": deployment_payload,
+        "smoke": smoke_payload, "headers": headers_payload,
+    }
+    artifact_paths = {
+        name: root / filename for name, filename
+        in policy_dict("preview", "ARTIFACT_FILES").items()
+    }
+    artifact_reports += [
+        common.write_json(artifact_paths[name], payload)[1] for name, payload in payloads.items()
+    ]
     if args.server_lease and lease_valid:
         try:
             source_lease_path = common.safe_project_path(project, args.server_lease, must_exist=True)
-            lease_payload = json.loads(source_lease_path.read_text(encoding="utf-8"))
+            lease_payload = common.read_json(source_lease_path)
         except Exception as exc:
             problems.append(problem(f"server lease artifact could not be copied: {exc}", rule="preview-localhost", path=str(args.server_lease)))
         else:
             lease_artifact_path = root / "server-lease.json"
-            artifact_reports.append(json_write(lease_artifact_path, lease_payload, preserve_fields=("project",)))
+            artifact_reports.append(common.write_json(
+                lease_artifact_path, lease_payload, preserve_fields=("project",))[1])
 
-    source_after = common.compute_source_hash(project)
     degraded = any(item.get("blocking", True) for item in problems)
-    command_argv = safe_command_argv(["python3", "scripts/live_collectors/preview.py", *(list(argv) if argv is not None else sys.argv[1:])])
-    manifest_artifacts: dict[str, Path] = {"http": http_path, "deployment": deployment_path, "smoke": smoke_path, "headers": headers_path}
-    if lease_artifact_path is not None:
-        manifest_artifacts["server_lease"] = lease_artifact_path
+    manifest_artifacts = {
+        **artifact_paths,
+        **({"server_lease": lease_artifact_path} if lease_artifact_path else {}),
+    }
+    values = {
+        "url": safe_url_for_artifact(args.url),
+        "provider": evidence_provider(args.provider),
+        "status": http_payload.get("status"), "expect_status": args.expect_status,
+        "smoke_passed": smoke_payload.get("passed"),
+        "source_bound": bool(args.deployment_source_hash or args.deployment_commit_sha),
+        "local_preview_mode": bool(args.local_preview_mode),
+        "server_lease": bool(args.server_lease),
+        "server_lease_artifact": (
+            common.project_relative(project, lease_artifact_path)
+            if lease_artifact_path is not None else ""
+        ),
+        "redacted_artifacts": common.merge_reports(*artifact_reports),
+    }
     manifest = common.write_live_manifest(
         project,
         task=args.task,
         collector=COLLECTOR,
-        command_argv=command_argv,
+        command_argv=safe_command_argv([
+            "python3", "scripts/live_collectors/preview.py",
+            *(list(argv) if argv is not None else sys.argv[1:]),
+        ]),
         tool_versions={"python": sys.version.split()[0], "urllib": "stdlib"},
         artifacts=manifest_artifacts,
-        summary={
-            "url": safe_url_for_artifact(args.url),
-            "capability": CAPABILITY,
-            "provider": evidence_provider(args.provider),
-            "status": http_payload.get("status"),
-            "expected_status": args.expect_status,
-            "smoke_passed": smoke_payload.get("passed"),
-            "source_bound": bool(args.deployment_source_hash or args.deployment_commit_sha),
-            "local_preview_mode": bool(args.local_preview_mode),
-            "server_lease": bool(args.server_lease),
-            "server_lease_artifact": common.project_relative(project, lease_artifact_path) if lease_artifact_path is not None else "",
-            "redacted_artifacts": merge_reports(artifact_reports),
-        },
+        summary=render_descriptor(TEMPLATES["summary"], values),
         degraded=degraded,
         problems=problems,
         source_hash_before=source_before,
-        source_hash_after=source_after,
+        source_hash_after=common.compute_source_hash(project),
         runtime_asset_hash=runtime_hash,
     )
-    envelope_path, envelope = write_evidence_envelope(
-        project,
-        manifest,
-        provider=args.provider,
-    )
+    envelope_path, envelope = write_evidence_envelope(project, manifest, provider=args.provider)
 
-    command = proof_command_for_project(
-        project=project,
-        project_arg=args.project,
-        task=args.task,
-        url=safe_url_for_artifact(args.url),
-        expect_status=args.expect_status,
-        manifest=manifest,
-        deployment=deployment_path,
-        smoke=smoke_path,
-    )
-    record_command = proof_command_for_project(
-        project=project,
-        project_arg=str(project),
-        task=args.task,
-        url=safe_url_for_artifact(args.url),
-        expect_status=args.expect_status,
-        manifest=manifest,
-        deployment=deployment_path,
-        smoke=smoke_path,
-    )
-    result = {
-        "schema": "star-forge.preview-collector.v1",
-        "collector": COLLECTOR,
+    command = proof_command_for_project(args, project, args.project, artifact_paths)
+    record_command = proof_command_for_project(args, project, str(project), artifact_paths)
+    values.update({
         "manifest": common.project_relative(project, manifest),
         "evidence": common.project_relative(project, envelope_path),
-        "evidence_verdict": envelope["verdict"],
-        "capability": CAPABILITY,
-        "provider": evidence_provider(args.provider),
-        "artifacts": {
-            "http": common.project_relative(project, http_path),
-            "deployment": common.project_relative(project, deployment_path),
-            "smoke": common.project_relative(project, smoke_path),
-            "headers": common.project_relative(project, headers_path),
-        },
-        "degraded": degraded,
-        "problems": problems,
-        "proof_command": command,
+        "evidence_verdict": envelope["verdict"], "degraded": degraded,
+        "problems": problems, "proof_command": command,
         "proof_command_shell": shlex.join(command),
-        "recorded": False,
-    }
-    output, _ = common.redact_sensitive_values(result)
-    if isinstance(output, dict):
-        output["proof_command"] = command
-        output["proof_command_shell"] = shlex.join(command)
+        "artifacts": {
+            name: common.project_relative(project, path)
+            for name, path in artifact_paths.items()
+        },
+    })
+    output, _ = common.redact_sensitive_values(
+        render_descriptor(TEMPLATES["result"], values)
+    )
+    output["proof_command"] = command
+    output["proof_command_shell"] = shlex.join(command)
     print(json.dumps(output, indent=2, sort_keys=True))
-    if args.record:
-        return run_record_command(record_command)
-    return 1 if degraded else 0
+    return run_record_command(record_command) if args.record else 1 if degraded else 0
 
 
 if __name__ == "__main__":

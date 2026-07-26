@@ -1,0 +1,3402 @@
+{
+  "runtime_evidence.POLICY": {
+    "bindings": {
+      "EVIDENCE_SCHEMA": "star-forge.evidence-envelope.v2",
+      "LEGACY_LIVE_MANIFEST_SCHEMA": "star-forge.live-manifest.v1",
+      "EVIDENCE_VERDICTS": {"$type": "frozenset", "$items": ["PASS", "FAIL", "DEGRADED"]},
+      "REQUIRED_FIELDS": {
+        "$type": "tuple",
+        "$items": ["schema", "kind", "task", "capability", "provider", "provenance", "source_hash", "runtime_asset_hash", "started_at", "finished_at", "artifacts", "verdict", "blockers"]
+      },
+      "_SAFE_PLACEHOLDERS": {
+        "$type": "set",
+        "$items": ["", "<redacted>", "<secret>", "[redacted]", "[redacted_secret]", "example", "none", "not-set", "placeholder"]
+      },
+      "_CAPABILITY_BY_COLLECTOR": {
+        "browser": "local-web-qa",
+        "browser-playwright": "local-web-qa",
+        "preview": "preview-verification",
+        "native-ios": "native-ios-verification",
+        "native-macos": "native-macos-verification",
+        "security": "security-review",
+        "github": "github-lifecycle"
+      }
+    },
+    "verdict_by_state": {"blocking": "FAIL", "degraded": "DEGRADED", "passing": "PASS"},
+    "identity_fields": ["kind", "task", "capability", "provider"],
+    "hash_fields": ["source_hash", "runtime_asset_hash"],
+    "timestamp_fields": ["started_at", "finished_at"],
+    "artifact_optional_fields": ["kind", "bytes"],
+    "legacy_blocker_fields": ["severity", "rule", "message", "path", "blocking"],
+    "legacy_artifact_fields": ["path", "sha256", "kind", "bytes"],
+    "legacy_problem_defaults": {"message": "legacy collector reported an unspecified problem"},
+    "legacy_malformed_artifact": {"message": "legacy manifest contains a malformed artifact", "blocking": true},
+    "legacy_unavailable": {
+      "message": "capability unavailable: {capability}",
+      "blocking": false
+    },
+    "legacy_source_changed": {
+      "message": "legacy collector changed the source during collection",
+      "rule": "source-hash-changed",
+      "blocking": true
+    },
+    "patterns": {
+      "sha256": "^[0-9a-f]{64}$",
+      "windows_drive": "^[A-Za-z]:",
+      "secret_value": "(?:\\bsk-[A-Za-z0-9_-]{20,}|\\bAKIA[A-Z0-9]{16}\\b|\\bghp_[A-Za-z0-9_]{20,}|\\bgithub_pat_[A-Za-z0-9_]{20,}|\\bxox[baprs]-[A-Za-z0-9-]{20,}|\\bnpm_[A-Za-z0-9]{20,}|\\bpypi-[A-Za-z0-9_-]{20,}|\\beyJ[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}\\b|BEGIN [A-Z ]*PRIVATE KEY|\\bAuthorization\\s*[:=]\\s*(?:Bearer|Basic)\\s+[A-Za-z0-9._~+/=-]{8,}|\\b(?:OPENAI_API_KEY|GITHUB_TOKEN|GH_TOKEN|AWS_SECRET_ACCESS_KEY)\\s*=\\s*['\\\"]?[A-Za-z0-9_./+=:@-]{12,}|\\b[a-z][a-z0-9+.-]*://[^\\s:@/]+:[^\\s@/]{8,}@)",
+      "sensitive_key": "(?:^|[_-])(?:authorization|cookie|credential|password|passwd|secret|token|api[_-]?key)(?:$|[_-])"
+    },
+    "json_format": {"indent": 2, "sort_keys": true, "allow_nan": false},
+    "atomic_write": {"mode": 384, "prefix": ".{name}.", "suffix": ".tmp"},
+    "aliases": {
+      "validate_evidence": "validate_envelope",
+      "adapt_live_manifest_v1": "adapt_v1_manifest",
+      "read_evidence": "read_envelope",
+      "load_evidence": "read_envelope",
+      "write_evidence": "write_envelope"
+    },
+    "docs": {
+      "EvidenceError": "Evidence could not be read, adapted, validated, or safely written.",
+      "validate_artifact_path": "Return a safe POSIX project-relative artifact reference.",
+      "validate_envelope": "Raise EvidenceError unless an envelope satisfies the v2 contract.",
+      "adapt_v1_manifest": "Adapt a legacy live collector manifest to v2 without writing either form.",
+      "read_envelope": "Read validated v2 evidence, adapting a v1 live manifest in memory.",
+      "write_envelope": "Validate and atomically write a v2 envelope."
+    },
+    "errors": {
+      "text_required": "{field} must be a non-empty string",
+      "text_unsafe": "{field} contains unsafe whitespace or control characters",
+      "sha256": "{field} must be a lowercase SHA-256 digest",
+      "timestamp": "{field} must be an ISO-8601 timestamp",
+      "timezone": "{field} must include a timezone",
+      "path_relative": "artifact path must be project-relative: {path}",
+      "path_normalized": "artifact path is not normalized or escapes the project: {path}",
+      "path_resolve": "artifact path cannot be resolved: {path}",
+      "path_escape": "artifact path escapes the project: {path}",
+      "artifact_object": "artifacts[{index}] must be an object",
+      "artifact_bytes": "artifacts[{index}].bytes must be a non-negative integer",
+      "project_root": "project_root is required when verify_artifacts is true",
+      "artifact_missing": "artifact does not exist as a file: {path}",
+      "artifact_hash": "artifact hash does not match file bytes: {path}",
+      "artifact_size": "artifact byte count does not match file bytes: {path}",
+      "envelope_object": "evidence envelope must be a JSON object",
+      "envelope_missing": "evidence envelope is missing fields: {fields}",
+      "schema": "evidence schema must be {schema}",
+      "provenance": "provenance must be a non-empty object",
+      "time_order": "finished_at cannot be earlier than started_at",
+      "artifacts_array": "artifacts must be an array",
+      "artifact_duplicate": "artifact path appears more than once: {path}",
+      "verdict": "verdict must be PASS, FAIL, or DEGRADED",
+      "blockers_array": "blockers must be an array",
+      "blocker": "blockers[{index}] must be a non-empty string or object",
+      "secret": "evidence envelope contains secret material at: {locations}",
+      "json_finite": "evidence envelope must contain only finite JSON values",
+      "legacy_artifact_missing": "legacy artifact does not exist: {path}",
+      "legacy_schema": "legacy manifest schema must be {schema}",
+      "read": "cannot read evidence {path}: {error}",
+      "file_object": "evidence file must contain a JSON object",
+      "legacy_disallowed": "legacy v1 evidence is not allowed",
+      "write_conflict": "pass either envelope or keyword fields, not both",
+      "write": "cannot write evidence {path}: {error}"
+    }
+  },
+  "policy_data.DOCS": {
+    "value": "Return one decoded policy table, failing closed when it is absent.",
+    "project": "Project ordered record fields from source mappings plus explicit values.",
+    "mapping": "Build one exact ordered internal mapping from policy defaults.",
+    "record": "Build one exact, descriptor-backed public record."
+  },
+  "mappings.evidence_envelope": {
+    "fields": ["schema", "kind", "task", "capability", "provider", "provenance", "source_hash", "runtime_asset_hash", "started_at", "finished_at", "artifacts", "verdict", "blockers"],
+    "defaults": {}
+  },
+  "mappings.legacy_provenance": {
+    "fields": ["adapter", "collector", "command_argv", "tool_versions"],
+    "defaults": {}
+  },
+  "mappings.legacy_unavailable_blocker": {
+    "fields": ["message", "capability", "blocking"],
+    "defaults": {}
+  },
+  "mappings.legacy_artifact": {
+    "fields": ["path", "sha256", "kind", "bytes"],
+    "defaults": {"kind": null, "bytes": null}
+  },
+  "runtime_routing.POLICY": {
+    "schema": "star-forge.capability-routing.v1",
+    "catalog_path": "config/capability-routing.json",
+    "selector_labels": {
+      "project_classes": "project_class",
+      "blueprint_flags": "blueprint_flag",
+      "proof_kinds": "proof",
+      "delivery_targets": "delivery"
+    },
+    "option_kinds": {"$type": "set", "$items": ["plugin", "mcp", "native", "computer-use", "shell", "blocker"]},
+    "request_inputs": {
+      "project_classes": "project_class",
+      "blueprint_flags": "blueprint_flags",
+      "proof_kinds": "proof_kinds",
+      "delivery_targets": "delivery_target",
+      "required_needs": "required_needs",
+      "material_needs": "material_needs"
+    },
+    "public_option_fields": ["id", "label", "kind"],
+    "conditional_option_fields": ["auth", "safe"],
+    "statuses": {"blocked": "blocked", "available": "available", "degraded": "degraded"},
+    "blocker_kind": "blocker",
+    "shell_kind": "shell",
+    "plugin_kind": "plugin",
+    "install_policy": {"installation": "suggest-only", "requires_user_action": true},
+    "install_suggestion": {
+      "reason": "{purpose} materially depends on the preferred {label} capability.",
+      "requires_user_action": true,
+      "action": "request-plugin-install"
+    },
+    "errors": {
+      "values": "routing values must be strings or iterables",
+      "load_catalog": "cannot load capability catalog {path}: {error}",
+      "schema": "catalog schema must be {schema}",
+      "order_object": "catalog preference_order must be an object",
+      "order_kinds": "catalog preference_order must define every supported option kind",
+      "order_ranks": "catalog preference ranks must be non-negative integers",
+      "policy_object": "catalog policy must be an object",
+      "install_policy": "catalog installation policy must be suggest-only and require user action",
+      "routes": "catalog routes must be a non-empty array",
+      "route_object": "route {index} must be an object",
+      "route_id": "route {index} has an invalid id",
+      "route_duplicate": "duplicate route id: {route_id}",
+      "route_purpose": "route {route_id} must have a purpose",
+      "route_selectors": "route {route_id} must have selectors",
+      "route_unknown_selectors": "route {route_id} has unknown selectors: {selectors}",
+      "route_empty_selectors": "route {route_id} selectors cannot all be empty",
+      "route_options": "route {route_id} must have options",
+      "option_object": "route {route_id} option {index} must be an object",
+      "option_id": "route {route_id} option {index} has an invalid id",
+      "option_duplicate": "route {route_id} has duplicate option id: {option_id}",
+      "option_kind": "route {route_id} option {option_id} has invalid kind",
+      "option_order": "route {route_id} options violate preference_order",
+      "option_label": "route {route_id} option {option_id} must have a label",
+      "option_aliases": "route {route_id} option {option_id} aliases must be strings",
+      "install_data": "route {route_id} option {option_id} has invalid install data",
+      "install_plugin_id": "route {route_id} option {option_id} install data needs plugin_id",
+      "install_user_action": "route {route_id} option {option_id} install must require user action",
+      "unsafe_shell": "route {route_id} option {option_id} cannot be an automatic unsafe shell fallback",
+      "unknown_needs": "unknown required needs: {needs}",
+      "catalog_conflict": "pass catalog or catalog_path, not both",
+      "material_conflict": "material needs must also be required: {needs}",
+      "option_unavailable": "route {route_id} has no available option or explicit blocker"
+    }
+  },
+  "mappings.routing_request": {
+    "fields": ["project_classes", "blueprint_flags", "proof_kinds", "delivery_targets", "required_needs", "material_needs"],
+    "defaults": {}
+  },
+  "mappings.route_decision": {
+    "fields": ["need", "purpose", "required_by", "selected", "status", "fallback_used", "unavailable", "install_suggestion"],
+    "defaults": {}
+  },
+  "mappings.routing_result": {
+    "fields": ["schema", "request", "blocked", "degraded", "decisions"],
+    "defaults": {}
+  },
+  "mappings.public_option": {
+    "fields": ["id", "label", "kind"],
+    "defaults": {}
+  },
+  "mappings.install_suggestion": {
+    "fields": ["need", "capability", "plugin_id", "reason", "requires_user_action", "action"],
+    "defaults": {}
+  },
+  "runtime_support.POLICY": {
+    "constants": {
+      "SF_VERSION": "0.3.0",
+      "PLUGIN_NAME": "star-forge",
+      "BLUEPRINT_FILE": "Blueprint.md",
+      "PLAN_FILE": "Plan.md",
+      "SOURCE_PROFILE_FILE": "StarForge.profile.json",
+      "SOURCE_PROFILE_SCHEMA": "star-forge.source-profile.v1",
+      "AGENT_NAME_PREFIX": "starforge-",
+      "MAX_AUTO_CONTINUES": 3,
+      "STAR_FORGE_STATE_VERSION": "3.0"
+    },
+    "paths": {
+      "LOOP_DIR": "the-loop",
+      "STATE_DIR": ".starforge",
+      "STATE_SUBDIR": ".starforge/state",
+      "RUNS_DIR": ".starforge/runs",
+      "TASKS_DIR": ".starforge/tasks",
+      "FINAL_DIR": ".starforge/final",
+      "REVIEWS_DIR": ".starforge/reviews",
+      "SCREENSHOTS_DIR": ".starforge/screenshots",
+      "RUNTIME_DIR": ".starforge/runtime",
+      "CANONICAL_STATE": ".starforge/state.json",
+      "PROJECT_MANIFEST": ".starforge/project.json",
+      "PROOF_FILE": ".starforge/final/proof.json",
+      "FINAL_SUMMARY": ".starforge/final/summary.md",
+      "LEDGER_FILE": ".starforge/ledger.jsonl",
+      "HOOK_EVENTS": ".starforge/state/hook-events.jsonl",
+      "SUBAGENT_EVENTS": ".starforge/state/subagent-events.jsonl",
+      "AUTO_CONTINUE_FILE": ".starforge/state/auto-continue.json",
+      "CHANGED_FILES": ".starforge/state/changed-files.jsonl",
+      "HANDOFF_ARTIFACT": ".starforge/state/handoff-artifact.json",
+      "WAIVES_FILE": ".starforge/state/waives.jsonl",
+      "INCIDENTS_FILE": ".starforge/state/incidents.jsonl",
+      "HOOK_TRUST_NOTICE_FILE": ".starforge/state/hook-trust-notice.json",
+      "SERVER_LEASE": ".starforge/runtime/server.json",
+      "SCREENSHOT_MANIFEST": ".starforge/screenshots/manifest.json"
+    },
+    "sets": {
+      "VALID_STATUSES": {"$type": "set", "$items": ["queued", "ready", "in_progress", "blocked", "reviewing", "complete"]},
+      "VALID_MODES": {"$type": "set", "$items": ["solo", "delegate", "docs"]},
+      "BLOCKING_SEVERITIES": {"$type": "set", "$items": ["critical", "high", "medium"]},
+      "FINDING_SEVERITIES": {"$type": "set", "$items": ["critical", "high", "medium", "low", "info"]},
+      "INFRASTRUCTURE_DOCUMENT_SUFFIXES": {"$type": "frozenset", "$items": [".md", ".mdx", ".rst"]},
+      "PYTHON_CONTROL_PLANE_PARTS": {"$type": "frozenset", "$items": ["scripts", "tooling", "tools"]},
+      "SECRET_PRONE_SUFFIXES": {"$type": "set", "$items": [".pem", ".key", ".crt", ".cer", ".p12", ".pfx", ".keystore"]}
+    },
+    "finding_severity_rank": {"info": 1, "low": 2, "medium": 3, "high": 4, "critical": 5},
+    "source_snapshot_names": [
+      ".dockerignore", ".env", ".gitignore", "package.json", "package-lock.json",
+      "pnpm-lock.yaml", "yarn.lock", "requirements.txt", "pyproject.toml", "Cargo.toml",
+      "go.mod", "go.sum", "Blueprint.md", "Plan.md", ".npmrc", ".yarnrc", ".yarnrc.yml",
+      ".pnpmfile.cjs", ".pnp.cjs", ".pnp.loader.mjs", ".node-version", ".nvmrc",
+      "npm-shrinkwrap.json", "pnpm-workspace.yaml", "bun.lock", "bun.lockb", "deno.lock",
+      "Dockerfile", "Containerfile", "Makefile", "GNUmakefile", "BSDmakefile",
+      "docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml",
+      "Procfile", "Caddyfile"
+    ],
+    "text_suffixes": [
+      ".env", ".astro", ".c", ".cc", ".cfg", ".conf", ".cpp", ".cs", ".css", ".go",
+      ".h", ".html", ".java", ".js", ".json", ".jsx", ".kt", ".mjs", ".md", ".php",
+      ".plist", ".py", ".rb", ".rs", ".sh", ".swift", ".toml", ".ts", ".tsx", ".txt",
+      ".vue", ".xml", ".yaml", ".yml"
+    ],
+    "text_names": ["Blueprint.md", "Plan.md", "README.md", ".gitignore"],
+    "visual_task_pattern": "\\b(ui|ux|visual|browser|screenshot|responsive|frontend|front-end|layout|styling|css|web ?page|viewport)\\b",
+    "ai_residual_patterns": [
+      ["\\bas an ai\\b", "ai-disclaimer", "medium"],
+      ["\\bTODO:\\s*(implement|wire|fix later|placeholder)\\b", "unfinished-todo", "medium"],
+      ["\\b(?:lorem ipsum|dummy data|fake data)\\b", "placeholder-content", "low"],
+      ["\\b(?:quick hack|temporary hack|hacky workaround)\\b", "hack-language", "medium"],
+      ["\\bconsole\\.log\\s*\\(", "console-log", "low"]
+    ],
+    "image_magic_hex": {"png": "89504e470d0a1a0a", "jpeg": "ffd8ff"},
+    "json_format": {"indent": 2, "sort_keys": true},
+    "volatile_fields": ["created_at", "updated_at"],
+    "redacted_fields": ["prompt", "raw_prompt", "secret", "token", "password", "api_key"],
+    "aliases": {
+      "live_common": {
+        "now_utc": "now_utc",
+        "file_sha256": "file_sha256",
+        "run_git": "run_git",
+        "is_git_repo": "is_git_repo",
+        "git_status_path": "git_status_path",
+        "snapshot_file_candidates": "snapshot_file_candidates",
+        "source_snapshot_includes": "source_snapshot_includes",
+        "files_fingerprint": "files_fingerprint",
+        "source_hash": "compute_source_hash",
+        "source_snapshot_rel_paths": "source_snapshot_rel_paths",
+        "dirty_paths_missing_from_source_snapshot": "dirty_paths_missing_from_source_snapshot"
+      },
+      "review_policy": {
+        "REVIEW_PROFILE_ROLES": "LEGACY_PROFILE_ROLES",
+        "KNOWN_REVIEW_ROLES": "ALL_REVIEW_ROLES",
+        "REVIEW_ROLE_LENSES": "ROLE_LENSES"
+      },
+      "project_quality": {
+        "is_source_file": "is_source_file",
+        "architecture_debt_findings": "architecture_debt_findings"
+      }
+    },
+    "git_commands": {
+      "head": ["rev-parse", "HEAD"],
+      "root": ["rev-parse", "--show-toplevel"],
+      "init": ["init"],
+      "status": ["status", "--short", "--untracked-files=all", "--", "."],
+      "changed": ["diff", "--name-only", "HEAD"],
+      "untracked": ["ls-files", "--others", "--exclude-standard"]
+    },
+    "messages": {
+      "json_object": "{path} must contain a JSON object",
+      "symlink_append": "Refusing to append to symlink: {path}",
+      "git_init": "git init failed: {error}",
+      "template_missing": "Missing template: {path}"
+    },
+    "scan_finding": {
+      "secret": ["critical", "secret-material", "line contains likely secret material"],
+      "evidence_limit": 160
+    },
+    "finding_defaults": {
+      "file": "unknown",
+      "rule": "finding",
+      "message": "blocking finding",
+      "severity": "high"
+    }
+  },
+  "runtime_records.POLICY": {
+    "schemas": {
+      "ledger": "star-forge.ledger.v1",
+      "verify": "star-forge.verify-run.v1",
+      "server_lease": "star-forge.server-lease.v1",
+      "screenshot_manifest": "star-forge.screenshot-manifest.v1",
+      "browser": "star-forge.browser-run.v1"
+    },
+    "kinds": {
+      "run_default": "run",
+      "verify": "verify-run",
+      "browser": "browser-run"
+    },
+    "verdicts": {
+      "pass": "PASS",
+      "fail": "FAIL"
+    },
+    "verify": {
+      "noop_command": "NOOP",
+      "noop_summary": "No-op verification recorded for documentation-only task.",
+      "timeout_returncode": 124,
+      "stdout_limit": 6000,
+      "complete_status": "complete"
+    },
+    "server_lease": {
+      "default_owner": "star-forge",
+      "default_scheme": "http",
+      "default_host": "127.0.0.1",
+      "https_port": 443,
+      "http_port": 80,
+      "actions": ["release", "status", "claim"]
+    },
+    "browser": {
+      "collector": "browser",
+      "required_viewports": ["desktop", "mobile"],
+      "screenshot_extensions": [".png", ".jpg", ".jpeg", ".webp"],
+      "artifact_groups": [
+        ["interaction_evidence", "interaction"],
+        ["console_evidence", "console"]
+      ],
+      "validation_groups": [
+        ["console_evidence", "console"],
+        ["interaction_evidence", "interaction"]
+      ],
+      "screenshot_names": ["mobile", "desktop"],
+      "pass_verdict": "PASS"
+    },
+    "errors": {
+      "noop_ineligible": "Task {task} is not eligible for no-op verification; it is mode=docs only with no code files. Run a real verification command.",
+      "verify_command_required": "verify requires --command unless --noop is used",
+      "verify_command_noop": "`{command}` is a trivially-passing no-op, not a verification. Run the task's real Verify command.",
+      "verify_timeout": "\\nCommand timed out after {timeout} seconds.",
+      "viewport_format": "viewport must use NAME=WIDTHxHEIGHT:SCREENSHOT or NAME=SCREENSHOT"
+    },
+    "findings": {
+      "verify_noop_missing": [
+        "verify-noop-missing",
+        "docs task {task} needs a recorded no-op verify run."
+      ],
+      "verify_stale": [
+        "verify-stale",
+        "Task {task} has no passing verify run that matches its declared Verify command and the CURRENT source tree; rerun the task's real verify command."
+      ],
+      "browser_missing": [
+        "browser-run-missing",
+        "User-facing task {task} needs a passing browser-run with desktop and mobile evidence."
+      ]
+    },
+    "problems": {
+      "artifact_path_missing": ["high", "browser-artifact", "browser artifact is missing a path"],
+      "artifact_path_unsafe": ["high", "browser-artifact", "browser artifact path is unsafe: {error}"],
+      "artifact_scope": ["high", "browser-artifact-scope", "browser artifact must be under .starforge/live/<task>/browser/"],
+      "artifact_manifest": ["high", "browser-artifact-manifest", "browser artifact is not recorded in the live manifest"],
+      "viewport_missing": ["high", "screenshot", "viewport screenshot does not exist: {path}"],
+      "viewport_invalid": ["high", "screenshot", "viewport screenshot is not a decodable PNG/JPEG image: {path}"],
+      "screenshot_missing": ["high", "screenshot", "screenshot does not exist: {path}"],
+      "screenshot_invalid": ["high", "screenshot", "screenshot is not a decodable PNG/JPEG image: {path}"],
+      "evidence_missing": ["high", "{kind}-evidence", "{kind} evidence does not exist: {path}"],
+      "browser_degraded": ["high", "browser-degraded", "browser run was marked degraded"],
+      "viewport_required": ["high", "browser-viewports", "browser run requires `{viewport}` viewport evidence"],
+      "interaction_required": ["high", "interaction-evidence", "browser run requires interaction evidence"],
+      "console_required": ["medium", "console-evidence", "browser run requires console evidence"],
+      "manifest_missing": ["high", "manifest-missing", "strict browser-run requires --live-manifest from the browser collector"],
+      "validator_unavailable": ["high", "browser-validator", "browser artifact validators are unavailable: {error}"],
+      "browser_url_missing": ["high", "browser-url", "browser live manifest must include URL provenance"],
+      "browser_url_mismatch": ["high", "browser-url", "browser-run URL does not match live manifest URL"],
+      "server_lease_validation": ["high", "server-lease", "server lease validation failed: {error}"],
+      "server_lease_required": ["high", "server-lease", "browser run requires a Star Forge server lease"],
+      "server_lease_invalid": ["high", "server-lease", "--server-lease was passed but no valid lease is claimed"]
+    }
+  },
+  "mappings.ledger_event": {
+    "fields": ["schema", "timestamp", "event", "task", "verdict", "summary", "artifacts"],
+    "defaults": {}
+  },
+  "mappings.verify_record": {
+    "fields": [
+      "schema",
+      "kind",
+      "created_at",
+      "started_at",
+      "project",
+      "task",
+      "command",
+      "noop",
+      "returncode",
+      "verdict",
+      "duration_timeout_seconds",
+      "source_snapshot",
+      "stdout_tail",
+      "stderr_tail",
+      "problems",
+      "summary"
+    ],
+    "defaults": {}
+  },
+  "mappings.server_lease": {
+    "fields": [
+      "schema",
+      "created_at",
+      "updated_at",
+      "project",
+      "owner",
+      "pid",
+      "port",
+      "base_url",
+      "origin",
+      "command",
+      "cleanup_required",
+      "source_hash",
+      "runtime_asset_hash"
+    ],
+    "defaults": {}
+  },
+  "mappings.screenshot_manifest": {
+    "fields": ["schema", "created_at", "context", "screenshots"],
+    "defaults": {}
+  },
+  "mappings.browser_record": {
+    "fields": [
+      "schema",
+      "kind",
+      "created_at",
+      "project",
+      "task",
+      "url",
+      "server_lease",
+      "scenario",
+      "verdict",
+      "degraded",
+      "viewports",
+      "interaction_evidence",
+      "console_evidence",
+      "source_snapshot",
+      "live_manifest",
+      "problems",
+      "summary"
+    ],
+    "defaults": {}
+  },
+  "mappings.task_finding": {
+    "fields": ["severity", "rule", "file", "task", "message"],
+    "defaults": {"severity": "high"}
+  },
+  "runtime_plan.POLICY": {
+    "statuses": [
+      "queued",
+      "ready",
+      "in_progress",
+      "blocked",
+      "reviewing",
+      "complete"
+    ],
+    "modes": ["solo", "delegate", "docs"],
+    "default_mode": "delegate",
+    "dependency_empty": ["", "-", "none", "None"],
+    "dependency_separator": "[,/]",
+    "file_empty": ["", "-", "none", "n/a", "na"],
+    "file_separator": "[,;]",
+    "code_filenames": [
+      "dockerfile",
+      "makefile",
+      "rakefile",
+      "gemfile",
+      "procfile",
+      "justfile",
+      "vagrantfile"
+    ],
+    "noop": {
+      "commands": ["true", ":", "echo", "printf", "sleep", "pwd", "clear"],
+      "presence_heads": ["which", "type", "hash"],
+      "always_present_paths": [".", "..", "/", "./", "$pwd", "$home", "$(pwd)"],
+      "zero_exit_heads": ["exit", "return"],
+      "command_presence_flags": ["-v", "-V"],
+      "shell_heads": ["bash", "sh"],
+      "test_heads": ["test", "[", "[["],
+      "test_closers": ["]", "]]"],
+      "equal_operators": ["=", "==", "-eq"],
+      "present_path_operators": ["-e", "-d", "-r", "-x", "-s"],
+      "max_wrapper_depth": 3,
+      "max_group_depth": 4,
+      "max_peels": 6
+    },
+    "visual": {
+      "browser_proof": "browser",
+      "plan_v2": "v2",
+      "prose_fields": ["description", "verify", "files", "evidence"],
+      "infrastructure_parts": [
+        "agents",
+        "collectors",
+        "config",
+        "docs",
+        "fixtures",
+        "live_collectors",
+        "skills",
+        "templates",
+        "test",
+        "tests"
+      ],
+      "infrastructure_document_suffixes": [".md", ".mdx", ".rst"],
+      "infrastructure_names": ["readme", "readme.md", "changelog", "changelog.md"],
+      "infrastructure_name_markers": [".test.", ".spec."],
+      "visual_source_suffixes": [
+        ".astro",
+        ".css",
+        ".htm",
+        ".html",
+        ".jsx",
+        ".less",
+        ".sass",
+        ".scss",
+        ".storyboard",
+        ".svelte",
+        ".tsx",
+        ".vue",
+        ".xib"
+      ],
+      "visual_source_parts": [
+        "components",
+        "frontend",
+        "layouts",
+        "pages",
+        "screens",
+        "ui",
+        "views"
+      ],
+      "python_control_plane_parts": ["scripts", "tooling", "tools"],
+      "swift_view_suffixes": ["view", "screen"],
+      "prose_pattern": "\\b(ui|ux|visual|browser|screenshot|responsive|frontend|front-end|layout|styling|css|web ?page|viewport)\\b"
+    },
+    "validation": {
+      "verify_required_statuses": ["ready", "in_progress", "reviewing", "complete"],
+      "evidence_required_statuses": {
+        "complete": "complete_evidence",
+        "blocked": "blocked_evidence"
+      },
+      "problems": {
+        "invalid_status": ["high", "invalid status `{status}`"],
+        "invalid_mode": ["medium", "invalid mode `{mode}`; use solo, delegate, or docs"],
+        "missing_verify": ["high", "missing verify command; name a real verification command or set mode=docs"],
+        "noop_verify": ["high", "Verify command `{verify}` is a no-op; name a real verification command"],
+        "complete_evidence": ["high", "complete task requires evidence links"],
+        "blocked_evidence": ["high", "blocked task requires evidence or reason"],
+        "unknown_dependency": ["medium", "unknown dependency `{dependency}`"]
+      }
+    },
+    "contract_modes": {
+      "empty": "unknown",
+      "legacy": "legacy",
+      "v2": "v2",
+      "multiple": "mixed",
+      "default_version": "compatible"
+    },
+    "readiness": {
+      "candidate_statuses": ["queued", "ready"],
+      "complete_status": "complete"
+    },
+    "placeholder": {
+      "task_id": "SF-001",
+      "description_marker": "define the first build task"
+    },
+    "errors": {
+      "missing_plan": "{path} does not exist",
+      "unparsed_task_table": "Plan.md contains a task-like table that did not parse to any tasks. The header row must use exact `Task` and `Status` columns followed by a `|---|` separator row.",
+      "task_not_found": "Task {task} not found in {path}"
+    },
+    "lifecycle": {
+      "kinds": {
+        "foundation": {
+          "contract": ".starforge/foundation/contract.json",
+          "evidence": ".starforge/foundation/evidence.json",
+          "satisfied_field": "ready_for_feature_work",
+          "bind_evidence_source": true
+        },
+        "delivery": {
+          "contract": ".starforge/delivery/contract.json",
+          "evidence": ".starforge/delivery/evidence.json",
+          "satisfied_field": "ready_for_completion",
+          "bind_evidence_source": false
+        }
+      },
+      "compatible_result": {
+        "status": "COMPATIBLE",
+        "satisfied": true,
+        "blockers": []
+      },
+      "missing_status": "MISSING",
+      "blocked_status": "BLOCKED",
+      "missing_message": "missing lifecycle artifact: {path}",
+      "unreadable_message": "{kind} lifecycle artifacts are unreadable: {error}",
+      "target_mismatch": "delivery contract target does not match Blueprint.md"
+    }
+  },
+  "runtime_native.POLICY": {
+    "platforms": {
+      "ios": {
+        "collector": "native-ios",
+        "proof_kind": "native-ios-proof",
+        "summary": "native iOS proof",
+        "required_args": [
+          ["scheme", "ios_scheme"],
+          ["simulator", "ios_simulator"]
+        ],
+        "session_artifacts": [
+          ["session-defaults.json", "session"],
+          ["mcp-transcript.json", "transcript"]
+        ],
+        "result_artifacts": [
+          ["build result", "build_result"],
+          ["launch result", "launch_result"],
+          ["test result", "test_result"]
+        ],
+        "visual_artifacts": [
+          ["screenshot", "screenshot", "image"],
+          ["ui snapshot", "ui_snapshot", "object"]
+        ],
+        "session_validation_defaults": {
+          "runtime": "",
+          "udid": ""
+        },
+        "transcript_args": {
+          "mcp_server": "",
+          "mcp_version": "",
+          "agent_id": "",
+          "mcp_unavailable": false,
+          "manifest_mcp_provenance": null,
+          "manifest_source_hash": ""
+        },
+        "cli_options": [
+          "--project",
+          "--task",
+          "--scheme",
+          "--simulator",
+          "--build-result",
+          "--launch-result",
+          "--test-result",
+          "--screenshot",
+          "--ui-snapshot",
+          "--strict"
+        ]
+      },
+      "macos": {
+        "collector": "native-macos",
+        "proof_kind": "native-macos-proof",
+        "summary": "native macOS proof",
+        "result_artifacts": [
+          ["build result", "build_result", false],
+          ["run result", "run_result", false],
+          ["test result", "test_result", true]
+        ],
+        "note_artifacts": [
+          ["signing", "signing_note"],
+          ["packaging", "packaging_note"]
+        ],
+        "cli_options": [
+          "--project",
+          "--task",
+          "--app-name",
+          "--bundle-id",
+          "--build-result",
+          "--run-result",
+          "--test-result",
+          "--screenshot",
+          "--app-bundle",
+          "--signing-note",
+          "--packaging-note",
+          "--strict"
+        ]
+      }
+    },
+    "schemas": {
+      "macos_result": "star-forge.native-macos.result.v1",
+      "macos_note": "star-forge.native-macos.note.v1",
+      "macos_metadata": "star-forge.native-macos.app-bundle-metadata.v1"
+    },
+    "macos_result": {
+      "artifact_keys": ["stdout_artifact", "stderr_artifact"],
+      "runtime_required_fields": [
+        "pid",
+        "readiness",
+        "termination",
+        "cleanup",
+        "stdout_artifact",
+        "stderr_artifact"
+      ],
+      "readiness_statuses": ["observed", "not_requested"],
+      "timeout_max_seconds": 86400,
+      "duration_slack_seconds": 60,
+      "fixed_fields": [
+        ["shell", false, "macos_result_shell"],
+        ["cwd", ".", "macos_result_cwd"]
+      ],
+      "failure_flags": [
+        ["timed_out", "macos_run_timeout"],
+        ["gui_launch_failed", "macos_gui_launch"],
+        ["cleanup_failed", "macos_cleanup_failed"]
+      ]
+    },
+    "macos_metadata": {
+      "required_true": [
+        ["metadata_only", "macos_metadata_only"],
+        ["valid", "macos_metadata_valid"],
+        ["executable_exists", "macos_metadata_executable"]
+      ]
+    },
+    "macos_note": {
+      "required_fields": [
+        ["metadata_only", true, "macos_note_metadata"],
+        ["status", "not_checked", "macos_note_status"]
+      ]
+    },
+    "app_bundle": {
+      "extension": ".app",
+      "info_plist": ["Contents", "Info.plist"],
+      "executable_path": ["Contents", "MacOS"],
+      "plist_keys": {
+        "bundle_id": "CFBundleIdentifier",
+        "executable": "CFBundleExecutable",
+        "name": "CFBundleName",
+        "display_name": "CFBundleDisplayName"
+      }
+    },
+    "security_profiles": [
+      "dependency-audit",
+      "security-deep",
+      "security-diff",
+      "vulnerability-fix"
+    ],
+    "problems": {
+      "ios_scheme": ["native iOS proof requires --scheme", "native-ios-scheme"],
+      "ios_simulator": ["native iOS proof requires --simulator", "native-ios-simulator"],
+      "ios_result_validation": ["{label} command validation failed: {error}", "native-ios-result"],
+      "ios_scheme_mismatch": ["{label} scheme does not match proof input", "native-ios-result"],
+      "ios_simulator_mismatch": ["{label} simulator does not match proof input", "native-ios-result"],
+      "ios_result_failed": ["{label} failed: {failure}", "native-ios-result"],
+      "ios_ui_required": ["native iOS proof requires screenshot or UI snapshot evidence", "native-ios-ui"],
+      "ios_transcript_validation": ["native iOS transcript validation failed: {error}", "native-ios-transcript"],
+      "ios_app_identity": ["native iOS manifest summary must include app_identity", "native-ios-app-identity"],
+      "macos_runtime_missing": ["run result is missing runtime observation fields: {fields}", "native-macos-runtime"],
+      "macos_runtime_success": ["run result must report success true", "native-macos-result"],
+      "macos_run_timeout": ["run result timed out", "native-macos-run-timeout"],
+      "macos_gui_launch": ["run result reports GUI launch failure", "native-macos-gui-launch"],
+      "macos_cleanup_failed": ["run result reports cleanup failure", "native-macos-cleanup"],
+      "macos_readiness_object": ["run result readiness must be an object", "native-macos-readiness"],
+      "macos_readiness_status": ["run result readiness was not observed", "native-macos-readiness"],
+      "macos_cleanup_success": ["run result cleanup did not succeed", "native-macos-cleanup"],
+      "macos_termination_object": ["run result termination must be an object", "native-macos-runtime"],
+      "macos_runtime_artifact_invalid": ["{key} is invalid: {error}", "native-macos-runtime"],
+      "macos_runtime_artifact_file": ["{key} must point to a file", "native-macos-runtime"],
+      "macos_result_schema": ["{label} must use schema {schema}", "native-macos-result"],
+      "macos_result_kind": ["{label} kind must be {kind}", "native-macos-result"],
+      "macos_result_argv": ["{label} must include a non-empty command_argv array", "native-macos-result"],
+      "macos_result_shell": ["{label} must record shell exactly false", "native-macos-result"],
+      "macos_result_cwd": ["{label} must record cwd '.'", "native-macos-result"],
+      "macos_result_executable": ["{label} must include executable_path", "native-macos-result"],
+      "macos_result_timeout": ["{label} timeout_seconds must be a sane positive number", "native-macos-result"],
+      "macos_result_duration": ["{label} duration_seconds must be a non-negative number", "native-macos-result"],
+      "macos_result_duration_timeout": ["{label} duration_seconds is not consistent with timeout_seconds", "native-macos-result"],
+      "macos_result_artifact_required": ["{label} must include stdout or stderr artifact evidence", "native-macos-result"],
+      "macos_result_artifact_invalid": ["{label} {key} is invalid: {error}", "native-macos-result"],
+      "macos_result_artifact_file": ["{label} {key} must point to a file", "native-macos-result"],
+      "macos_note_schema": ["{kind} note has an unexpected schema", "native-macos-note"],
+      "macos_note_kind": ["{kind} note kind does not match", "native-macos-note"],
+      "macos_note_metadata": ["{kind} note must be metadata-only", "native-macos-note"],
+      "macos_note_status": ["{kind} note status must be not_checked", "native-macos-note"],
+      "macos_metadata_schema": ["app bundle metadata has an unexpected schema", "native-macos-bundle-metadata"],
+      "macos_metadata_only": ["app bundle metadata must be metadata-only", "native-macos-bundle-metadata"],
+      "macos_metadata_valid": ["app bundle metadata is not valid", "native-macos-bundle-metadata"],
+      "macos_metadata_bundle_id": ["app bundle metadata bundle id does not match proof input", "native-macos-app-identity"],
+      "macos_metadata_app_name": ["app bundle metadata app name does not match proof input", "native-macos-app-identity"],
+      "macos_metadata_executable": ["app bundle metadata executable is missing", "native-macos-bundle-metadata"],
+      "macos_metadata_path": ["app bundle metadata path does not match --app-bundle", "native-macos-bundle-metadata"],
+      "macos_identity_required": ["native macOS proof requires --app-name or --bundle-id", "native-macos-app-identity"],
+      "macos_bundle_required": ["native macOS proof requires --app-bundle", "native-macos-bundle"],
+      "macos_bundle_invalid": ["app bundle path is invalid: {error}", "native-macos-bundle"],
+      "macos_bundle_directory": ["app bundle must be an existing .app directory", "native-macos-bundle"],
+      "macos_bundle_plist_missing": ["app bundle is missing Contents/Info.plist", "native-macos-bundle-metadata"],
+      "macos_bundle_plist_malformed": ["app bundle Info.plist is malformed: {error}", "native-macos-bundle-metadata"],
+      "macos_bundle_plist_object": ["app bundle Info.plist must be a dictionary", "native-macos-bundle-metadata"],
+      "macos_bundle_id_mismatch": ["app bundle Info.plist bundle id does not match proof input", "native-macos-app-identity"],
+      "macos_bundle_name_mismatch": ["app bundle Info.plist app name does not match proof input", "native-macos-app-identity"],
+      "macos_bundle_id_missing": ["app bundle Info.plist is missing CFBundleIdentifier", "native-macos-bundle-metadata"],
+      "macos_bundle_executable_missing": ["app bundle Info.plist is missing CFBundleExecutable", "native-macos-bundle-metadata"],
+      "macos_bundle_executable_file": ["app bundle executable is missing", "native-macos-bundle-metadata"],
+      "macos_bundle_extension": ["app bundle path must end in .app", "native-macos-bundle"],
+      "macos_result_failed": ["{label} failed: {failure}", "native-macos-result"],
+      "macos_manifest_metadata": ["native macOS manifest summary must include app_bundle_metadata", "native-macos-bundle-metadata"]
+    }
+  },
+  "changes.POLICY": {
+    "approval_states": ["draft", "approved"],
+    "packet_fields": [
+      "schema",
+      "change_id",
+      "created_at",
+      "original_completed_source_hash",
+      "scope_delta",
+      "affected_acs",
+      "delivery_impact",
+      "approval_state",
+      "approved_at",
+      "plan_path",
+      "evidence_path",
+      "review_path"
+    ],
+    "parsed_fields": [
+      ["schema", "field", "schema"],
+      ["change_id", "field", "change id"],
+      ["created_at", "field", "created at"],
+      ["original_completed_source_hash", "field", "original completed source hash"],
+      ["scope_delta", "section", "Scope Delta"],
+      ["affected_acs", "section", "Affected Acceptance Criteria"],
+      ["delivery_impact", "field", "delivery impact"],
+      ["approval_state", "state", "state"],
+      ["approved_at", "approved", "approved at"],
+      ["plan_path", "field", "plan"],
+      ["evidence_path", "field", "evidence"],
+      ["review_path", "field", "review"]
+    ],
+    "packet_paths": [
+      ["plan_path", "Plan.md", "file"],
+      ["evidence_path", "evidence", "directory"],
+      ["review_path", "review", "directory"]
+    ],
+    "parser": {
+      "empty_approved_at": ["", "-"],
+      "field_names": "case-insensitive",
+      "duplicate_fields": "reject",
+      "unknown_fields": "ignore"
+    },
+    "packet_selection": {
+      "binding_fields": ["original_completed_source_hash", "scope_delta"],
+      "terminal_task_status": "complete",
+      "supersession": {
+        "draft": "reuse",
+        "approved-incomplete": "reuse",
+        "approved-complete": "create-next"
+      }
+    },
+    "template_defaults": {
+      "APPROVAL_STATE": "draft",
+      "APPROVED_AT": "-",
+      "PLAN_PATH": "Plan.md",
+      "EVIDENCE_PATH": "evidence",
+      "REVIEW_PATH": "review"
+    },
+    "plan_columns": [
+      "Task",
+      "Description",
+      "Status",
+      "Mode",
+      "Files",
+      "Depends",
+      "ACs",
+      "Proof",
+      "Verify",
+      "Evidence"
+    ],
+    "task_defaults": {
+      "description": "Revalidate affected changed scope.",
+      "status": "queued",
+      "mode": "delegate",
+      "depends": "-",
+      "verify": "REVIEW_REQUIRED",
+      "evidence": "-"
+    },
+    "task_fields": [
+      "id",
+      "description",
+      "status",
+      "mode",
+      "files",
+      "depends",
+      "acs",
+      "proof",
+      "verify",
+      "evidence"
+    ],
+    "legacy_fields": [
+      "status",
+      "mode",
+      "files",
+      "depends",
+      "verify",
+      "evidence",
+      "description",
+      "line",
+      "plan_version"
+    ],
+    "messages": {
+      "change_id": "change_id must be 1 to 80 safe ASCII letters, digits, dots, underscores, or hyphens, and must start with a letter or digit",
+      "source_hash": "original_completed_source_hash must be a lowercase SHA-256 digest",
+      "created_at": "created_at must be an ISO-8601 timestamp with a timezone",
+      "approval_state": "approval_state must be draft or approved",
+      "affected_ac": "affected_ac must use the AC-n form",
+      "unmapped_plan": "automatic change derivation requires reviewed Plan v2 AC and Proof mappings; create a separate migration draft and resolve mappings for: "
+    },
+    "transitions": {
+      "approval_state": ["(?m)^(\\s*-\\s+\\*\\*State\\*\\*:\\s*)draft\\s*$", "\\g<1>approved"],
+      "approved_at": ["(?m)^(\\s*-\\s+\\*\\*Approved at\\*\\*:\\s*)-\\s*$", "\\g<1>{timestamp}"],
+      "plan_status": ["(?m)^Status:\\s*draft\\s*$", "Status: active"]
+    }
+  },
+  "change_derivation.POLICY": {
+    "doc_suffixes": [".md", ".mdx", ".rst", ".txt"],
+    "empty_values": ["-", "none", "n/a", "na"],
+    "git_statuses": ["M", "A", "D", "R", "C", "U", "??"],
+    "modes": {
+      "docs": "docs",
+      "code": "delegate",
+      "solo": "solo",
+      "default": "delegate"
+    },
+    "invalid_verify_values": ["-", "none", "noop", "review_required"],
+    "verify_placeholder_pattern": "\\b(?:replace|set)\\b.*\\b(?:command|verification)\\b",
+    "owned_description": "Revalidate affected root task {task_id} for the changed scope.",
+    "unowned_description": "Plan and revalidate changed files with no root task owner.",
+    "default_delivery_target": "source-only",
+    "delivery_summary": "{target} delivery must be revalidated{detail}",
+    "delivery_reason": "delivery evidence is source-hash bound and the source changed",
+    "missing_ac_error": "changed scope has no affected AC mapping; update Plan v2 before approval",
+    "approval_blocker": "derive a real verification command for {value}"
+  },
+  "records.source_profile": {
+    "schema": "star-forge.source-profile.v1",
+    "fields": ["profile", "initial_profile", "selected_before_gates", "review_roles"]
+  },
+  "records.project_manifest": {
+    "schema": "star-forge.project.v1",
+    "fields": [
+      "created_at", "updated_at", "project_root", "product_slug", "project_id",
+      "profile", "source_profile_path", "root_mode", "state_machine_version",
+      "blueprint_path", "plan_path", "blueprint_hash", "plan_hash"
+    ]
+  },
+  "mappings.source_hash_problem": {
+    "fields": ["severity", "rule", "file", "message"],
+    "defaults": {
+      "severity": "high",
+      "rule": "source-hash-unavailable"
+    }
+  },
+  "mappings.profile_lock_state": {
+    "fields": [
+      "status", "manifest_profile", "source_profile", "effective_review_profile",
+      "selected_before_gates", "gate_reasons", "problems", "message", "next_action"
+    ],
+    "defaults": {
+      "status": "inactive",
+      "source_profile": null,
+      "selected_before_gates": false,
+      "gate_reasons": [],
+      "problems": [],
+      "message": "",
+      "next_action": ""
+    }
+  },
+  "runtime_project.POLICY": {
+    "redirect_schema": "star-forge.project-redirect.v1",
+    "default_profile": "standard",
+    "fast_profile": "fast-mvp",
+    "default_root_mode": "dedicated",
+    "isolation_markers": [".git", "README.md", "package.json", "pyproject.toml", "Cargo.toml", "go.mod"],
+    "isolation_ignored": [".git", ".gitignore", ".DS_Store"],
+    "slug_term_limit": 5,
+    "slug_fallback": "star-forge-project",
+    "manifest_preserved_fields": {
+      "nonempty": ["created_at", "project_id"],
+      "exact": ["global_learnings"]
+    },
+    "gate_reasons": {
+      "blueprint": "Blueprint.md is approved",
+      "plan_exists": "Plan.md exists",
+      "plan_tasks": "Plan.md has real tasks",
+      "proof": "final proof exists",
+      "reviews": "review records exist"
+    },
+    "source_profile_errors": {
+      "parent": "{file} parent cannot be inspected",
+      "outside": "{file} resolves outside project root",
+      "inspect": "{file} cannot be inspected",
+      "symlink": "{file} is a symlink",
+      "regular": "{file} is not a regular file",
+      "readable": "{file} is not readable",
+      "read": "{file} cannot be read",
+      "json": "{file} is not valid JSON",
+      "object": "{file} must contain a JSON object",
+      "utf8": "{file} is not valid UTF-8",
+      "schema": "{file} has invalid schema",
+      "profile": "{file} records an invalid review profile"
+    },
+    "source_profile_status_defaults": {
+      "exists": false,
+      "path_problem": "",
+      "read_problem": "",
+      "invalid_problem": "",
+      "payload": {}
+    },
+    "source_profile_lock_errors": {
+      "missing": "{file} is missing",
+      "wrong_profile": "{file} does not record fast-mvp",
+      "not_repo": "project is not a git repository",
+      "no_commits": "git history has no commits",
+      "untracked": "{file} is not tracked by git",
+      "dirty": "{file} has uncommitted changes",
+      "snapshot": "{file} is not included in the durable source snapshot",
+      "history": "git history does not show {file} committed before Blueprint.md approval or real Plan.md tasks"
+    },
+    "lock_states": {
+      "active": {
+        "status": "active",
+        "message": "{file} is durably tracked before Blueprint.md approval or real Plan.md tasks.",
+        "next_action": ""
+      },
+      "invalid": {
+        "status": "blocked",
+        "message": "Fast-mvp cannot be proven because {problem}. Standard review remains required.",
+        "next_action": "Restore read permission and a valid {file}, then rerun. If durable pre-gate proof cannot be established, keep standard review or switch the project profile to standard."
+      },
+      "selected_blocked": {
+        "status": "blocked",
+        "message": "Fast-mvp was selected before gates, but {file} is not durably tracked before the current Blueprint.md or Plan.md gates. Standard review remains required.",
+        "next_action": "Commit only {file} now if Blueprint.md and Plan.md gate changes are still uncommitted, then rerun. If those gates were already committed first, keep standard review or switch the project profile to standard."
+      },
+      "selected_pending": {
+        "status": "pending",
+        "message": "Fast-mvp is selected, but {file} is not durable yet.",
+        "next_action": "Commit {file} by itself before approving Blueprint.md or adding real Plan.md tasks, then rerun."
+      },
+      "standard_required": {
+        "status": "standard-required",
+        "message": "Fast-mvp is recorded without durable pre-gate proof from {file}. Standard review remains required.",
+        "next_action": "Keep standard review roles, or start a new fast-mvp flow before approval and planning."
+      },
+      "inactive": {
+        "status": "inactive",
+        "message": "",
+        "next_action": ""
+      }
+    },
+    "downgrade_error": "Refusing to downgrade review profile from standard to fast-mvp after project gates exist: {reasons}. Start fast-mvp before approval or planning, or keep the standard review roles.",
+    "redirect_error": "Refusing to overwrite the project redirect at {path}; the project lives at {project_root}.",
+    "source_hash_messages": {
+      "blocked": "Cannot compute source_hash because {problem}. Standard review remains required.",
+      "exception": "Cannot compute source_hash: {error}"
+    },
+    "ledger_setup": {
+      "schema": "star-forge.ledger.v1",
+      "event": "setup",
+      "profile": "fast-mvp",
+      "selected_field": "profile_selected_before_gates"
+    }
+  },
+  "mappings.risk_flag": {
+    "fields": ["value", "reasons"],
+    "defaults": {}
+  },
+  "mappings.project_surfaces": {
+    "fields": ["project_classes", "target_platforms", "proof_kinds", "delivery_targets", "surfaces"],
+    "defaults": {}
+  },
+  "mappings.review_role_selection": {
+    "fields": ["role", "lenses", "reasons"],
+    "defaults": {}
+  },
+  "mappings.review_policy_result": {
+    "fields": [
+      "schema", "legacy", "profile", "source_hash", "max_agents", "combined",
+      "project_surfaces", "risk_flags", "roles", "selections"
+    ],
+    "defaults": {
+      "schema": "star-forge.review-policy.v1",
+      "max_agents": 4
+    }
+  },
+  "review_policy.POLICY": {
+    "schema": "star-forge.review-policy.v1",
+    "max_agents": 4,
+    "default_profile": "standard",
+    "delivery_contract_schema": "star-forge.delivery-contract.v1",
+    "risk_precedence": ["yes", "invalid", "unresolved", "no", "not applicable"],
+    "flag_groups": {
+      "ui": ["User-facing UI"],
+      "security": [
+        "Authentication or authorization", "Payments or financial data",
+        "Secrets or privileged operations", "Network access or external input",
+        "User, sensitive, or regulated data", "Privacy obligations",
+        "Security-sensitive behavior", "Meaningful dependency exposure",
+        "Destructive operations"
+      ],
+      "architecture": ["Multiple services or high coupling", "Migrations or complex persistence"],
+      "performance": ["Performance or reliability constraints"]
+    },
+    "modern_roles": [
+      {
+        "role": "correctness",
+        "lenses": ["correctness"],
+        "flag_group": null,
+        "surface_lens": null,
+        "always": true,
+        "reason": "Correctness review is required for every project"
+      },
+      {
+        "role": "ux-accessibility",
+        "lenses": ["ux", "accessibility"],
+        "flag_group": "ui",
+        "surface_lens": "ux-accessibility",
+        "always": false
+      },
+      {
+        "role": "security",
+        "lenses": ["security", "privacy"],
+        "flag_group": "security",
+        "surface_lens": "security",
+        "always": false
+      },
+      {
+        "role": "architecture",
+        "lenses": ["architecture"],
+        "flag_group": "architecture",
+        "surface_lens": null,
+        "always": false
+      },
+      {
+        "role": "performance-reliability",
+        "lenses": ["performance", "reliability"],
+        "flag_group": "performance",
+        "surface_lens": "performance-reliability",
+        "always": false,
+        "dynamic_lenses": "performance"
+      }
+    ],
+    "platform_performance_surfaces": ["native-desktop", "native-mobile", "embedded", "realtime"],
+    "reliability_delivery_targets": ["production"],
+    "delivery_proof_kinds": ["delivery", "package", "preview"],
+    "no_delivery_review_targets": ["source-only"],
+    "field_names": {
+      "project_classes": "Project class",
+      "target_platforms": "Target platforms",
+      "delivery_targets": "Delivery target"
+    },
+    "surface_reasons": {
+      "ui_class": "Structured project class establishes a user-facing interface: {values}",
+      "ui_platform": "Structured target platform establishes a user-facing interface: {values}",
+      "ui_proof": "Plan proof contract establishes a user-facing interface: {values}",
+      "platform_performance": "Structured platform surface establishes performance or reliability risk: {values}",
+      "reliability_target": "Structured delivery contract establishes operational reliability risk: {values}",
+      "delivery_target": "Structured delivery contract requires delivery review: {values}",
+      "delivery_proof": "Plan proof contract requires delivery review: {values}"
+    },
+    "legacy_reason": "Legacy Blueprint uses the `{profile}` compatibility review profile",
+    "legacy_floor_roles": {
+      "ux-accessibility": ["ux", "accessibility"],
+      "performance-reliability": ["performance", "reliability"]
+    },
+    "legacy_role_order": [
+      "correctness", "ux-accessibility", "security", "architecture",
+      "performance-reliability"
+    ],
+    "cap": {
+      "combine_roles": ["architecture", "performance-reliability"],
+      "combined_role": "architecture-performance-reliability",
+      "combined_lens_prefix": ["architecture"],
+      "error": "adaptive review policy exceeded the four-agent cap"
+    }
+  },
+  "change_derivation._CODE_FILENAMES": {
+    "$items": [
+      "dockerfile",
+      "gemfile",
+      "justfile",
+      "makefile",
+      "procfile",
+      "rakefile",
+      "vagrantfile"
+    ],
+    "$type": "frozenset"
+  },
+  "change_derivation._CODE_SUFFIXES": {
+    "$items": [
+      ".c",
+      ".cc",
+      ".cpp",
+      ".cs",
+      ".dart",
+      ".ex",
+      ".exs",
+      ".go",
+      ".h",
+      ".html",
+      ".java",
+      ".js",
+      ".jsx",
+      ".kt",
+      ".lua",
+      ".m",
+      ".mjs",
+      ".mm",
+      ".php",
+      ".pl",
+      ".py",
+      ".r",
+      ".rb",
+      ".rs",
+      ".scala",
+      ".sh",
+      ".sql",
+      ".swift",
+      ".tf",
+      ".ts",
+      ".tsx",
+      ".vue",
+      ".yaml",
+      ".yml",
+      ".zsh"
+    ],
+    "$type": "frozenset"
+  },
+  "change_derivation._DELIVERY_PROOFS_BY_TARGET": {
+    "$items": [
+      [
+        "package",
+        {
+          "$items": [
+            "delivery",
+            "package"
+          ],
+          "$type": "tuple"
+        }
+      ],
+      [
+        "preview",
+        {
+          "$items": [
+            "delivery",
+            "preview"
+          ],
+          "$type": "tuple"
+        }
+      ],
+      [
+        "private-repo",
+        {
+          "$items": [
+            "delivery",
+            "github"
+          ],
+          "$type": "tuple"
+        }
+      ],
+      [
+        "production",
+        {
+          "$items": [
+            "delivery"
+          ],
+          "$type": "tuple"
+        }
+      ],
+      [
+        "source-only",
+        {
+          "$items": [
+            "delivery"
+          ],
+          "$type": "tuple"
+        }
+      ]
+    ],
+    "$type": "dict"
+  },
+  "contracts.INTAKE_DECISION_FIELDS": {
+    "$items": [
+      "Users and their primary need",
+      "Core flows and success conditions",
+      "Project class",
+      "Target platforms",
+      "Data created, read, stored, or shared",
+      "Authentication and authorization",
+      "Payments, billing, or financial behavior",
+      "External integrations and network access",
+      "Design applicability and supplied references",
+      "Delivery outcome",
+      "Time, budget, compliance, compatibility, and operational constraints"
+    ],
+    "$type": "tuple"
+  },
+  "contracts.PLAN_LEGACY_COLUMNS": {
+    "$items": [
+      "Task",
+      "Description",
+      "Status",
+      "Mode",
+      "Files",
+      "Depends",
+      "Verify",
+      "Evidence"
+    ],
+    "$type": "tuple"
+  },
+  "contracts.PLAN_PROOF_KINDS": {
+    "$items": [
+      "browser",
+      "delivery",
+      "github",
+      "integration",
+      "native-ios",
+      "native-macos",
+      "package",
+      "preview",
+      "security",
+      "unit"
+    ],
+    "$type": "frozenset"
+  },
+  "contracts.PLAN_V2_COLUMNS": {
+    "$items": [
+      "Task",
+      "Description",
+      "Status",
+      "Mode",
+      "Files",
+      "Depends",
+      "ACs",
+      "Proof",
+      "Verify",
+      "Evidence"
+    ],
+    "$type": "tuple"
+  },
+  "contracts._LOCK_FIELDS": {
+    "$items": [
+      "approved_at",
+      "blueprint_sha256",
+      "contract_version",
+      "schema"
+    ],
+    "$type": "frozenset"
+  },
+  "evidence.REQUIRED_FIELDS": {
+    "$items": [
+      "schema",
+      "kind",
+      "task",
+      "capability",
+      "provider",
+      "provenance",
+      "source_hash",
+      "runtime_asset_hash",
+      "started_at",
+      "finished_at",
+      "artifacts",
+      "verdict",
+      "blockers"
+    ],
+    "$type": "tuple"
+  },
+  "evidence._CAPABILITY_BY_COLLECTOR": {
+    "$items": [
+      [
+        "browser",
+        "local-web-qa"
+      ],
+      [
+        "browser-playwright",
+        "local-web-qa"
+      ],
+      [
+        "preview",
+        "preview-verification"
+      ],
+      [
+        "native-ios",
+        "native-ios-verification"
+      ],
+      [
+        "native-macos",
+        "native-macos-verification"
+      ],
+      [
+        "security",
+        "security-review"
+      ],
+      [
+        "github",
+        "github-lifecycle"
+      ]
+    ],
+    "$type": "dict"
+  },
+  "evidence._SAFE_PLACEHOLDERS": {
+    "$items": [
+      "",
+      "<redacted>",
+      "<secret>",
+      "[redacted]",
+      "[redacted_secret]",
+      "example",
+      "none",
+      "not-set",
+      "placeholder"
+    ],
+    "$type": "set"
+  },
+  "learnings.ALLOWED_CATEGORIES": {
+    "$items": [
+      "accessibility",
+      "architecture",
+      "general",
+      "performance",
+      "privacy",
+      "process",
+      "reliability",
+      "security",
+      "testing",
+      "verification"
+    ],
+    "$type": "frozenset"
+  },
+  "learnings.FRONTMATTER_FIELDS": {
+    "$items": [
+      "schema",
+      "id",
+      "title",
+      "category",
+      "triggers",
+      "rule",
+      "detail",
+      "source-project-id",
+      "source-project-slug",
+      "source-hash",
+      "timestamp",
+      "producer",
+      "confidence",
+      "provenance",
+      "record-hash"
+    ],
+    "$type": "tuple"
+  },
+  "lifecycle.DELIVERY_REQUIREMENTS": {
+    "$items": [
+      "source_binding",
+      "repository_commit",
+      "delivery_identity",
+      "live_url",
+      "smoke_result"
+    ],
+    "$type": "tuple"
+  },
+  "lifecycle.FOUNDATION_REQUIREMENTS": {
+    "$items": [
+      "source_scaffold",
+      "local_git",
+      "github_repository",
+      "remote_origin",
+      "default_branch",
+      "initial_commit",
+      "ci",
+      "environment_example",
+      "secret_scan",
+      "dependency_audit",
+      "security_plan"
+    ],
+    "$type": "tuple"
+  },
+  "lifecycle.TARGET_LIFECYCLE": {
+    "$items": [
+      "intake",
+      "design",
+      "plan",
+      "foundation",
+      "build",
+      "review",
+      "deliver",
+      "done"
+    ],
+    "$type": "tuple"
+  },
+  "mappings.quality_budgets": {
+    "fields": ["runtime_module_lines", "cli_module_lines", "production_python_lines"],
+    "defaults": {}
+  },
+  "mappings.quality_report": {
+    "fields": [
+      "schema", "project", "source_roots", "classification_counts",
+      "scanned_files", "excluded_artifacts", "budgets", "findings"
+    ],
+    "defaults": {
+      "schema": "star-forge.quality.v1",
+      "project": "."
+    }
+  },
+  "quality.POLICY": {
+    "schema": "star-forge.quality.v1",
+    "budgets": {
+      "runtime_module_lines": 1200,
+      "large_module_warning_lines": 800,
+      "cli_module_lines": 2500,
+      "production_python_lines": 18000,
+      "local_imports": 12
+    },
+    "language_by_suffix": {
+      ".py": "python",
+      ".js": "javascript",
+      ".jsx": "javascript",
+      ".mjs": "javascript",
+      ".cjs": "javascript",
+      ".ts": "typescript",
+      ".tsx": "typescript",
+      ".swift": "swift",
+      ".kt": "kotlin",
+      ".kts": "kotlin",
+      ".java": "java",
+      ".go": "go",
+      ".rs": "rust",
+      ".rb": "ruby",
+      ".cs": "csharp",
+      ".c": "c",
+      ".cc": "cpp",
+      ".cpp": "cpp",
+      ".m": "objective-c",
+      ".mm": "objective-cpp",
+      ".dart": "dart",
+      ".sh": "shell"
+    },
+    "text_suffixes": [
+      ".cfg", ".conf", ".css", ".graphql", ".gql", ".html", ".ini", ".json",
+      ".less", ".md", ".mdx", ".mk", ".plist", ".prisma", ".proto", ".rst",
+      ".sass", ".scss", ".sql", ".toml", ".txt", ".xml", ".yaml", ".yml"
+    ],
+    "sensitive_text_suffixes": [".pem", ".key", ".crt", ".cer", ".p12", ".pfx"],
+    "workspace_containers": ["apps", "packages", "services", "modules", "plugins", "crates", "workspaces"],
+    "platform_roots": ["android", "ios", "macos", "windows"],
+    "docs_dirs": ["doc", "docs", "documentation"],
+    "docs_suffixes": [".md", ".mdx", ".rst"],
+    "config_dirs": [".github", ".circleci", "config", "configs"],
+    "config_suffixes": [".cfg", ".conf", ".ini", ".json", ".plist", ".toml", ".yaml", ".yml"],
+    "generated_dirs": ["generated", "Generated", "generated-sources", "generatedSources", "_generated"],
+    "vendor_dirs": ["vendor", "Vendor", "Carthage", "third_party", "third-party", "external"],
+    "generated_file_patterns": [
+      "(?:^|[._-])generated(?:[._-]|$)",
+      "\\.(?:g|gen)\\.(?:cs|dart|go|js|kt|py|swift|ts)$",
+      "(?:_pb2\\.py|\\.pb\\.go|\\.designer\\.cs)$",
+      "\\.(?:min\\.js|min\\.css|map)$"
+    ],
+    "generated_header_pattern": "(?:code\\s+)?generated\\b.{0,80}\\b(?:do not edit|do not modify)|\\bauto[- ]generated\\b",
+    "generated_header_limit": 4096,
+    "test_file_pattern": "(?:^test_.+|.+_test)\\.(?:py|go|rb)$|\\.(?:test|spec)\\.(?:[cm]?[jt]sx?|vue|svelte)$|(?:Tests?|Spec)\\.(?:swift|kt|java)$",
+    "cli_names": ["cli.py", "__main__.py", "star_forge.py"],
+    "cli_dirs": ["cli", "cmd", "bin"],
+    "script_suffixes": [".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx"],
+    "control_plane_function_pattern": "^(?:read|write|load|save|parse|validate|resolve|select|collect|compute|source|git|review|build|complete|record|merge|normalize|detect)_",
+    "root_markers": ["go.mod", "Cargo.toml", "Package.swift", "pyproject.toml"],
+    "profile_root_keys": ["source_roots", "sourceRoots"],
+    "package_root_keys": ["source", "srcDir"],
+    "classification_rules": [
+      ["test", "test convention"],
+      ["docs", "documentation convention"],
+      ["config", "configuration convention"],
+      ["production", "handwritten source"],
+      ["other", "non-source project file"]
+    ],
+    "findings": {
+      "large_file": {
+        "rule": "architecture-debt-large-file",
+        "severity": "medium",
+        "evidence": "{count} lines exceeds the {limit}-line runtime module budget"
+      },
+      "large_file_warning": {
+        "rule": "architecture-debt-large-file",
+        "severity": "low",
+        "evidence": "{count} lines approaches the {limit}-line runtime module budget"
+      },
+      "ts_ignore": {
+        "rule": "architecture-debt-ts-ignore",
+        "severity": "high",
+        "evidence": "{count} @ts-ignore directive(s); justify or remove"
+      },
+      "cli_budget": {
+        "rule": "architecture-debt-cli-concentration",
+        "severity": "medium",
+        "evidence": "{count} lines exceeds the approved {limit}-line CLI budget"
+      },
+      "cli_concentration": {
+        "rule": "architecture-debt-cli-concentration",
+        "severity": "low",
+        "evidence": "{cli_lines} of {total_lines} production lines are concentrated in CLI entry points"
+      },
+      "python_budget": {
+        "rule": "architecture-debt-python-budget",
+        "severity": "medium",
+        "evidence": "{count} production Python lines exceeds the approved {limit}-line budget"
+      },
+      "import_cycle": {
+        "rule": "architecture-debt-import-cycle",
+        "severity": "medium",
+        "evidence": "local import cycle: {cycle}"
+      },
+      "coupling": {
+        "rule": "architecture-debt-coupling",
+        "severity": "low",
+        "evidence": "{count} local module dependencies exceeds the {limit}-dependency coupling signal"
+      },
+      "duplicated_responsibility": {
+        "rule": "architecture-debt-duplicated-responsibility",
+        "severity": "low",
+        "evidence": "top-level control-plane function {function} is duplicated across {files}"
+      }
+    },
+    "finding_fields": ["severity", "rule", "file", "line", "evidence"],
+    "finding_order": ["rule", "file", "line", "evidence"],
+    "report_budget_fields": [
+      ["runtime_module_lines", "MAX_RUNTIME_MODULE_LINES"],
+      ["cli_module_lines", "MAX_CLI_MODULE_LINES"],
+      ["production_python_lines", "MAX_PRODUCTION_PYTHON_LINES"]
+    ]
+  },
+  "quality.ALWAYS_EXCLUDED_DIRS": {
+    "$items": [
+      [
+        ".codex-harness",
+        "test harness state"
+      ],
+      [
+        ".git",
+        "version-control metadata"
+      ],
+      [
+        ".hg",
+        "version-control metadata"
+      ],
+      [
+        ".build",
+        "native build output"
+      ],
+      [
+        ".bundle",
+        "vendored dependencies"
+      ],
+      [
+        ".cache",
+        "tool cache"
+      ],
+      [
+        ".dart_tool",
+        "language cache"
+      ],
+      [
+        ".expo",
+        "framework cache"
+      ],
+      [
+        ".star-forge-pycache",
+        "language cache"
+      ],
+      [
+        ".starforge",
+        "Star Forge runtime state"
+      ],
+      [
+        ".svn",
+        "version-control metadata"
+      ],
+      [
+        ".next",
+        "framework build output"
+      ],
+      [
+        ".nuxt",
+        "framework build output"
+      ],
+      [
+        ".parcel-cache",
+        "build cache"
+      ],
+      [
+        ".svelte-kit",
+        "framework build output"
+      ],
+      [
+        ".turbo",
+        "build cache"
+      ],
+      [
+        ".gradle",
+        "build cache"
+      ],
+      [
+        ".pytest_cache",
+        "test cache"
+      ],
+      [
+        ".mypy_cache",
+        "analysis cache"
+      ],
+      [
+        ".ruff_cache",
+        "analysis cache"
+      ],
+      [
+        ".tox",
+        "test environment"
+      ],
+      [
+        ".venv",
+        "virtual environment"
+      ],
+      [
+        "venv",
+        "virtual environment"
+      ],
+      [
+        "__pycache__",
+        "language cache"
+      ],
+      [
+        "node_modules",
+        "vendored dependencies"
+      ],
+      [
+        "bower_components",
+        "vendored dependencies"
+      ],
+      [
+        "Pods",
+        "vendored dependencies"
+      ],
+      [
+        "DerivedData",
+        "native build output"
+      ],
+      [
+        "the-loop",
+        "legacy Star Forge runtime state"
+      ]
+    ],
+    "$type": "dict"
+  },
+  "quality.ARTIFACT_DIRS": {
+    "$items": [
+      [
+        "build",
+        "build output"
+      ],
+      [
+        "coverage",
+        "coverage output"
+      ],
+      [
+        "dist",
+        "distribution output"
+      ],
+      [
+        "out",
+        "build output"
+      ],
+      [
+        "obj",
+        "compiler output"
+      ],
+      [
+        "target",
+        "compiler output"
+      ]
+    ],
+    "$type": "dict"
+  },
+  "quality.CONFIG_NAMES": {
+    "$items": [
+      "Caddyfile",
+      "Cargo.toml",
+      "Containerfile",
+      "Dockerfile",
+      "GNUmakefile",
+      "Gemfile",
+      "Makefile",
+      "Package.swift",
+      "Podfile",
+      "Procfile",
+      "go.mod",
+      "go.sum",
+      "package-lock.json",
+      "package.json",
+      "pnpm-lock.yaml",
+      "pyproject.toml",
+      "requirements.txt",
+      "yarn.lock"
+    ],
+    "$type": "frozenset"
+  },
+  "quality.SOURCE_ROOT_NAMES": {
+    "$items": [
+      "Sources",
+      "app",
+      "apps",
+      "bin",
+      "cli",
+      "cmd",
+      "components",
+      "frontend",
+      "include",
+      "internal",
+      "lib",
+      "mobile",
+      "native",
+      "packages",
+      "pages",
+      "pkg",
+      "routes",
+      "scripts",
+      "server",
+      "services",
+      "source",
+      "src"
+    ],
+    "$type": "frozenset"
+  },
+  "quality.SOURCE_SUFFIXES": {
+    "$items": [
+      ".astro",
+      ".c",
+      ".cc",
+      ".cjs",
+      ".clj",
+      ".cljs",
+      ".cpp",
+      ".cs",
+      ".css",
+      ".dart",
+      ".ex",
+      ".exs",
+      ".fs",
+      ".fsx",
+      ".go",
+      ".graphql",
+      ".h",
+      ".hh",
+      ".hpp",
+      ".htm",
+      ".html",
+      ".java",
+      ".js",
+      ".jsx",
+      ".kt",
+      ".kts",
+      ".less",
+      ".lua",
+      ".m",
+      ".mjs",
+      ".mm",
+      ".php",
+      ".pl",
+      ".pm",
+      ".prisma",
+      ".proto",
+      ".py",
+      ".rb",
+      ".rs",
+      ".sass",
+      ".scala",
+      ".scss",
+      ".sh",
+      ".sol",
+      ".sql",
+      ".svelte",
+      ".swift",
+      ".ts",
+      ".tsx",
+      ".vue",
+      ".zig"
+    ],
+    "$type": "frozenset"
+  },
+  "quality.TEST_DIR_NAMES": {
+    "$items": [
+      "Tests",
+      "__tests__",
+      "androidTest",
+      "integration-tests",
+      "spec",
+      "specs",
+      "test",
+      "testFixtures",
+      "testing",
+      "tests",
+      "ui-tests",
+      "uitests"
+    ],
+    "$type": "frozenset"
+  },
+  "review_policy.ARCHITECTURE_FLAGS": {
+    "$items": [
+      "Multiple services or high coupling",
+      "Migrations or complex persistence"
+    ],
+    "$type": "tuple"
+  },
+  "review_policy.LEGACY_PROFILE_ROLES": {
+    "$items": [
+      [
+        "standard",
+        {
+          "$items": [
+            "correctness",
+            "security",
+            "architecture"
+          ],
+          "$type": "tuple"
+        }
+      ],
+      [
+        "fast-mvp",
+        {
+          "$items": [
+            "correctness"
+          ],
+          "$type": "tuple"
+        }
+      ]
+    ],
+    "$type": "dict"
+  },
+  "review_policy.RISK_FLAG_ORDER": {
+    "$items": [
+      "User-facing UI",
+      "Authentication or authorization",
+      "Payments or financial data",
+      "Secrets or privileged operations",
+      "Network access or external input",
+      "User, sensitive, or regulated data",
+      "Privacy obligations",
+      "Security-sensitive behavior",
+      "Meaningful dependency exposure",
+      "Multiple services or high coupling",
+      "Migrations or complex persistence",
+      "Performance or reliability constraints",
+      "Destructive operations"
+    ],
+    "$type": "tuple"
+  },
+  "review_policy.ROLE_LENSES": {
+    "$items": [
+      [
+        "correctness",
+        "functional correctness, regressions, edge cases, and acceptance-criteria coverage"
+      ],
+      [
+        "ux-accessibility",
+        "user experience, interaction quality, accessibility, responsive behavior, and visual regressions"
+      ],
+      [
+        "security",
+        "security, privacy, secrets, injection, auth, unsafe IO, and dependency exposure"
+      ],
+      [
+        "architecture",
+        "maintainability, coupling, data flow, boundaries, and future change safety"
+      ],
+      [
+        "performance-reliability",
+        "delivery contract fulfillment, latency, resource use, responsiveness, resilience, failure recovery, and operational reliability"
+      ],
+      [
+        "architecture-performance-reliability",
+        "architecture, coupling, data flow, delivery contract fulfillment, performance, resource use, resilience, and operational reliability"
+      ]
+    ],
+    "$type": "dict"
+  },
+  "review_policy.SECURITY_PRIVACY_FLAGS": {
+    "$items": [
+      "Authentication or authorization",
+      "Payments or financial data",
+      "Secrets or privileged operations",
+      "Network access or external input",
+      "User, sensitive, or regulated data",
+      "Privacy obligations",
+      "Security-sensitive behavior",
+      "Meaningful dependency exposure",
+      "Destructive operations"
+    ],
+    "$type": "tuple"
+  },
+  "review_policy._PLATFORM_SURFACES": {
+    "$items": [
+      [
+        "web",
+        {
+          "$items": [
+            "web"
+          ],
+          "$type": "tuple"
+        }
+      ],
+      [
+        "browser",
+        {
+          "$items": [
+            "web",
+            "ui"
+          ],
+          "$type": "tuple"
+        }
+      ],
+      [
+        "ios",
+        {
+          "$items": [
+            "native-mobile",
+            "ui"
+          ],
+          "$type": "tuple"
+        }
+      ],
+      [
+        "ipados",
+        {
+          "$items": [
+            "native-mobile",
+            "ui"
+          ],
+          "$type": "tuple"
+        }
+      ],
+      [
+        "watchos",
+        {
+          "$items": [
+            "native-mobile",
+            "ui"
+          ],
+          "$type": "tuple"
+        }
+      ],
+      [
+        "android",
+        {
+          "$items": [
+            "native-mobile",
+            "ui"
+          ],
+          "$type": "tuple"
+        }
+      ],
+      [
+        "expo",
+        {
+          "$items": [
+            "native-mobile",
+            "ui"
+          ],
+          "$type": "tuple"
+        }
+      ],
+      [
+        "react-native",
+        {
+          "$items": [
+            "native-mobile",
+            "ui"
+          ],
+          "$type": "tuple"
+        }
+      ],
+      [
+        "macos",
+        {
+          "$items": [
+            "native-desktop",
+            "ui"
+          ],
+          "$type": "tuple"
+        }
+      ],
+      [
+        "windows",
+        {
+          "$items": [
+            "native-desktop",
+            "ui"
+          ],
+          "$type": "tuple"
+        }
+      ],
+      [
+        "linux-desktop",
+        {
+          "$items": [
+            "native-desktop",
+            "ui"
+          ],
+          "$type": "tuple"
+        }
+      ],
+      [
+        "visionos",
+        {
+          "$items": [
+            "native-mobile",
+            "ui"
+          ],
+          "$type": "tuple"
+        }
+      ],
+      [
+        "tvos",
+        {
+          "$items": [
+            "native-mobile",
+            "ui"
+          ],
+          "$type": "tuple"
+        }
+      ],
+      [
+        "embedded",
+        {
+          "$items": [
+            "embedded"
+          ],
+          "$type": "tuple"
+        }
+      ],
+      [
+        "realtime",
+        {
+          "$items": [
+            "realtime"
+          ],
+          "$type": "tuple"
+        }
+      ],
+      [
+        "real-time",
+        {
+          "$items": [
+            "realtime"
+          ],
+          "$type": "tuple"
+        }
+      ]
+    ],
+    "$type": "dict"
+  },
+  "review_policy._PROJECT_CLASS_SURFACES": {
+    "$items": [
+      [
+        "web",
+        {
+          "$items": [
+            "web"
+          ],
+          "$type": "tuple"
+        }
+      ],
+      [
+        "web-app",
+        {
+          "$items": [
+            "web",
+            "ui"
+          ],
+          "$type": "tuple"
+        }
+      ],
+      [
+        "website",
+        {
+          "$items": [
+            "web",
+            "ui"
+          ],
+          "$type": "tuple"
+        }
+      ],
+      [
+        "frontend",
+        {
+          "$items": [
+            "web",
+            "ui"
+          ],
+          "$type": "tuple"
+        }
+      ],
+      [
+        "nextjs",
+        {
+          "$items": [
+            "web",
+            "ui"
+          ],
+          "$type": "tuple"
+        }
+      ],
+      [
+        "react",
+        {
+          "$items": [
+            "web",
+            "ui"
+          ],
+          "$type": "tuple"
+        }
+      ],
+      [
+        "ios",
+        {
+          "$items": [
+            "native-mobile",
+            "ui"
+          ],
+          "$type": "tuple"
+        }
+      ],
+      [
+        "ios-app",
+        {
+          "$items": [
+            "native-mobile",
+            "ui"
+          ],
+          "$type": "tuple"
+        }
+      ],
+      [
+        "android",
+        {
+          "$items": [
+            "native-mobile",
+            "ui"
+          ],
+          "$type": "tuple"
+        }
+      ],
+      [
+        "android-app",
+        {
+          "$items": [
+            "native-mobile",
+            "ui"
+          ],
+          "$type": "tuple"
+        }
+      ],
+      [
+        "mobile",
+        {
+          "$items": [
+            "native-mobile",
+            "ui"
+          ],
+          "$type": "tuple"
+        }
+      ],
+      [
+        "mobile-app",
+        {
+          "$items": [
+            "native-mobile",
+            "ui"
+          ],
+          "$type": "tuple"
+        }
+      ],
+      [
+        "react-native",
+        {
+          "$items": [
+            "native-mobile",
+            "ui"
+          ],
+          "$type": "tuple"
+        }
+      ],
+      [
+        "expo",
+        {
+          "$items": [
+            "native-mobile",
+            "ui"
+          ],
+          "$type": "tuple"
+        }
+      ],
+      [
+        "macos",
+        {
+          "$items": [
+            "native-desktop",
+            "ui"
+          ],
+          "$type": "tuple"
+        }
+      ],
+      [
+        "macos-app",
+        {
+          "$items": [
+            "native-desktop",
+            "ui"
+          ],
+          "$type": "tuple"
+        }
+      ],
+      [
+        "desktop",
+        {
+          "$items": [
+            "native-desktop",
+            "ui"
+          ],
+          "$type": "tuple"
+        }
+      ],
+      [
+        "desktop-app",
+        {
+          "$items": [
+            "native-desktop",
+            "ui"
+          ],
+          "$type": "tuple"
+        }
+      ],
+      [
+        "cli",
+        {
+          "$items": [
+            "cli"
+          ],
+          "$type": "tuple"
+        }
+      ],
+      [
+        "command-line",
+        {
+          "$items": [
+            "cli"
+          ],
+          "$type": "tuple"
+        }
+      ],
+      [
+        "library",
+        {
+          "$items": [
+            "library"
+          ],
+          "$type": "tuple"
+        }
+      ],
+      [
+        "package",
+        {
+          "$items": [
+            "library"
+          ],
+          "$type": "tuple"
+        }
+      ],
+      [
+        "api",
+        {
+          "$items": [
+            "service"
+          ],
+          "$type": "tuple"
+        }
+      ],
+      [
+        "service",
+        {
+          "$items": [
+            "service"
+          ],
+          "$type": "tuple"
+        }
+      ],
+      [
+        "backend",
+        {
+          "$items": [
+            "service"
+          ],
+          "$type": "tuple"
+        }
+      ],
+      [
+        "embedded",
+        {
+          "$items": [
+            "embedded"
+          ],
+          "$type": "tuple"
+        }
+      ],
+      [
+        "realtime",
+        {
+          "$items": [
+            "realtime"
+          ],
+          "$type": "tuple"
+        }
+      ],
+      [
+        "real-time",
+        {
+          "$items": [
+            "realtime"
+          ],
+          "$type": "tuple"
+        }
+      ]
+    ],
+    "$type": "dict"
+  },
+  "review_policy._PROOF_SURFACES": {
+    "$items": [
+      [
+        "browser",
+        {
+          "$items": [
+            "web",
+            "ui"
+          ],
+          "$type": "tuple"
+        }
+      ],
+      [
+        "native-ios",
+        {
+          "$items": [
+            "native-mobile",
+            "ui"
+          ],
+          "$type": "tuple"
+        }
+      ],
+      [
+        "native-macos",
+        {
+          "$items": [
+            "native-desktop",
+            "ui"
+          ],
+          "$type": "tuple"
+        }
+      ],
+      [
+        "preview",
+        {
+          "$items": [
+            "web"
+          ],
+          "$type": "tuple"
+        }
+      ]
+    ],
+    "$type": "dict"
+  },
+  "review_policy._RESOLVED_FLAG_VALUES": {
+    "$items": [
+      [
+        "yes",
+        "yes"
+      ],
+      [
+        "no",
+        "no"
+      ],
+      [
+        "not applicable",
+        "not applicable"
+      ],
+      [
+        "n/a",
+        "not applicable"
+      ],
+      [
+        "na",
+        "not applicable"
+      ]
+    ],
+    "$type": "dict"
+  },
+  "review_policy._UNRESOLVED_VALUES": {
+    "$items": [
+      "",
+      "-",
+      "none",
+      "tbd",
+      "todo",
+      "unknown",
+      "unresolved"
+    ],
+    "$type": "set"
+  },
+  "runtime_plan.CODE_SUFFIXES": {
+    "$items": [
+      ".bash",
+      ".c",
+      ".cc",
+      ".cjs",
+      ".clj",
+      ".cpp",
+      ".cs",
+      ".css",
+      ".dart",
+      ".ex",
+      ".exs",
+      ".go",
+      ".gradle",
+      ".h",
+      ".html",
+      ".ipynb",
+      ".java",
+      ".js",
+      ".jsx",
+      ".kt",
+      ".lua",
+      ".m",
+      ".mjs",
+      ".mm",
+      ".php",
+      ".pl",
+      ".py",
+      ".r",
+      ".rb",
+      ".rs",
+      ".scala",
+      ".sh",
+      ".sql",
+      ".swift",
+      ".tf",
+      ".tfvars",
+      ".ts",
+      ".tsx",
+      ".vue",
+      ".yaml",
+      ".yml",
+      ".zsh"
+    ],
+    "$type": "set"
+  },
+  "runtime_review.FINDING_DUPLICATE_STOPWORDS": {
+    "$items": [
+      "about",
+      "across",
+      "again",
+      "architecture",
+      "because",
+      "blocks",
+      "code",
+      "correctness",
+      "could",
+      "failure",
+      "finding",
+      "findings",
+      "from",
+      "high",
+      "issue",
+      "needs",
+      "problem",
+      "review",
+      "risk",
+      "security",
+      "should",
+      "this",
+      "with"
+    ],
+    "$type": "set"
+  },
+  "runtime_review.FINDING_MARKERS": {
+    "$items": [
+      [
+        "ts-ignore",
+        {
+          "$items": [
+            "@ts-ignore",
+            "ts-ignore"
+          ],
+          "$type": "tuple"
+        }
+      ],
+      [
+        "secret-material",
+        {
+          "$items": [
+            "secret",
+            "api key",
+            "api_key",
+            "token",
+            "credential"
+          ],
+          "$type": "tuple"
+        }
+      ],
+      [
+        "large-file",
+        {
+          "$items": [
+            "large file",
+            "too large",
+            "split into smaller"
+          ],
+          "$type": "tuple"
+        }
+      ],
+      [
+        "shell-wrapper",
+        {
+          "$items": [
+            "shell",
+            "sh -c",
+            "bash -c",
+            "zsh -c"
+          ],
+          "$type": "tuple"
+        }
+      ]
+    ],
+    "$type": "dict"
+  },
+  "runtime_support.IGNORED_PARTS": {
+    "$items": [
+      ".codex-harness",
+      ".git",
+      ".hg",
+      ".star-forge-pycache",
+      ".starforge",
+      ".svn",
+      ".venv",
+      "__pycache__",
+      "build",
+      "coverage",
+      "dist",
+      "node_modules",
+      "target",
+      "the-loop",
+      "upstream"
+    ],
+    "$type": "set"
+  },
+  "runtime_support.INFRASTRUCTURE_TASK_PARTS": {
+    "$items": [
+      "agents",
+      "collectors",
+      "config",
+      "docs",
+      "fixtures",
+      "live_collectors",
+      "skills",
+      "templates",
+      "test",
+      "tests"
+    ],
+    "$type": "frozenset"
+  },
+  "runtime_support.SOURCE_SNAPSHOT_NAME_PREFIXES": {
+    "$items": [
+      ".env.",
+      "Dockerfile.",
+      "Containerfile.",
+      "Makefile.",
+      "Procfile.",
+      "Caddyfile.",
+      "docker-compose.",
+      "compose."
+    ],
+    "$type": "tuple"
+  },
+  "runtime_support.SOURCE_SNAPSHOT_SUFFIXES": {
+    "$items": [
+      ".c",
+      ".cc",
+      ".cfg",
+      ".conf",
+      ".cpp",
+      ".cs",
+      ".css",
+      ".go",
+      ".graphql",
+      ".h",
+      ".html",
+      ".ini",
+      ".java",
+      ".js",
+      ".json",
+      ".jsx",
+      ".kt",
+      ".mjs",
+      ".mk",
+      ".prisma",
+      ".proto",
+      ".py",
+      ".rb",
+      ".rs",
+      ".sh",
+      ".sql",
+      ".swift",
+      ".toml",
+      ".ts",
+      ".tsx",
+      ".vue",
+      ".yaml",
+      ".yml"
+    ],
+    "$type": "set"
+  },
+  "runtime_support.STOPWORDS": {
+    "$items": [
+      "a",
+      "add",
+      "an",
+      "and",
+      "app",
+      "build",
+      "change",
+      "continue",
+      "create",
+      "finish",
+      "fix",
+      "for",
+      "from",
+      "game",
+      "implement",
+      "improve",
+      "make",
+      "mvp",
+      "new",
+      "of",
+      "polish",
+      "project",
+      "prototype",
+      "software",
+      "the",
+      "to",
+      "update",
+      "with"
+    ],
+    "$type": "set"
+  },
+  "runtime_support.VISUAL_SOURCE_PARTS": {
+    "$items": [
+      "components",
+      "frontend",
+      "layouts",
+      "pages",
+      "screens",
+      "ui",
+      "views"
+    ],
+    "$type": "frozenset"
+  },
+  "runtime_support.VISUAL_SOURCE_SUFFIXES": {
+    "$items": [
+      ".astro",
+      ".css",
+      ".htm",
+      ".html",
+      ".jsx",
+      ".less",
+      ".sass",
+      ".scss",
+      ".storyboard",
+      ".svelte",
+      ".tsx",
+      ".vue",
+      ".xib"
+    ],
+    "$type": "frozenset"
+  },
+  "records.complete_task": {
+    "schema": "star-forge.complete-task.v1",
+    "fields": ["created_at", "task", "verdict", "changed_files", "summary", "source_snapshot"]
+  },
+  "records.complete_task_refused": {
+    "schema": "star-forge.complete-task.v1",
+    "fields": ["task", "verdict", "findings", "updated"]
+  },
+  "records.waive": {
+    "schema": "star-forge.waive.v1",
+    "fields": ["timestamp", "scope", "finding", "reason"]
+  },
+  "records.waive_output": {
+    "schema": "star-forge.waive.v1",
+    "fields": ["finding", "reason", "open_findings"]
+  },
+  "records.incident_waive": {
+    "schema": "star-forge.incident.v1",
+    "fields": ["timestamp", "kind", "finding", "reason"]
+  },
+  "records.ledger_review": {
+    "schema": "star-forge.ledger.v1",
+    "fields": ["timestamp", "event", "summary", "artifacts"]
+  },
+  "records.ledger_task_complete": {
+    "schema": "star-forge.ledger.v1",
+    "fields": ["timestamp", "event", "task", "summary", "artifacts"]
+  },
+  "records.done": {
+    "schema": "star-forge.done.v1",
+    "fields": ["created_at", "project", "verdict", "is_complete", "enforcement", "witness", "task_count", "counts", "snapshot", "drift", "foundation", "delivery", "problems", "source_hash_unavailable"]
+  },
+  "records.proof": {
+    "schema": "star-forge.proof.v1",
+    "fields": ["created_at", "head", "source_hash", "scope_hash", "verdict"]
+  },
+  "records.release_snapshot": {
+    "schema": "star-forge.release-snapshot.v1",
+    "fields": ["created_at", "git_head", "source_hash", "source_files", "blueprint_hash", "plan_hash"]
+  },
+  "records.release_snapshot_unavailable": {
+    "schema": "star-forge.release-snapshot.v1",
+    "fields": ["created_at", "git_head", "source_hash", "source_hash_unavailable", "problems", "source_files", "blueprint_hash", "plan_hash"]
+  },
+  "records.state": {
+    "schema": "star-forge.state.v3",
+    "fields": ["created_at", "project", "project_manifest", "mode", "objective", "fast_mvp", "profile_lock", "enforcement", "hook_trust_notice", "versions", "phase", "lifecycle", "scope_hash", "blueprint", "plan", "change_packet", "proof", "drift", "foundation", "delivery", "review_policy", "review", "spawn_plan", "source_hash_unavailable", "source_hash_problems", "global_learnings", "learnings_digest", "required_next_action"]
+  },
+  "records.review": {
+    "schema": "star-forge.review.v2",
+    "fields": ["created_at", "project", "scope", "source_hash", "manifest_profile", "source_profile", "review_profile", "profile_lock", "reviewer_roles", "reviewer_count", "required_review_roles", "required_reviewer_count", "review_policy", "missing_review_roles", "stale_roles", "reviewers_witnessed", "findings", "fix_queue", "waived", "file_problems"]
+  },
+  "records.review_unavailable": {
+    "schema": "star-forge.review.v2",
+    "fields": ["created_at", "project", "scope", "source_hash", "source_hash_unavailable", "problems", "manifest_profile", "source_profile", "review_profile", "profile_lock", "reviewer_roles", "reviewer_count", "required_review_roles", "required_reviewer_count", "missing_review_roles", "stale_roles", "reviewers_witnessed", "findings", "fix_queue", "waived", "file_problems"]
+  },
+  "records.learn": {
+    "schema": "star-forge.learn.v2",
+    "fields": ["created", "storage_relative_path", "id", "title", "category", "triggers", "source_project", "source_hash", "timestamp", "producer", "confidence", "provenance"]
+  },
+  "records.learnings_unavailable": {
+    "schema": "star-forge.learnings-digest.v2",
+    "fields": ["enabled", "opt_in", "limit", "records_scanned", "records_accepted", "records_rejected", "rejection_reasons", "items"]
+  },
+  "records.agents_install": {
+    "schema": "star-forge.agents-install.v1",
+    "fields": ["installed"]
+  },
+  "records.hook_trust_notice": {
+    "schema": "star-forge.hook-trust-notice.v1",
+    "fields": ["shown_at", "message"]
+  },
+  "records.ledger_setup": {
+    "schema": "star-forge.ledger.v1",
+    "fields": ["timestamp", "event", "summary", "profile", "profile_selected_before_gates", "artifacts"]
+  },
+  "records.ledger_setup_profile": {
+    "schema": "star-forge.ledger.v1",
+    "fields": ["timestamp", "event", "summary", "profile", "profile_selected_before_gates", "artifacts", "source_profile_sha256"]
+  },
+  "records.ledger_state": {
+    "schema": "star-forge.ledger.v1",
+    "fields": ["timestamp", "event", "summary", "artifacts"]
+  },
+  "records.incident": {
+    "schema": "star-forge.incident.v1",
+    "fields": ["timestamp", "kind", "change_packet", "changed_files"]
+  },
+  "records.project_redirect": {
+    "schema": "star-forge.project-redirect.v1",
+    "fields": ["project_root"]
+  },
+  "records.isolation_blocked": {
+    "schema": "star-forge.state.v3",
+    "fields": ["created_at", "project", "phase", "required_next_action"]
+  },
+  "records.init": {
+    "schema": "star-forge.init.v1",
+    "fields": ["created", "skipped", "project"]
+  },
+  "records.status": {
+    "schema": "star-forge.status.v1",
+    "fields": ["project", "versions", "enforcement", "hooks_live", "blueprint_approved", "blueprint", "plan_exists", "task_count", "counts", "ready", "review", "profile_lock", "source_hash_unavailable", "git_status", "canonical_state"]
+  },
+  "records.blueprint_approval": {
+    "schema": "star-forge.blueprint-approval.v1",
+    "fields": ["project", "blueprint", "lock", "blueprint_sha256", "approved_at", "contract_version", "previous_status", "status"]
+  },
+  "records.change_approval": {
+    "schema": "star-forge.change-approval.v1",
+    "fields": ["project", "change_id", "approval_state", "approved_at", "plan", "ready"]
+  },
+  "records.plan_validate": {
+    "schema": "star-forge.plan-validate.v1",
+    "fields": ["verdict", "plan_version", "traceability", "task_count", "ready", "problems"]
+  },
+  "mappings.hooks_liveness": {
+    "fields": ["events_observed", "last_event_at", "local_events_observed", "local_last_event_at", "trusted_witness_source", "remediation"],
+    "defaults": {"events_observed": false, "last_event_at": null}
+  },
+  "mappings.hook_notice": {
+    "fields": ["show", "message", "marker"],
+    "defaults": {}
+  },
+  "mappings.version_info": {
+    "fields": ["script", "plugin_manifest", "newest_cache", "stale_cache"],
+    "defaults": {}
+  },
+  "mappings.source_hash_unavailable": {
+    "fields": ["detected", "source_changed", "scope_changed", "changed_files", "source_hash_unavailable", "problems"],
+    "defaults": {"detected": false, "source_changed": null, "scope_changed": false, "changed_files": [], "source_hash_unavailable": true}
+  },
+  "mappings.review_empty": {
+    "fields": ["recorded", "open_findings", "reviewer_count"],
+    "defaults": {"recorded": false, "open_findings": null, "reviewer_count": 0}
+  },
+  "mappings.review_recorded": {
+    "fields": ["recorded", "fresh", "reviewer_count", "open_findings", "waived"],
+    "defaults": {"recorded": true}
+  },
+  "mappings.review_unavailable_empty": {
+    "fields": ["source_hash_unavailable", "problems", "recorded", "open_findings", "reviewer_count"],
+    "defaults": {"source_hash_unavailable": true, "recorded": false, "open_findings": null, "reviewer_count": 0}
+  },
+  "mappings.review_unavailable_recorded": {
+    "fields": ["source_hash_unavailable", "problems", "recorded", "fresh", "reviewer_count", "open_findings", "waived"],
+    "defaults": {"source_hash_unavailable": true, "recorded": true, "fresh": false}
+  },
+  "mappings.review_spawn": {
+    "fields": ["task", "role", "reasons", "findings_file", "agent", "tag", "spawn"],
+    "defaults": {"task": "review-wave", "agent": "starforge-reviewer"}
+  },
+  "mappings.review_problem": {
+    "fields": ["severity", "rule", "file", "message"],
+    "defaults": {"severity": "high", "rule": "review-findings-shape"}
+  },
+  "mappings.normalized_review_finding": {
+    "fields": ["id", "role", "agent_id", "severity", "file", "line", "title", "detail", "suggested_fix"],
+    "defaults": {}
+  },
+  "mappings.review_file": {
+    "fields": ["path", "role", "agent_id", "declared_source_hash", "findings"],
+    "defaults": {}
+  },
+  "mappings.review_role_detail": {
+    "fields": ["role", "agent_id", "severity"],
+    "defaults": {}
+  },
+  "mappings.scan_finding": {
+    "fields": ["id", "role", "severity", "file", "line", "title", "detail", "suggested_fix"],
+    "defaults": {"role": "tree-scan"}
+  },
+  "mappings.done_gate_finding": {
+    "fields": ["severity", "rule", "file", "message"],
+    "defaults": {"severity": "high"}
+  },
+  "mappings.task_completion_finding": {
+    "fields": ["severity", "rule", "message"],
+    "defaults": {"severity": "high"}
+  },
+  "mappings.done_witness": {
+    "fields": ["hooks_live", "local_hooks_observed", "trusted_hooks_observed", "subagent_observed", "local_subagent_observed", "trusted_subagent_observed", "delegated_complete", "review_performed", "review_witnessed", "waived_findings"],
+    "defaults": {}
+  },
+  "mappings.drift": {
+    "fields": ["detected", "source_changed", "scope_changed", "changed_files"],
+    "defaults": {}
+  },
+  "mappings.drift_empty": {
+    "fields": ["detected", "changed_files"],
+    "defaults": {"detected": false, "changed_files": []}
+  },
+  "mappings.live_proof_record": {
+    "fields": ["kind", "created_at", "project", "task", "strict", "inputs", "verdict", "source_snapshot", "runtime_asset_hash", "manifest", "collector", "artifacts", "problems", "summary"],
+    "defaults": {}
+  },
+  "mappings.learning_source_project": {
+    "fields": ["id", "slug"],
+    "defaults": {}
+  },
+  "mappings.learning_provenance": {
+    "fields": ["kind", "origin", "opt_in", "trusted"],
+    "defaults": {"kind": "local-project", "trusted": true}
+  },
+  "mappings.learning_record": {
+    "fields": ["schema", "id", "title", "category", "triggers", "rule", "detail", "source_project", "source_hash", "timestamp", "producer", "confidence", "provenance"],
+    "defaults": {"schema": "star-forge.learning.v2", "id": ""}
+  },
+  "mappings.learning_opt_in": {
+    "fields": ["enabled", "action", "reason"],
+    "defaults": {}
+  },
+  "mappings.learning_write_result": {
+    "fields": ["record", "path", "storage_relative_path", "opt_in", "created"],
+    "defaults": {}
+  },
+  "mappings.learning_digest": {
+    "fields": ["schema", "enabled", "opt_in", "limit", "records_scanned", "records_accepted", "records_rejected", "rejection_reasons", "items"],
+    "defaults": {"schema": "star-forge.learnings-digest.v2", "records_scanned": 0, "records_accepted": 0, "records_rejected": 0, "rejection_reasons": {}, "items": []}
+  },
+  "mappings.learning_digest_item": {
+    "fields": ["id", "title", "rule", "detail", "category", "confidence", "triggers", "matched_triggers", "score", "timestamp", "producer", "source_project", "source_hash", "provenance", "storage_relative_path", "untrusted_data"],
+    "defaults": {"untrusted_data": true}
+  },
+  "learnings.POLICY": {
+    "schemas": {"learning": "star-forge.learning.v2", "digest": "star-forge.learnings-digest.v2"},
+    "exports": {
+      "LEARNING_SCHEMA": "star-forge.learning.v2",
+      "DIGEST_SCHEMA": "star-forge.learnings-digest.v2",
+      "OPT_IN_ENV": "STAR_FORGE_GLOBAL_LEARNINGS",
+      "HOME_ENV": "STAR_FORGE_LEARNINGS_HOME"
+    },
+    "set_exports": {
+      "ALLOWED_CONFIDENCE": "allowed_confidence",
+      "ALLOWED_ORIGINS": "allowed_origins",
+      "ALLOWED_PRODUCERS": "allowed_producers",
+      "TRUTHY": "truthy"
+    },
+    "constants": {
+      "MAX_RECORD_BYTES": 16384,
+      "MAX_RECORDS_SCANNED": 200,
+      "MAX_DIGEST_LIMIT": 20,
+      "MAX_AGE_DAYS": 730,
+      "MAX_FUTURE_SKEW_SECONDS": 300,
+      "MAX_TITLE_CHARS": 120,
+      "MAX_RULE_CHARS": 800,
+      "MAX_DETAIL_CHARS": 1200,
+      "MAX_TRIGGER_COUNT": 16,
+      "MAX_TRIGGER_CHARS": 40,
+      "MAX_PRODUCER_CHARS": 64
+    },
+    "regexes": {
+      "SAFE_ID_RE": ["^[a-z0-9][a-z0-9._-]{0,79}$", false],
+      "SAFE_HASH_RE": ["^[0-9a-f]{64}$", false],
+      "SAFE_TRIGGER_RE": ["^[a-z0-9][a-z0-9.+#_-]{0,39}$", false],
+      "CONTROL_RE": ["[\\u0000-\\u0008\\u000b\\u000c\\u000e-\\u001f\\u007f-\\u009f]", false],
+      "URL_RE": ["https?://[^\\s<>'\\\"]+", true],
+      "HOME_PATH_RE": ["(?<![A-Za-z0-9])(?:/Users/[^/\\s]+|/home/[^/\\s]+|[A-Za-z]:[\\\\/]+Users[\\\\/]+[^\\\\/\\s]+)", false],
+      "EMAIL_RE": ["\\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}\\b", true],
+      "RELATIVE_PATH_RE": ["(?<![\\w.-])(?:\\.\\.?/|[A-Za-z0-9_.-]+/){2,}[A-Za-z0-9_.-]+", false]
+    },
+    "allowed_confidence": ["low", "medium", "high"],
+    "allowed_origins": ["manual", "incident", "review", "verification"],
+    "allowed_producers": ["star-forge-cli"],
+    "allowed_actions": ["read", "write"],
+    "truthy": ["1", "true", "yes", "on", "enabled"],
+    "opt_in_reasons": ["explicit-action", "user-environment", "configured-store", "project-manifest"],
+    "provenance_fields": ["kind", "opt_in", "origin", "trusted"],
+    "source_project_fields": ["id", "slug"],
+    "safe_system_aliases": {"/etc": "/private/etc", "/tmp": "/private/tmp", "/var": "/private/var"},
+    "abstract_fields": ["title", "rule", "detail"],
+    "text_fields": {
+      "title": {"maximum": 120, "required": true},
+      "rule": {"maximum": 800, "required": true},
+      "detail": {"maximum": 1200, "required": false}
+    },
+    "enum_fields": {
+      "category": {"maximum": 32, "allowed": ["accessibility", "architecture", "general", "performance", "privacy", "process", "reliability", "security", "testing", "verification"], "write_error": "category must be one of: accessibility, architecture, general, performance, privacy, process, reliability, security, testing, verification", "record_error": "record category is not allowed"},
+      "confidence": {"maximum": 16, "allowed": ["low", "medium", "high"], "write_error": "confidence must be low, medium, or high", "record_error": "record confidence is not allowed"},
+      "origin": {"maximum": 32, "allowed": ["manual", "incident", "review", "verification"], "write_error": "origin must be one of: incident, manual, review, verification", "record_error": "record origin is not allowed"},
+      "producer": {"maximum": 64, "allowed": ["star-forge-cli"], "write_error": "producer is not trusted", "record_error": "record producer is untrusted"}
+    },
+    "frontmatter_record_fields": {
+      "schema": "schema",
+      "id": "id",
+      "title": "title",
+      "category": "category",
+      "rule": "rule",
+      "detail": "detail",
+      "source-hash": "source_hash",
+      "timestamp": "timestamp",
+      "producer": "producer",
+      "confidence": "confidence"
+    },
+    "prompt_injection_patterns": [
+      "\\bignore\\s+(?:all\\s+)?(?:previous|prior|above)\\s+instructions?\\b",
+      "\\b(?:system|developer|assistant)\\s*(?:message|prompt)?\\s*:",
+      "\\b(?:reveal|print|exfiltrate|leak)\\b.{0,40}\\b(?:secret|token|credential|prompt)\\b",
+      "\\b(?:act|behave|respond)\\s+as\\b",
+      "<\\s*(?:script|system|developer|assistant|tool)\\b",
+      "\\b(?:tool_call|function_call|BEGIN\\s+INSTRUCTIONS?)\\b"
+    ],
+    "executable_text_patterns": [
+      "```",
+      "(?:^|\\s)(?:sudo|curl|wget|eval|exec)\\s+",
+      "(?:&&|\\|\\||;\\s*(?:rm|sh|bash|zsh|python|node)\\b|\\$\\()"
+    ]
+  },
+  "runtime_preview.POLICY": {
+    "problem_identity_fields": [["rule"], ["file", "path"], ["message"]],
+    "result_true_failure_fields": ["timed_out", "timeout", "gui_launch_failed", "screenshot_permission_failed", "cleanup_failed"],
+    "result_false_failure_fields": ["success", "ok", "passed"],
+    "result_code_fields": ["returncode", "exit_code"],
+    "result_failure_statuses": ["failed", "failure", "error", "timed_out", "timeout", "cancelled", "crashed"],
+    "smoke_success_fields": ["ok", "passed", "success"],
+    "source_hash_fields": ["source_hash", "sourceHash", "source_hash_after", "sourceHashAfter"],
+    "commit_hash_fields": ["commit_sha", "commitSha", "head_sha", "headSha", "git_head", "gitHead"],
+    "lease_summary_fields": ["server_lease_artifact", "server_lease_path", "server_lease"],
+    "lease_artifact_kinds": ["server_lease", "server-lease", "server lease"],
+    "profile_collectors": {
+      "preview": "preview",
+      "native-ios": "native-ios",
+      "native-macos": "native-macos",
+      "security": "security",
+      "dependency-audit": "security",
+      "security-deep": "security",
+      "security-diff": "security",
+      "vulnerability-fix": "security",
+      "production-review": "github",
+      "github-pr-review": "github"
+    },
+    "strict_proof_commands": {
+      "security": "security-proof",
+      "dependency-audit": "security-proof",
+      "security-deep": "security-proof",
+      "security-diff": "security-proof",
+      "vulnerability-fix": "security-proof",
+      "native-ios": "native-ios-proof",
+      "native-macos": "native-macos-proof"
+    },
+    "github_source_profiles": ["production-review", "github-pr-review"],
+    "http_value_checks": [
+      ["schema", "star-forge.preview-http.v1", "preview HTTP evidence must use schema star-forge.preview-http.v1"],
+      ["attempted", true, "preview HTTP evidence must record attempted=true"],
+      ["ok", true, "preview HTTP evidence must record ok=true"]
+    ],
+    "http_method": "GET",
+    "http_pinning_strategies": {"http": "http-connect-vetted-ip"},
+    "proof_verdicts": {"blocking": "FAIL", "clear": "PASS"},
+    "proof_profile_messages": {
+      "missing": "proof-run requires --profile",
+      "github": "proof-run does not accept GitHub source packet profiles; use source-packet-proof or source-packet-github-pr-review",
+      "dedicated": "strict proof-run for profile {profile} must use {command}",
+      "status": "preview manifest expected status is not numeric"
+    }
+  },
+  "runtime_security.POLICY": {
+    "schemas": {
+      "handoff_input": "star-forge.security-handoff-input.v1",
+      "input_hash": "star-forge.security-input-hash.v1",
+      "findings": "star-forge.normalized-security-findings.v1",
+      "redaction": "star-forge.security-redaction-report.v1",
+      "github_transcript": "star-forge.github-operation-transcript.v1"
+    },
+    "finding_required_fields": ["schema", "id", "scanner", "scanner_version", "rule_id", "severity", "fingerprint"],
+    "trusted_schema_families": ["codex-security", "star-forge"],
+    "clean_artifacts": {
+      "handoff-input": "handoff-input.json",
+      "input-hash": "input-hash.json",
+      "normalized-findings": "normalized-findings.json",
+      "redaction-report": "redaction-report.json"
+    },
+    "security_profiles": ["dependency-audit", "security-deep", "security-diff", "vulnerability-fix"],
+    "security_summary_fields": ["trusted_provenance", "ruleset", "scan_scope", "input_hash"],
+    "github_source_profiles": ["production-review", "github-pr-review"],
+    "github_packet_artifacts": ["pr.json", "diff.patch", "reviews.json", "comments.json", "check-runs.json", "annotations.json"],
+    "github_live_source_markers": ["github-live", "github-cli-live", "github-connector-live", "gh-readonly-live", "connector-readonly-live"],
+    "github_fixture_markers": ["connector-fixture", "gh-fixture", "missing-fixture"],
+    "github_freshness_fields": ["captured_base_sha", "current_base_sha", "captured_head_sha", "current_head_sha", "merge_base_sha"],
+    "github_pr_url_fields": ["url", "html_url", "web_url", "pull_request_url", "pullRequestUrl"],
+    "github_ref_aliases": {
+      "current_base_sha": ["current_base_sha", "currentBaseSha"],
+      "current_head_sha": ["current_head_sha", "currentHeadSha"],
+      "merge_base_sha": ["merge_base_sha", "mergeBaseOid"]
+    },
+    "check_completed_statuses": ["completed", "success"],
+    "check_successful_conclusions": ["success"],
+    "check_pending_statuses": ["expected", "in_progress", "pending", "queued", "requested", "waiting"],
+    "source_packet_messages": {
+      "missing_profile": "source packet proof requires --profile",
+      "unsupported_profile": "source packet proof profile is unsupported: {profile}",
+      "manifest_scope": "GitHub source packet manifest must be under .starforge/live/<task>/github/"
+    }
+  },
+  "runtime_review.POLICY": {
+    "finding_text_fields": ["rule", "title", "detail", "suggested_fix"],
+    "finding_upgrade_fields": ["title", "detail", "suggested_fix"],
+    "scan_remediation": "Remove the secret/residual or, for a documented placeholder, waive with a reason.",
+    "review_file_errors": {
+      "unreadable": "reviewer findings file is unreadable: {error}",
+      "object": "reviewer findings file must be a JSON object",
+      "role": "reviewer findings file must contain a top-level `role` string",
+      "unknown_role": "reviewer findings role `{role}` is not a known review role",
+      "filename": "reviewer findings file `{filename}` must match payload role `{role}` as `{expected}`",
+      "source_hash": "reviewer findings file must contain a top-level `source_hash` string",
+      "findings": "reviewer findings file must contain a `findings` array",
+      "finding_object": "each reviewer finding must be a JSON object"
+    },
+    "completable_statuses": ["ready", "in_progress", "reviewing"],
+    "lifecycle_gates": ["foundation", "delivery"],
+    "task_completion_messages": {
+      "task-missing": "Task {task} does not exist.",
+      "task-status-not-completable": "Task {task} has status `{status}`; only ready/in_progress/reviewing can be completed.",
+      "task-dependencies-incomplete": "Task {task} has incomplete dependencies: {dependencies}.",
+      "verify-noop-missing": "Docs task {task} needs a recorded no-op verify run.",
+      "verify-stale": "Task {task} has no passing verify run that matches its declared Verify command and the CURRENT source tree.",
+      "browser-run-missing": "User-facing task {task} needs a passing browser-run.",
+      "changed-file-missing": "complete-task requires --changed-file evidence."
+    },
+    "task_completion_order": ["task-status-not-completable", "task-dependencies-incomplete", "verify-noop-missing", "verify-stale", "browser-run-missing", "changed-file-missing"],
+    "review_gate_order": ["review-not-performed", "review-findings-invalid", "review-stale", "review-empty", "reviewer-count-insufficient", "review-fix-queue-open"],
+    "review_gate_messages": {
+      "review-not-performed": "No review wave recorded for the current scope. Spawn starforge-reviewer agents, then run `review`.",
+      "review-findings-invalid": "A reviewer findings file is malformed and its findings cannot be trusted: {detail}. Fix the file and rerun `review`.",
+      "review-stale": "Every reviewer findings file predates the current source; re-spawn reviewers (rewrite their findings files) and rerun `review`.",
+      "review-empty": "No reviewer findings files were present for the review; spawn at least one starforge-reviewer.",
+      "reviewer-count-insufficient": "Review profile `{profile}` requires {required_count} fresh reviewer role(s): {required_roles}. Missing: {missing_roles}. Spawn the missing starforge-reviewer agents and rerun `review`.",
+      "review-fix-queue-open": "{queue_count} unresolved blocking review finding(s); first: {finding_id} {title} ({finding_file}). Fix and re-review, or waive with a reason."
+    },
+    "advisory_reasons": {
+      "hooks": "no trusted hook witness source is enabled in this version",
+      "delegation": "delegated tasks lack a trusted sub-agent witness (local events are diagnostic only)",
+      "review": "review findings lack a trusted sub-agent witness"
+    },
+    "done_messages": {
+      "blueprint": "Blueprint.md is missing or not explicitly approved",
+      "plan_missing": "Plan.md is missing",
+      "plan_empty": "Plan.md contains no real tasks",
+      "tasks_incomplete": "not all Plan.md tasks are complete",
+      "dirty": "working tree is not clean",
+      "gate": "{name} lifecycle gate is incomplete: {detail}"
+    },
+    "done_verdicts": {"blocked": "NEEDS_CHANGES", "complete": "COMPLETE"},
+    "done_summary": "# Star Forge Final Summary\n\nGenerated: {created_at}\n\n## Verdict\n\n{verdict}\n\n## Project\n\n{project}\n\n## Tasks\n\n{task_count} ({counts})\n\n## Enforcement\n\n{enforcement}\n",
+    "waive_reason_error": "waive requires --reason explaining why the finding is not a real blocker"
+  },
+  "runtime_orchestration.POLICY": {
+    "state_dirs": [".starforge/state", ".starforge/runs", ".starforge/tasks", ".starforge/final", ".starforge/reviews", ".starforge/screenshots", ".starforge/runtime", ".starforge/loop"],
+    "carried_project_files": ["Blueprint.md", "Plan.md"],
+    "init_templates": [["Blueprint.md", "Blueprint.md"], ["Plan.md", "Plan.md"]],
+    "init_gitignore": [".starforge/screenshots/*", "!.starforge/screenshots/manifest.json", ".starforge/state/changed-files.jsonl", ".starforge/state/hook-events.jsonl", ".starforge/state/subagent-events.jsonl", ".starforge/state/auto-continue.json", ".starforge/state/incidents.jsonl", ".starforge/state/hook-trust-notice.json"],
+    "setup_ledger": {"event": "setup", "summary": "Initialized Star Forge project", "artifacts": ["Blueprint.md", "Plan.md", ".starforge/state/ledger.jsonl"]},
+    "hook_liveness": {
+      "trusted_witness_source": null,
+      "remediation": "No trusted hook witness source is enabled in this version. Project-local hook events are advisory diagnostics."
+    },
+    "learnings_unavailable": {
+      "enabled": false,
+      "opt_in": {"enabled": false, "action": "read", "reason": "store-unavailable"},
+      "records_scanned": 0,
+      "records_accepted": 0,
+      "records_rejected": 1,
+      "items": []
+    },
+    "hook_notice": {
+      "message": "Optional observer hooks are not trusted yet. Use Codex `/hooks` and trust the Star Forge entries to enable continuity re-anchors; Star Forge still works without them.",
+      "shown_message": "Optional observer hooks notice was shown to the user."
+    },
+    "isolation_next_action": "This directory already contains a non-Star-Forge project. Rerun with --product-slug <name> to build under work/<name>/ (recommended), or --adopt-root to deliberately build in place (recorded in the manifest).",
+    "builder_statuses": ["ready", "in_progress"],
+    "lifecycle_gates": ["foundation", "delivery"],
+    "review_sample_finding": {"severity": "high", "file": "...", "title": "...", "detail": "...", "suggested_fix": "..."},
+    "reviewer_prompt": "spawn_agent {agent} \"[SF:review:{role}] Review the diff against the approved Blueprint with the {role} lens: {lens}. {reason}Write findings ONLY to {findings_file} as {sample}. The role MUST be exactly {role}. The source_hash MUST be exactly {source_hash} (it attests you reviewed the current tree). Include your real thread id as agent_id for provenance diagnostics only; local ids do not create unqualified COMPLETE in this version. Do not edit source. Report an empty findings array if clean.\\\"",
+    "profile_attention_statuses": ["pending", "blocked", "standard-required"],
+    "strict_profile_statuses": ["blocked", "standard-required"],
+    "blueprint_invalid_statuses": ["drifted", "invalid"],
+    "operating_card": {
+      "hook_labels": {
+        "witnessed": "TRUSTED (witnessed)",
+        "local": "ADVISORY (local hook diagnostics observed)",
+        "none": "ADVISORY (no trusted witness source)"
+      },
+      "rules": ["RULES: 1) start every turn with `run`  2) delegate-mode tasks need a real spawn", "3) verify after every task (output is captured, claims are not)  4) UI work needs browser-run", "5) never hand-edit Plan rows — use complete-task; post-done edits auto-reopen as `amend`"],
+      "stale_cache": "PLUGIN: cache {newest_cache} is older than {script} - reinstall with `codex plugin marketplace add <path>` before relying on bundled hook diagnostics."
+    },
+    "phase_actions": {
+      "setup": "Initialize Star Forge project artifacts.",
+      "intake": "Resolve every material decision in the Blueprint Intake Decision Record and record explicit assumptions for the rest.",
+      "design": "Select an original grounded Design Direction, or record the checked capabilities and documented unavailable state.",
+      "plan": "Create or revise Blueprint.md (with AC-n acceptance criteria), get explicit approval, then a normalized Plan.md.",
+      "foundation": "Satisfy the approved Foundation Contract before feature work.",
+      "build": "Build ready tasks — spawn starforge-builder for delegate-mode tasks — then `verify` (and `browser-run` for UI).",
+      "review": "Spawn starforge-reviewer agents, run `review`, then fix or waive the queue.",
+      "deliver": "Produce the exact approved delivery result and fresh source-bound delivery proof.",
+      "amend_approved": "Build the approved packet tasks, repeat their affected proof and review lenses, revalidate delivery, then re-run `done`.",
+      "done_complete": "Project is complete; publish only if explicitly requested.",
+      "done_pending": "Run the final completion predicate and resolve any remaining source, proof, or cleanliness blocker.",
+      "blocked": "Inspect blockers and continue the safest unblocked phase.",
+      "fallback": "Inspect state and continue the safest unblocked phase."
+    },
+    "traceability_by_plan_mode": {
+      "v2": "strict-v2",
+      "mixed": "strict-v2",
+      "legacy": "legacy-readable",
+      "unknown": "compatible-readable"
+    },
+    "verdicts": {
+      "pass": "PASS",
+      "changes": "REQUEST_CHANGES"
+    },
+    "amend_task": {
+      "description": "Post-completion amendment: re-verify and review the drifted files.",
+      "status": "ready",
+      "mode": "solo",
+      "files": "-",
+      "depends": "-",
+      "verify": "set the real verification command for the amended files",
+      "evidence": "-"
+    }
+  },
+  "doctor.POLICY": {
+    "schema": "star-forge.doctor.v1",
+    "plugin": "star-forge",
+    "canonical_marketplace": "https://github.com/khaledayeva/star-forge",
+    "rules": ["stale-marketplace", "duplicate-star-forge-install", "active-version-drift", "stale-hook-trust", "duplicate-mobbin-connection"],
+    "manifest_glob": "*/star-forge/*/.codex-plugin/plugin.json",
+    "runtime_path": "scripts/star_forge.py",
+    "hooks_path": "hooks/hooks.json",
+    "marketplace_search_fields": ["source", "path", "url"],
+    "marketplace_source_fields": ["source", "url", "path"],
+    "marketplace_type_fields": ["source_type", "type"],
+    "local_marketplace_types": ["local", "path"],
+    "hook_trust_paths": [".codex-global-state.json", "hook-trust.json", "hooks-trust.json", "trusted-hooks.json", "hooks/trust.json", "hooks/trusted.json", "plugins/hook-trust.json"],
+    "hook_trust_patterns": ["*hook*trust*.json", "*trust*hook*.json"],
+    "hook_version_fields": ["version", "plugin_version", "trusted_version"],
+    "hook_root_fields": ["plugin_root", "root", "path", "plugin_path", "source_path"],
+    "hook_path_fields": ["hooks_path", "hook_path", "manifest_path"],
+    "hook_hash_fields": ["hooks_sha256", "hook_sha256", "sha256", "hash"],
+    "mobbin_context_tokens": ["mcp", "app", "connector", "connection", "plugin"],
+    "connection_globs": [".app.json", ".mcp.json"],
+    "connection_json_names": ["connections.json", "apps.json", "mcp.json"],
+    "stale_reasons": {
+      "marketplace_legacy": "uses a legacy local marketplace source",
+      "marketplace_missing": "points to a marketplace source that no longer exists",
+      "hook_missing_root": "trusted plugin path no longer exists",
+      "hook_inactive_root": "trusted plugin path is not an active installation root",
+      "hook_file_hash": "trusted hook hash does not match the current hook file",
+      "hook_manifest_hash": "trusted hook hash does not match the source hook manifest"
+    },
+    "findings": {
+    "stale-marketplace": {
+      "severity": "warning",
+      "remediation": ["codex plugin remove {plugin}@{marketplace}", "codex plugin marketplace remove {marketplace}", "codex plugin marketplace add {canonical_marketplace}", "codex plugin add {plugin}@{plugin}"]
+    },
+    "duplicate-star-forge-install": {
+      "severity": "warning",
+      "remediation": ["Keep only the canonical GitHub-backed Star Forge marketplace registration.", "Review the listed roots, then remove obsolete installs with the Codex plugin commands shown by the marketplace diagnostic."]
+    },
+    "active-version-drift": {
+      "severity": "warning",
+      "remediation": ["Reinstall star-forge from https://github.com/khaledayeva/star-forge, then start a new Codex task."]
+    },
+    "stale-hook-trust": {
+      "severity": "warning",
+      "remediation": ["Open /hooks in a new Codex task and review the current Star Forge hook entries.", "Remove obsolete trust entries only after confirming their listed source paths are no longer needed."]
+    },
+    "duplicate-mobbin-connection": {
+      "severity": "warning",
+      "remediation": ["Choose one supported Mobbin OAuth connection path.", "Review and disconnect obsolete Mobbin entries through their owning Codex plugin or app settings."]
+    }
+    }
+  }
+}

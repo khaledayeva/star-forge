@@ -774,6 +774,24 @@ def test_complete_task_updates_plan_row_status_and_evidence() -> None:
         code, payload = complete_task(project, "SF-1")
         assert code == 0, payload
         assert payload["verdict"] == "COMPLETE" and payload["updated"] is True
+        completion = json.loads(
+            (project / ".starforge" / "state" / "complete-task-SF-1.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        assert set(completion) == {
+            "changed_files",
+            "created_at",
+            "schema",
+            "source_snapshot",
+            "summary",
+            "task",
+            "verdict",
+        }
+        assert completion["schema"] == "star-forge.complete-task.v1"
+        assert completion["source_snapshot"]["source_hash"] == star_forge.source_hash(
+            project
+        )
         task = star_forge.parse_tasks(project / "Plan.md")[0]
         assert task["status"] == "complete"
         assert task["evidence"] == "src/hello.py"
@@ -1987,6 +2005,31 @@ def test_done_happy_path_writes_complete_proof() -> None:
         assert proof["head"] == star_forge.git_head(project)
         assert proof["source_hash"] == star_forge.source_hash(project)
         assert proof["scope_hash"] == star_forge.scope_hash(project)
+        assert set(proof) == {
+            "created_at",
+            "head",
+            "schema",
+            "scope_hash",
+            "source_hash",
+            "verdict",
+        }
+        assert set(payload) == {
+            "counts",
+            "created_at",
+            "delivery",
+            "drift",
+            "enforcement",
+            "foundation",
+            "is_complete",
+            "problems",
+            "project",
+            "schema",
+            "snapshot",
+            "source_hash_unavailable",
+            "task_count",
+            "verdict",
+            "witness",
+        }
 
 
 def test_post_done_drift_creates_single_draft_change_packet() -> None:
@@ -2822,6 +2865,64 @@ def test_redact_masks_secret_material_and_sensitive_keys() -> None:
     assert "[REDACTED_SECRET]" in clean["note"]
     assert REAL_SK_KEY not in clean["note"]
     assert REAL_GHP_KEY not in clean["nested"][0]
+
+
+# ----------------------------------------------------- 13. CLI characterization
+
+
+def test_public_cli_commands_and_options_remain_compatible() -> None:
+    """Lock the public parser surface before the runtime is split into modules."""
+    parser = star_forge.build_parser()
+    subparsers = next(action for action in parser._actions if action.dest == "command")
+    actual = {
+        name: sorted(
+            option
+            for action in command_parser._actions
+            for option in action.option_strings
+        )
+        for name, command_parser in subparsers.choices.items()
+    }
+    expected = {}
+    for line in """
+run|--adopt-root,--fast-mvp,--global-learnings,--help,--mode,--no-agents,--no-auto-init,--no-hooks,--objective,--product-slug,--profile,--project,--strict,-h
+init|--adopt-root,--fast-mvp,--force,--help,--no-agents,--no-hooks,--product-slug,--profile,--project,-h
+approve-blueprint|--help,--project,-h
+approve-change|--change,--help,--project,-h
+validate-plan|--file,--help,--project,--strict,-h
+migrate-plan|--file,--help,--output,--project,-h
+status|--help,--project,-h
+doctor|--active-plugin-root,--codex-home,--help,--plugin-root,--source-root,--strict,-h
+quality|--help,--include-files,--project,--strict,-h
+verify|--command,--help,--noop,--project,--strict,--summary,--task,--timeout,-h
+browser-run|--console-evidence,--degraded,--help,--interaction-evidence,--live-manifest,--no-require-console,--no-require-interaction,--no-require-viewports,--project,--require-console,--require-interaction,--require-server-lease,--require-viewports,--scenario,--screenshot,--server-lease,--strict,--summary,--task,--url,--viewport,-h
+preview-proof|--deployment-metadata,--expect-status,--help,--project,--smoke-checks,--strict,--task,--url,-h
+proof-run|--artifact,--help,--profile,--project,--strict,--task,-h
+native-ios-proof|--build-result,--help,--launch-result,--project,--scheme,--screenshot,--simulator,--strict,--task,--test-result,--ui-snapshot,-h
+native-macos-proof|--app-bundle,--app-name,--build-result,--bundle-id,--help,--packaging-note,--project,--run-result,--screenshot,--signing-note,--strict,--task,--test-result,-h
+security-handoff-packet|--help,--input,--kind,--project,--strict,-h
+security-proof|--artifact,--findings,--help,--profile,--project,--scanner,--scanner-version,--strict,--task,-h
+source-packet-proof|--help,--input,--profile,--project,--strict,--task,-h
+source-packet-github-pr-review|--help,--input,--project,--strict,-h
+server-lease|--action,--base-url,--command,--help,--owner,--pid,--port,--project,-h
+review|--help,--project,--strict,-h
+waive|--finding,--help,--project,--reason,-h
+complete-task|--changed-file,--help,--project,--summary,--task,-h
+done|--help,--project,--strict,--write-summary,-h
+learn|--category,--confidence,--detail,--global-learnings,--help,--project,--rule,--source,--title,--trigger,-h
+agents-install|--help,--project,-h
+self-test|--help,--strict,-h
+hook|--help,-h
+post-hook|--help,-h
+prompt-hook|--help,-h
+session-start-hook|--help,-h
+subagent-start-hook|--help,-h
+subagent-stop-hook|--help,-h
+stop-hook|--help,-h
+pre-compact-hook|--help,-h
+""".strip().splitlines():
+        command, options = line.split("|", 1)
+        expected[command] = options.split(",")
+    assert actual == expected
 
 
 # --------------------------------------------------------------------- runner
