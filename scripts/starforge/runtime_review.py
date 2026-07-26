@@ -574,8 +574,12 @@ def cmd_done(args: argparse.Namespace) -> int:
         final_status = source_dirty_entries(git_status(project))
         final_head = git_head(project) if final_repository else None
         final_source_hash, final_hash_problem = try_source_hash(project)
-        if (not final_repository or not proof_head or not proof_source_hash
-                or final_head != proof_head or final_status or final_hash_problem
+        confirmed_repository = is_git_repo(project)
+        confirmed_status = source_dirty_entries(git_status(project))
+        confirmed_head = git_head(project) if confirmed_repository else None
+        if (not final_repository or not confirmed_repository or not proof_head or not proof_source_hash
+                or final_head != proof_head or confirmed_head != proof_head
+                or final_status or confirmed_status or final_hash_problem
                 or final_source_hash != proof_source_hash):
             payload["problems"].append({"severity": "high", "rule": "git-proof-binding", "message": "Git state changed before final proof publication."})
             payload.update(is_complete=False, verdict=REVIEW_POLICY["done_verdicts"]["blocked"])

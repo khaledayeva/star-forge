@@ -2507,62 +2507,71 @@ def test_done_fails_closed_when_repository_disappears_during_status_and_preserve
         assert proof_path.read_bytes() == prior_proof
 
 
-def test_done_rejects_commit_during_final_source_hash_and_preserves_prior_proof() -> None:
-    with tempfile.TemporaryDirectory() as tmp:
-        project = Path(tmp).resolve()
-        build_completed_project(project)
-        code, payload = run_done(project)
-        assert code == 0, payload
-        proof_path = project / star_forge.PROOF_FILE
-        prior_proof = proof_path.read_bytes()
-        original_done_payload = runtime_review.done_payload
-        original_try_source_hash = runtime_review.try_source_hash
-        armed = raced = False
-
-        def arm_after_gates(target: Path) -> dict:
-            nonlocal armed
-            result = original_done_payload(target)
-            armed = True
-            return result
-
-        def commit_at_final_hash(target: Path) -> tuple[str | None, dict | None]:
-            nonlocal raced
-            if armed and not raced:
-                (target / "src" / "hello.py").write_text(
-                    "print('changed during proof publication')\n",
-                    encoding="utf-8",
-                )
-                commit_all(target, "race during proof publication")
-                raced = True
-            return original_try_source_hash(target)
-
-        with (
-            mock.patch.object(
-                runtime_review, "done_payload", side_effect=arm_after_gates,
-            ),
-            mock.patch.object(
-                runtime_review, "try_source_hash",
-                side_effect=commit_at_final_hash,
-            ),
-        ):
+def test_done_rejects_commits_during_final_source_hash_and_preserves_prior_proof() -> None:
+    for empty_commit in (False, True):
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp).resolve()
+            build_completed_project(project)
             code, payload = run_done(project)
+            assert code == 0, payload
+            proof_path = project / star_forge.PROOF_FILE
+            prior_proof = proof_path.read_bytes()
+            original_done_payload = runtime_review.done_payload
+            original_try_source_hash = runtime_review.try_source_hash
+            armed = raced = False
 
-        assert raced is True
-        assert code == 1, payload
-        assert payload["is_complete"] is False
-        assert any(
-            problem.get("rule") == "git-proof-binding"
-            for problem in payload["problems"]
-        )
-        assert proof_path.read_bytes() == prior_proof
-        proof = json.loads(prior_proof)
-        current_source_hash = star_forge.source_hash(project)
-        assert proof["source_hash"] != current_source_hash
-        assert proof["head"] != star_forge.git_head(project)
-        assert not (
-            proof["source_hash"] == current_source_hash
-            and str(proof["verdict"]).startswith("COMPLETE")
-        )
+            def arm_after_gates(target: Path) -> dict:
+                nonlocal armed
+                result = original_done_payload(target)
+                armed = True
+                return result
+
+            def commit_at_final_hash(
+                target: Path,
+            ) -> tuple[str | None, dict | None]:
+                nonlocal raced
+                if armed and not raced:
+                    if empty_commit:
+                        code, _, error = star_forge.run_git([
+                            "-c", "user.name=Star Forge Test",
+                            "-c", "user.email=starforge@example.com",
+                            "commit", "--allow-empty", "-m",
+                            "empty race during proof publication",
+                        ], target)
+                        assert code == 0, error
+                    else:
+                        (target / "src" / "hello.py").write_text(
+                            "print('changed during proof publication')\n",
+                            encoding="utf-8",
+                        )
+                        commit_all(target, "race during proof publication")
+                    raced = True
+                return original_try_source_hash(target)
+
+            with (
+                mock.patch.object(
+                    runtime_review, "done_payload", side_effect=arm_after_gates,
+                ),
+                mock.patch.object(
+                    runtime_review, "try_source_hash",
+                    side_effect=commit_at_final_hash,
+                ),
+            ):
+                code, payload = run_done(project)
+
+            assert raced is True
+            assert code == 1, payload
+            assert payload["is_complete"] is False
+            assert any(
+                problem.get("rule") == "git-proof-binding"
+                for problem in payload["problems"]
+            )
+            assert proof_path.read_bytes() == prior_proof
+            proof = json.loads(prior_proof)
+            assert (
+                proof["source_hash"] == star_forge.source_hash(project)
+            ) is empty_commit
+            assert proof["head"] != star_forge.git_head(project)
 
 
 def test_done_requires_change_packet_for_post_proof_drift_without_run() -> None:
