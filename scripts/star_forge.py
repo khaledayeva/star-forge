@@ -37,6 +37,7 @@ from live_collectors import common as live_common
 from live_collectors import native_macos as native_macos_collector
 from starforge import contracts as project_contracts
 from starforge import doctor as installation_doctor
+from starforge import lifecycle as project_lifecycle
 
 
 SF_VERSION = "0.3.0"
@@ -1665,6 +1666,101 @@ def blueprint_has_valid_lock(project: Path) -> bool:
 def blueprint_is_approved(project: Path) -> bool:
     """Accept locked v0.4 contracts and readable v0.3 legacy approvals."""
     return bool(blueprint_lock_state(project).get("approved"))
+
+
+def blueprint_lifecycle_contract(project: Path) -> dict[str, Any]:
+    """Return lifecycle facts without imposing v0.4 phases on legacy projects."""
+    path = project / BLUEPRINT_FILE
+    try:
+        text = read_text(path) if path.exists() else ""
+    except (OSError, UnicodeError):
+        text = ""
+    return project_contracts.parse_blueprint_lifecycle_contract(text)
+
+
+def lifecycle_gate_state(
+    project: Path,
+    *,
+    kind: str,
+    required: bool,
+    current_source_hash: str | None,
+    expected_delivery_target: str = "",
+) -> dict[str, Any]:
+    """Load and evaluate one lifecycle gate without mutating its proof files."""
+    paths = {
+        "foundation": (
+            project_lifecycle.FOUNDATION_CONTRACT_PATH,
+            project_lifecycle.FOUNDATION_EVIDENCE_PATH,
+        ),
+        "delivery": (
+            project_lifecycle.DELIVERY_CONTRACT_PATH,
+            project_lifecycle.DELIVERY_EVIDENCE_PATH,
+        ),
+    }
+    contract_rel, evidence_rel = paths[kind]
+    base = {
+        "required": required,
+        "contract_path": contract_rel,
+        "evidence_path": evidence_rel,
+    }
+    if not required:
+        return base | {
+            "status": "COMPATIBLE",
+            "satisfied": True,
+            "blockers": [],
+        }
+
+    contract_path = project / contract_rel
+    evidence_path = project / evidence_rel
+    missing = [
+        rel
+        for rel, path in (
+            (contract_rel, contract_path),
+            (evidence_rel, evidence_path),
+        )
+        if not path.exists()
+    ]
+    if missing:
+        return base | {
+            "status": "MISSING",
+            "satisfied": False,
+            "blockers": ["missing lifecycle artifact: " + item for item in missing],
+        }
+    try:
+        contract = read_json(contract_path)
+        evidence = read_json(evidence_path)
+    except Exception as exc:
+        return base | {
+            "status": "BLOCKED",
+            "satisfied": False,
+            "blockers": [f"{kind} lifecycle artifacts are unreadable: {exc}"],
+        }
+
+    if kind == "foundation":
+        bound_source_hash = str(evidence.get("source_hash") or "")
+        gate = project_lifecycle.evaluate_foundation(
+            contract,
+            evidence,
+            current_source_hash=bound_source_hash,
+        )
+        payload = gate.to_dict()
+        satisfied = gate.ready_for_feature_work
+    else:
+        gate = project_lifecycle.evaluate_delivery(
+            contract,
+            evidence,
+            current_source_hash=str(current_source_hash or ""),
+        )
+        payload = gate.to_dict()
+        satisfied = gate.ready_for_completion
+        actual_target = str((contract.get("target") or {}).get("kind") or "")
+        if expected_delivery_target and actual_target != expected_delivery_target:
+            payload["status"] = "BLOCKED"
+            payload.setdefault("blockers", []).append(
+                "delivery contract target does not match Blueprint.md"
+            )
+            satisfied = False
+    return base | payload | {"satisfied": satisfied}
 
 
 def scope_hash(project: Path) -> str | None:
@@ -5197,6 +5293,8 @@ def done_payload(project: Path) -> dict[str, Any]:
     tasks: list[dict[str, Any]] = []
     profile_lock = fast_mvp_profile_lock_state(project)
     hash_problem = source_hash_unavailable_problem(project)
+    lifecycle_contract = blueprint_lifecycle_contract(project)
+    modern_lifecycle = not lifecycle_contract.get("legacy", True)
     if not blueprint_is_approved(project):
         problems.append({"severity": "critical", "message": "Blueprint.md is missing or not explicitly approved"})
     plan_path = project / PLAN_FILE
@@ -5246,6 +5344,39 @@ def done_payload(project: Path) -> dict[str, Any]:
     snapshot, snapshot_problem = safe_release_snapshot(project)
     if snapshot_problem and not hash_problem:
         problems.append(finding_problem(snapshot_problem))
+    current_source_hash, lifecycle_hash_problem = try_source_hash(project)
+    foundation_gate = lifecycle_gate_state(
+        project,
+        kind="foundation",
+        required=modern_lifecycle,
+        current_source_hash=current_source_hash,
+    )
+    delivery_gate = lifecycle_gate_state(
+        project,
+        kind="delivery",
+        required=modern_lifecycle,
+        current_source_hash=current_source_hash,
+        expected_delivery_target=str(
+            (lifecycle_contract.get("delivery") or {}).get("target") or ""
+        ),
+    )
+    if modern_lifecycle:
+        for name, gate in (
+            ("foundation", foundation_gate),
+            ("delivery", delivery_gate),
+        ):
+            if not gate.get("satisfied"):
+                blockers = gate.get("blockers") or []
+                detail = str(blockers[0]) if blockers else f"{name} proof did not pass"
+                problems.append(
+                    {
+                        "severity": "high",
+                        "rule": f"{name}-gate",
+                        "message": f"{name.title()} lifecycle gate is incomplete: {detail}",
+                    }
+                )
+    if lifecycle_hash_problem and not hash_problem:
+        problems.append(finding_problem(lifecycle_hash_problem))
     blocking = blocking_items(problems)
     enforcement = enforcement_mode(project)
     # Project-local JSONL ledgers are useful diagnostics, but they are advisory
@@ -5298,6 +5429,8 @@ def done_payload(project: Path) -> dict[str, Any]:
         "counts": task_counts(tasks),
         "snapshot": snapshot,
         "drift": drift,
+        "foundation": foundation_gate,
+        "delivery": delivery_gate,
         "problems": problems,
         "source_hash_unavailable": bool(hash_problem or snapshot_problem),
     }
@@ -5890,7 +6023,9 @@ def canonical_state_payload(project: Path, *, objective: str = "", mode: str = "
     manifest = ensure_project_manifest(project, objective=objective)
     profile_lock = fast_mvp_profile_lock_state(project)
     blueprint_state = blueprint_lock_state(project)
-    _current_source_hash, hash_problem = try_source_hash(project)
+    lifecycle_contract = blueprint_lifecycle_contract(project)
+    modern_lifecycle = not lifecycle_contract.get("legacy", True)
+    current_source_hash, hash_problem = try_source_hash(project)
     source_hash_blocked = hash_problem is not None
     plan_path = project / PLAN_FILE
     tasks = parse_tasks(plan_path) if plan_path.exists() else []
@@ -5906,33 +6041,60 @@ def canonical_state_payload(project: Path, *, objective: str = "", mode: str = "
     scope = scope_hash(project) or "noscope"
     review_blockers = [] if source_hash_blocked else review_findings_for_done(project, tasks)
     drift = annotate_drift_coverage(project, tasks, drift)
-    if setup_missing:
-        phase = "setup"
-    elif parse_problem:
-        phase = "blocked"
-    elif source_hash_blocked:
-        phase = "blocked"
-    elif profile_lock.get("status") == "blocked":
-        phase = "blocked"
-    elif not blueprint_state.get("approved"):
-        phase = "plan"
-    elif not tasks or plan_is_placeholder(tasks):
-        phase = "plan"
-    elif (
+    foundation_gate = lifecycle_gate_state(
+        project,
+        kind="foundation",
+        required=modern_lifecycle,
+        current_source_hash=current_source_hash,
+    )
+    delivery_gate = lifecycle_gate_state(
+        project,
+        kind="delivery",
+        required=modern_lifecycle,
+        current_source_hash=current_source_hash,
+        expected_delivery_target=str(
+            (lifecycle_contract.get("delivery") or {}).get("target") or ""
+        ),
+    )
+    legacy_amend_requires_lock = bool(
         blueprint_state.get("status") == "legacy-approved"
         and drift.get("actionable")
         and proof
-    ):
-        phase = "plan"
-    elif drift.get("actionable") and proof:
-        phase = "amend"
-    elif not all_tasks_complete(tasks):
-        phase = "build"
-    elif review_blockers:
-        phase = "review"
-    else:
-        done = done_payload(project)
-        phase = "done" if done.get("is_complete") else "review"
+    )
+    plan_complete = bool(
+        blueprint_state.get("approved")
+        and tasks
+        and not plan_is_placeholder(tasks)
+        and not legacy_amend_requires_lock
+    )
+    build_complete = all_tasks_complete(tasks)
+    review_complete = build_complete and not review_blockers
+    done = done_payload(project) if review_complete else None
+    phase = project_lifecycle.resolve_phase(
+        legacy=not modern_lifecycle,
+        setup_complete=not setup_missing,
+        blocked=bool(
+            source_hash_blocked
+            or profile_lock.get("status") == "blocked"
+            or (parse_problem and (not modern_lifecycle or plan_complete))
+        ),
+        intake_complete=bool(
+            blueprint_state.get("approved")
+            or (lifecycle_contract.get("intake") or {}).get("complete")
+        ),
+        design_required=(lifecycle_contract.get("design") or {}).get("required"),
+        design_complete=bool(
+            blueprint_state.get("approved")
+            or (lifecycle_contract.get("design") or {}).get("complete")
+        ),
+        plan_complete=plan_complete,
+        foundation_complete=bool(foundation_gate.get("satisfied")),
+        amendment_required=bool(drift.get("actionable") and proof),
+        build_complete=build_complete,
+        review_complete=review_complete,
+        delivery_complete=bool(delivery_gate.get("satisfied")),
+        completion_complete=bool(done and done.get("is_complete")),
+    )
     if source_hash_blocked and hash_problem and not parse_problem:
         next_action = f"{hash_problem.get('message')} Repair the source hash blocker, then rerun."
     elif profile_lock.get("status") == "blocked" and not parse_problem:
@@ -5952,13 +6114,19 @@ def canonical_state_payload(project: Path, *, objective: str = "", mode: str = "
             "content lock. Run `approve-blueprint` only after explicit user approval."
         )
     else:
+        foundation_blocker = next(iter(foundation_gate.get("blockers") or []), "")
+        delivery_blocker = next(iter(delivery_gate.get("blockers") or []), "")
         next_action = {
             "setup": "Initialize Star Forge project artifacts.",
+            "intake": "Resolve every material decision in the Blueprint Intake Decision Record and record explicit assumptions for the rest.",
+            "design": "Select an original grounded Design Direction, or record the checked capabilities and documented unavailable state.",
             "plan": "Create or revise Blueprint.md (with AC-n acceptance criteria), get explicit approval, then a normalized Plan.md.",
+            "foundation": "Satisfy the approved Foundation Contract before feature work." + (f" First blocker: {foundation_blocker}" if foundation_blocker else ""),
             "build": "Build ready tasks — spawn starforge-builder for delegate-mode tasks — then `verify` (and `browser-run` for UI).",
-            "review": "Spawn starforge-reviewer agents, run `review`, fix or waive the queue, then `done`.",
+            "review": "Spawn starforge-reviewer agents, run `review`, then fix or waive the queue.",
+            "deliver": "Produce the exact approved delivery result and fresh source-bound delivery proof." + (f" First blocker: {delivery_blocker}" if delivery_blocker else ""),
             "amend": "Post-completion changes were detected; an amendment task was scaffolded. Build, verify, review it, then re-run `done`.",
-            "done": "Project is complete; publish only if explicitly requested.",
+            "done": "Project is complete; publish only if explicitly requested." if done and done.get("is_complete") else "Run the final completion predicate and resolve any remaining source, proof, or cleanliness blocker.",
             "blocked": f"Repair Plan.md before continuing: {parse_problem}" if parse_problem else "Inspect blockers and continue the safest unblocked phase.",
         }.get(phase, "Inspect state and continue the safest unblocked phase.")
     state = {
@@ -5974,6 +6142,7 @@ def canonical_state_payload(project: Path, *, objective: str = "", mode: str = "
         "hook_trust_notice": hook_trust_notice(project),
         "versions": version_info(project),
         "phase": phase,
+        "lifecycle": lifecycle_contract,
         "scope_hash": scope,
         "blueprint": {
             **blueprint_state,
@@ -5988,6 +6157,8 @@ def canonical_state_payload(project: Path, *, objective: str = "", mode: str = "
         },
         "proof": proof,
         "drift": drift,
+        "foundation": foundation_gate,
+        "delivery": delivery_gate,
         "review": review_summary_source_hash_unavailable(project, scope, profile_lock, problems=[hash_problem] if hash_problem else None) if source_hash_blocked else review_summary(project, scope),
         "spawn_plan": spawn_plan(project, tasks, phase),
         "source_hash_unavailable": source_hash_blocked,
@@ -6514,7 +6685,16 @@ def should_block_stop(project: Path, event: dict[str, Any], handoff: dict[str, A
     if str(state.get("mode") or "") != "cruise":
         return None
     phase = str(state.get("phase") or "")
-    if phase not in {"plan", "build", "review", "amend"}:
+    if phase not in {
+        "intake",
+        "design",
+        "plan",
+        "foundation",
+        "build",
+        "review",
+        "deliver",
+        "amend",
+    }:
         return None
     signature = stable_json_hash({"phase": phase, "next": handoff.get("next_action")})
     counter: dict[str, Any] = {}

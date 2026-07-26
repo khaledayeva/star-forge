@@ -22,6 +22,24 @@ FOUNDATION_GATE_SCHEMA = "star-forge.foundation-gate.v1"
 DELIVERY_CONTRACT_SCHEMA = "star-forge.delivery-contract.v1"
 DELIVERY_EVIDENCE_SCHEMA = "star-forge.delivery-evidence.v1"
 DELIVERY_GATE_SCHEMA = "star-forge.delivery-gate.v1"
+TARGET_LIFECYCLE = (
+    "intake",
+    "design",
+    "plan",
+    "foundation",
+    "build",
+    "review",
+    "deliver",
+    "done",
+)
+LEGACY_LIFECYCLE = ("plan", "build", "review", "done")
+COMPATIBILITY_PHASES = frozenset(
+    {*TARGET_LIFECYCLE, *LEGACY_LIFECYCLE, "setup", "blocked", "amend"}
+)
+FOUNDATION_CONTRACT_PATH = ".starforge/foundation/contract.json"
+FOUNDATION_EVIDENCE_PATH = ".starforge/foundation/evidence.json"
+DELIVERY_CONTRACT_PATH = ".starforge/delivery/contract.json"
+DELIVERY_EVIDENCE_PATH = ".starforge/delivery/evidence.json"
 
 REQUIREMENT_STATES = frozenset({"requested", "not-applicable", "blocking"})
 EVIDENCE_STATES = frozenset({"satisfied", "not-applicable", "blocking"})
@@ -85,6 +103,64 @@ _VERCEL_FIT_RE = re.compile(
 
 class LifecycleContractError(ValueError):
     """A lifecycle contract cannot be represented safely."""
+
+
+def resolve_phase(
+    *,
+    legacy: bool,
+    setup_complete: bool,
+    blocked: bool,
+    intake_complete: bool,
+    design_required: bool | None,
+    design_complete: bool,
+    plan_complete: bool,
+    foundation_complete: bool,
+    amendment_required: bool,
+    build_complete: bool,
+    review_complete: bool,
+    delivery_complete: bool,
+    completion_complete: bool,
+) -> str:
+    """Resolve one canonical phase while preserving the v0.3 phase sequence.
+
+    Compatibility projects never acquire intake, design, foundation, or deliver
+    gates retroactively. Modern projects advance only when each target lifecycle
+    gate has passed. Amend remains an out-of-band re-entry after planning and
+    foundation are established.
+    """
+
+    if not setup_complete:
+        return "setup"
+    if blocked:
+        return "blocked"
+    if legacy:
+        if not plan_complete:
+            return "plan"
+        if amendment_required:
+            return "amend"
+        if not build_complete:
+            return "build"
+        if not review_complete:
+            return "review"
+        return "done" if completion_complete else "review"
+
+    if not intake_complete:
+        return "intake"
+    if design_required is not False and not design_complete:
+        return "design"
+    if not plan_complete:
+        return "plan"
+    if not foundation_complete:
+        return "foundation"
+    if amendment_required:
+        return "amend"
+    if not build_complete:
+        return "build"
+    if not review_complete:
+        return "review"
+    if not delivery_complete:
+        return "deliver"
+    return "done"
 
 
 @dataclass(frozen=True)

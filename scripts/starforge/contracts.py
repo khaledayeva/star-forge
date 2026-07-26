@@ -43,6 +43,19 @@ PLAN_V2_COLUMNS = (
 )
 PLAN_REVIEW_REQUIRED = "REVIEW_REQUIRED"
 PLAN_MAINTENANCE_EXEMPTION = "maintenance"
+INTAKE_DECISION_FIELDS = (
+    "Users and their primary need",
+    "Core flows and success conditions",
+    "Project class",
+    "Target platforms",
+    "Data created, read, stored, or shared",
+    "Authentication and authorization",
+    "Payments, billing, or financial behavior",
+    "External integrations and network access",
+    "Design applicability and supplied references",
+    "Delivery outcome",
+    "Time, budget, compliance, compatibility, and operational constraints",
+)
 PLAN_PROOF_KINDS = frozenset(
     {
         "unit",
@@ -227,6 +240,118 @@ def _blueprint_field(text: str, name: str) -> str:
             continue
         return value
     return ""
+
+
+def _blueprint_lifecycle_field(text: str, name: str) -> tuple[bool, str]:
+    """Return whether a lifecycle field exists and its resolved value, if any."""
+    match = re.search(
+        rf"^\s*[-*]\s*(?:\*\*)?{re.escape(name)}(?:\*\*)?\s*:\s*(.*?)\s*$",
+        text,
+        re.IGNORECASE | re.MULTILINE,
+    )
+    if not match:
+        return False, ""
+    value = match.group(1).strip().strip("`").strip()
+    unresolved = (
+        not value
+        or bool(re.search(r"<[^>]+>", value))
+        or value.casefold() in {"-", "tbd", "todo", "unknown", "unresolved"}
+    )
+    return True, "" if unresolved else value
+
+
+def parse_blueprint_lifecycle_contract(text: str) -> dict[str, Any]:
+    """Describe the intake, design, and delivery facts that drive v0.4 phases.
+
+    Blueprints without an Intake Decision Record are compatibility projects. They
+    keep the v0.3 phase sequence and receive the documented source-only delivery
+    default without retroactively requiring new lifecycle artifacts.
+    """
+
+    intake_text = _markdown_section(text, "Intake Decision Record")
+    intake_values: dict[str, str] = {}
+    missing_intake: list[str] = []
+    if intake_text.strip():
+        for name in INTAKE_DECISION_FIELDS:
+            present, value = _blueprint_lifecycle_field(intake_text, name)
+            if present and value:
+                intake_values[name] = value
+            else:
+                missing_intake.append(name)
+
+    design_text = _markdown_section(text, "Design Direction")
+    _, applicability = _blueprint_lifecycle_field(design_text, "Applicability")
+    applicability_key = applicability.casefold()
+    design_required: bool | None
+    if applicability_key.startswith("not applicable"):
+        design_required = False
+    elif applicability_key.startswith("applicable"):
+        design_required = True
+    else:
+        design_required = None
+
+    _, selected_direction = _blueprint_lifecycle_field(
+        design_text, "Selected direction"
+    )
+    _, selection_rationale = _blueprint_lifecycle_field(
+        design_text, "Selection rationale"
+    )
+    _, selected_constraints = _blueprint_lifecycle_field(
+        design_text, "Selected design constraints"
+    )
+    unavailable_text = _markdown_section(text, "Documented Unavailable State")
+    unavailable_fields = (
+        "Capabilities checked",
+        "Why unavailable",
+        "Written constraints used instead",
+        "Effect on confidence or verification",
+    )
+    unavailable_values = [
+        _blueprint_lifecycle_field(unavailable_text, name)[1]
+        for name in unavailable_fields
+    ]
+    unavailable_recorded = bool(unavailable_text.strip()) and all(
+        unavailable_values
+    )
+    direction_selected = bool(
+        selected_direction
+        and not selected_direction.casefold().startswith("not applicable")
+        and selection_rationale
+        and selected_constraints
+    )
+    design_complete = (
+        design_required is False
+        or (
+            design_required is True
+            and (direction_selected or unavailable_recorded)
+        )
+    )
+
+    delivery = _markdown_section(text, "Delivery Contract")
+    delivery_target = _blueprint_field(delivery, "Delivery target").casefold()
+    legacy = not bool(intake_text.strip())
+    return {
+        "schema": "star-forge.blueprint-lifecycle.v1",
+        "legacy": legacy,
+        "intake": {
+            "present": bool(intake_text.strip()),
+            "complete": bool(intake_text.strip()) and not missing_intake,
+            "decisions": intake_values,
+            "unresolved": missing_intake,
+        },
+        "design": {
+            "present": bool(design_text.strip()),
+            "required": design_required,
+            "complete": bool(design_complete),
+            "direction_selected": direction_selected,
+            "unavailable_recorded": unavailable_recorded,
+        },
+        "delivery": {
+            "present": bool(delivery.strip()),
+            "target": delivery_target or "source-only",
+            "legacy_default": not bool(delivery.strip()),
+        },
+    }
 
 
 def parse_blueprint_plan_contract(text: str) -> dict[str, Any]:

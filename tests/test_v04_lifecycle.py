@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import copy
 import json
+import subprocess
 import sys
+import tempfile
 import traceback
 from pathlib import Path
 from typing import Any
@@ -21,7 +23,7 @@ DELIVERY_FIXTURES = ROOT / "fixtures" / "delivery"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
-from starforge import lifecycle
+from starforge import contracts, lifecycle
 
 
 def fixture(name: str) -> dict[str, Any]:
@@ -454,6 +456,187 @@ def test_unresolved_delivery_authority_collapses_to_one_honest_blocker() -> None
     assert result.status == "BLOCKED"
     assert not result.ready_for_completion
     assert result.blockers == (f"delivery blocked: {blocker}",)
+
+
+def test_target_lifecycle_advances_through_every_v04_gate() -> None:
+    assert lifecycle.TARGET_LIFECYCLE == (
+        "intake",
+        "design",
+        "plan",
+        "foundation",
+        "build",
+        "review",
+        "deliver",
+        "done",
+    )
+    facts = {
+        "legacy": False,
+        "setup_complete": True,
+        "blocked": False,
+        "intake_complete": False,
+        "design_required": True,
+        "design_complete": False,
+        "plan_complete": False,
+        "foundation_complete": False,
+        "amendment_required": False,
+        "build_complete": False,
+        "review_complete": False,
+        "delivery_complete": False,
+        "completion_complete": False,
+    }
+    sequence = []
+    sequence.append(lifecycle.resolve_phase(**facts))
+    facts["intake_complete"] = True
+    sequence.append(lifecycle.resolve_phase(**facts))
+    facts["design_complete"] = True
+    sequence.append(lifecycle.resolve_phase(**facts))
+    facts["plan_complete"] = True
+    sequence.append(lifecycle.resolve_phase(**facts))
+    facts["foundation_complete"] = True
+    sequence.append(lifecycle.resolve_phase(**facts))
+    facts["build_complete"] = True
+    sequence.append(lifecycle.resolve_phase(**facts))
+    facts["review_complete"] = True
+    sequence.append(lifecycle.resolve_phase(**facts))
+    facts["delivery_complete"] = True
+    sequence.append(lifecycle.resolve_phase(**facts))
+    assert tuple(sequence) == lifecycle.TARGET_LIFECYCLE
+
+    facts["build_complete"] = False
+    facts["review_complete"] = False
+    facts["delivery_complete"] = False
+    facts["amendment_required"] = True
+    assert lifecycle.resolve_phase(**facts) == "amend"
+
+
+def test_non_ui_design_skips_without_removing_other_v04_gates() -> None:
+    phase = lifecycle.resolve_phase(
+        legacy=False,
+        setup_complete=True,
+        blocked=False,
+        intake_complete=True,
+        design_required=False,
+        design_complete=True,
+        plan_complete=False,
+        foundation_complete=False,
+        amendment_required=False,
+        build_complete=False,
+        review_complete=False,
+        delivery_complete=False,
+        completion_complete=False,
+    )
+    assert phase == "plan"
+
+
+def test_legacy_phase_compatibility_ignores_new_v04_gates() -> None:
+    facts = {
+        "legacy": True,
+        "setup_complete": True,
+        "blocked": False,
+        "intake_complete": False,
+        "design_required": True,
+        "design_complete": False,
+        "plan_complete": True,
+        "foundation_complete": False,
+        "amendment_required": False,
+        "build_complete": False,
+        "review_complete": False,
+        "delivery_complete": False,
+        "completion_complete": False,
+    }
+    assert lifecycle.resolve_phase(**facts) == "build"
+    facts["amendment_required"] = True
+    assert lifecycle.resolve_phase(**facts) == "amend"
+    facts["amendment_required"] = False
+    facts["build_complete"] = True
+    assert lifecycle.resolve_phase(**facts) == "review"
+    facts["review_complete"] = True
+    assert lifecycle.resolve_phase(**facts) == "review"
+    facts["completion_complete"] = True
+    assert lifecycle.resolve_phase(**facts) == "done"
+
+
+def test_blueprint_lifecycle_contract_resolves_intake_design_and_legacy_defaults() -> None:
+    intake_lines = "\n".join(
+        f"- {name}: {'not applicable' if index % 2 else 'resolved decision'}"
+        for index, name in enumerate(contracts.INTAKE_DECISION_FIELDS)
+    )
+    modern = contracts.parse_blueprint_lifecycle_contract(
+        f"""
+## Intake Decision Record
+{intake_lines}
+
+## Design Direction
+- Applicability: applicable, user-facing web interface
+- Research availability: available
+- Selected direction: Direction 2
+- Selection rationale: Best fit for the core workflow
+- Selected design constraints: Dense, keyboard-accessible workspace
+
+## Delivery Contract
+- Delivery target: preview
+"""
+    )
+    assert modern["legacy"] is False
+    assert modern["intake"]["complete"] is True
+    assert modern["design"]["required"] is True
+    assert modern["design"]["complete"] is True
+    assert modern["delivery"]["target"] == "preview"
+
+    draft = contracts.parse_blueprint_lifecycle_contract(
+        """
+## Intake Decision Record
+- Users and their primary need:
+
+## Design Direction
+- Applicability: <applicable/not applicable, with reason>
+"""
+    )
+    assert draft["intake"]["complete"] is False
+    assert "Core flows and success conditions" in draft["intake"]["unresolved"]
+    assert draft["design"]["required"] is None
+    assert draft["design"]["complete"] is False
+
+    legacy = contracts.parse_blueprint_lifecycle_contract(
+        "# Blueprint.md\n\nStatus: approved\n\n## Product Goal\nBuild a CLI.\n"
+    )
+    assert legacy["legacy"] is True
+    assert legacy["delivery"] == {
+        "present": False,
+        "target": "source-only",
+        "legacy_default": True,
+    }
+
+
+def test_run_enters_intake_for_a_new_v04_project() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(SCRIPTS / "star_forge.py"),
+                "run",
+                "--project",
+                str(project),
+                "--objective",
+                "Build a focused test project",
+                "--no-hooks",
+                "--no-agents",
+            ],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr or result.stdout
+        state = json.loads(
+            (project / ".starforge" / "state.json").read_text(encoding="utf-8")
+        )
+        assert state["phase"] == "intake"
+        assert state["lifecycle"]["legacy"] is False
+        assert state["foundation"]["status"] == "MISSING"
+        assert state["delivery"]["status"] == "MISSING"
 
 
 def test_foundation_module_is_validation_only_and_has_no_external_write_runtime() -> None:

@@ -1070,7 +1070,7 @@ def test_explicit_fast_mvp_rerun_writes_blocked_profile_lock_after_gates() -> No
         code, out, err = run_cli(["run", "--project", str(project), "--fast-mvp", "--objective", "Build the greeter", "--no-hooks"])
         assert code == 0, err or out
         initial = star_forge.read_json(project / ".starforge" / "state.json")
-        assert initial["phase"] == "plan"
+        assert initial["phase"] == "intake"
         assert initial["profile_lock"]["status"] == "pending"
         assert initial["profile_lock"]["effective_review_profile"] == "standard"
         assert "Commit StarForge.profile.json" in initial["profile_lock"]["next_action"]
@@ -2301,7 +2301,7 @@ def test_prompt_hook_emits_banner_and_resets_budget() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         project = Path(tmp).resolve()
         init_project(project)
-        run_cli(["run", "--project", str(project), "--no-hooks"])  # phase=plan state exists
+        run_cli(["run", "--project", str(project), "--no-hooks"])  # phase=intake state exists
         counter = project / ".starforge" / "state" / "auto-continue.json"
         star_forge.write_json(counter, {"count": 2, "signature": "stale"})
         event = {"cwd": str(project), "prompt": "keep going"}
@@ -2309,7 +2309,7 @@ def test_prompt_hook_emits_banner_and_resets_budget() -> None:
         assert code == 0, err or out
         payload = json.loads(out)
         banner = payload["hookSpecificOutput"]["additionalContext"]
-        assert banner.startswith("[star-forge] phase=plan")
+        assert banner.startswith("[star-forge] phase=intake")
         assert "next:" in banner
         assert not counter.exists()  # budget reset on every user prompt
 
@@ -2325,7 +2325,7 @@ def test_stop_hook_writes_handoff_artifact() -> None:
         assert "saved continuity state" in out
         handoff = json.loads((project / ".starforge" / "state" / "handoff-artifact.json").read_text(encoding="utf-8"))
         assert handoff["schema"] == "star-forge.handoff.v1"
-        assert handoff["phase"] == "plan"
+        assert handoff["phase"] == "intake"
         assert handoff["complete"] is False
 
 
@@ -2364,7 +2364,7 @@ def test_should_block_stop_requires_cruise_and_active_phase() -> None:
         # sync mode never auto-continues.
         run_cli(["run", "--project", str(project), "--mode", "sync", "--no-hooks"])
         assert star_forge.should_block_stop(project, {}, handoff) is None
-        # cruise + plan phase does.
+        # cruise + intake phase does.
         run_cli(["run", "--project", str(project), "--mode", "cruise", "--no-hooks"])
         assert star_forge.should_block_stop(project, {}, handoff)
         # an already-active stop hook is never re-blocked.
@@ -2383,7 +2383,7 @@ def test_should_block_stop_bounded_with_signature_reset() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         project = Path(tmp).resolve()
         init_project(project)
-        run_cli(["run", "--project", str(project), "--no-hooks"])  # cruise + plan
+        run_cli(["run", "--project", str(project), "--no-hooks"])  # cruise + intake
         handoff = {"next_action": "approve the blueprint"}
         results = [star_forge.should_block_stop(project, {}, handoff) for _ in range(star_forge.MAX_AUTO_CONTINUES + 1)]
         assert all(isinstance(item, str) for item in results[: star_forge.MAX_AUTO_CONTINUES])
@@ -2403,7 +2403,7 @@ def test_run_prints_operating_card_first() -> None:
         assert code == 0, err or out
         lines = out.splitlines()
         assert lines[0].startswith(f"star-forge {star_forge.SF_VERSION} | hooks: ADVISORY (no trusted witness source)")
-        assert "| phase: plan" in lines[0]
+        assert "| phase: intake" in lines[0]
         assert "/hooks" not in lines[0]
         assert "witnessed" not in lines[0]
         assert lines[1].startswith("NEXT:")
