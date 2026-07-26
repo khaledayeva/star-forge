@@ -6,6 +6,7 @@ Run with: python3 tests/test_v04_release.py
 
 from __future__ import annotations
 
+import ast
 import copy
 import json
 import os
@@ -168,6 +169,7 @@ def test_isolated_clean_install_and_mobbin_duplicate_doctor_are_read_only() -> N
         active_hooks = active / "hooks" / "hooks.json"
         active_hooks.parent.mkdir(parents=True)
         shutil.copyfile(ROOT / "hooks" / "hooks.json", active_hooks)
+        shutil.copyfile(ROOT / ".app.json", active / ".app.json")
         (codex_home / "config.toml").write_text(
             """
 [marketplaces.star-forge]
@@ -426,6 +428,61 @@ def test_repository_metadata_passes_version_only_release_gate() -> None:
         cwd=ROOT,
     )
     assert result.returncode == 0, result.stderr
+
+
+def test_release_gate_discovers_every_test_and_runtime_module() -> None:
+    script = RELEASE_CHECK.parent.joinpath("check.sh").read_text(encoding="utf-8")
+    assert "for suite in tests/test_*.py" in script
+    assert (
+        "scripts/star_forge.py scripts/starforge/*.py "
+        "scripts/live_collectors/*.py"
+    ) in script
+    assert "TEST_SUITES=" not in script
+    assert "PYTHON_FILES=" not in script
+
+
+def test_runtime_modules_have_explicit_acyclic_dependencies() -> None:
+    runtime_paths = sorted((SCRIPTS / "starforge").glob("runtime_*.py"))
+    graph: dict[str, set[str]] = {}
+    for path in runtime_paths:
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        dependencies: set[str] = set()
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ImportFrom):
+                continue
+            assert all(alias.name != "*" for alias in node.names), path
+            module = str(node.module or "")
+            if node.level == 1 and module.startswith("runtime_"):
+                dependencies.add(module)
+        graph[path.stem] = dependencies
+
+    def visit(name: str, visiting: set[str], visited: set[str]) -> None:
+        assert name not in visiting, f"runtime dependency cycle at {name}"
+        if name in visited:
+            return
+        visiting.add(name)
+        for dependency in graph[name]:
+            visit(dependency, visiting, visited)
+        visiting.remove(name)
+        visited.add(name)
+
+    visited: set[str] = set()
+    for module_name in graph:
+        visit(module_name, set(), visited)
+
+    facade = (SCRIPTS / "star_forge.py").read_text(encoding="utf-8")
+    assert "vars(_module).update" not in facade
+    assert "globals().update(_RUNTIME_NAMESPACE)" not in facade
+    assert "_RUNTIME_NAMESPACE" not in facade
+    assert "__all__" in facade
+
+    for module_name in graph:
+        process = run(
+            [sys.executable, "-c", f"import starforge.{module_name}"],
+            cwd=ROOT,
+            env={"PYTHONPATH": str(SCRIPTS)},
+        )
+        assert process.returncode == 0, process.stderr
 
 
 def main() -> int:

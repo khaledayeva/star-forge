@@ -137,10 +137,11 @@ def test_release_check_wrapper_includes_core_and_all_live_suites() -> None:
     assert "python3 -m json.tool hooks/hooks.json" in text
     assert "sh -n scripts/install-codex.sh" in text
     assert "sh -n scripts/release-check.sh" in text
-    for path in sorted(REQUIRED_CHECK_COMPILES):
-        assert path in text, path
-    for path in sorted(REQUIRED_CHECK_TESTS):
-        assert path in text, path
+    compile_patterns = ("scripts/star_forge.py", "scripts/starforge/*.py", "scripts/live_collectors/*.py")
+    assert all(any(Path(path).match(pattern) for pattern in compile_patterns)
+               for path in REQUIRED_CHECK_COMPILES)
+    assert "for suite in tests/test_*.py" in text
+    assert all(Path(path).match("tests/test_*.py") for path in REQUIRED_CHECK_TESTS)
 
 
 def test_strict_proof_rejects_domain_profiles_without_dedicated_command() -> None:

@@ -696,6 +696,45 @@ def test_verify_noop_allowed_for_docs_task() -> None:
         assert star_forge.has_noop_verify(project, "DOC-1")
 
 
+def test_noop_verify_becomes_stale_after_source_change() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        init_project(project)
+        write_plan(
+            project,
+            [
+                "| DOC-1 | Write the user guide | ready | docs | "
+                "README.md | - | noop | - |"
+            ],
+        )
+        readme = project / "README.md"
+        readme.write_text("# Guide\n", encoding="utf-8")
+        code, out, err = run_cli(
+            [
+                "verify",
+                "--project",
+                str(project),
+                "--task",
+                "DOC-1",
+                "--noop",
+                "--summary",
+                "guide reviewed",
+                "--strict",
+            ]
+        )
+        assert code == 0, err or out
+        assert star_forge.has_noop_verify(project, "DOC-1")
+
+        readme.write_text("# Changed guide\n", encoding="utf-8")
+        assert not star_forge.has_noop_verify(project, "DOC-1")
+        code, payload = complete_task(project, "DOC-1", changed="README.md")
+        assert code == 1
+        assert any(
+            item["rule"] == "verify-noop-missing"
+            for item in payload["findings"]
+        )
+
+
 def test_fresh_passing_verify_flips_when_source_changes() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         project = Path(tmp).resolve()
@@ -814,6 +853,35 @@ def test_complete_task_visual_requires_passing_browser_run() -> None:
         assert run["viewports"]["mobile"]["decoded_width"] == 390
         code, payload = complete_task(project, "SF-2", changed="src/page.html")
         assert code == 0, payload
+
+
+def test_browser_proof_becomes_stale_after_visual_source_change() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        init_project(project)
+        write_plan(
+            project,
+            [
+                f"| SF-2 | Build the dashboard UI page | ready | solo | "
+                f"src/page.html | - | {REAL_VERIFY} | - |"
+            ],
+        )
+        page = project / "src" / "page.html"
+        page.parent.mkdir(parents=True, exist_ok=True)
+        page.write_text("<html><body>first</body></html>\n", encoding="utf-8")
+        record_verify(project, "SF-2")
+        record_passing_browser_run(project, "SF-2")
+        assert star_forge.passing_browser_runs(project, "SF-2")
+
+        page.write_text("<html><body>changed</body></html>\n", encoding="utf-8")
+        record_verify(project, "SF-2")
+        assert star_forge.passing_browser_runs(project, "SF-2") == []
+        code, payload = complete_task(project, "SF-2", changed="src/page.html")
+        assert code == 1
+        assert any(
+            item["rule"] == "browser-run-missing"
+            for item in payload["findings"]
+        )
 
 
 def test_complete_task_python_control_plane_does_not_require_browser_run() -> None:
@@ -1719,6 +1787,68 @@ def test_waive_with_reason_clears_fix_queue() -> None:
         assert '"kind": "waive"' in incidents
 
 
+def test_waiver_cannot_follow_positional_id_to_unrelated_finding() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        reviewable_project(project)
+        original = {
+            "severity": "high",
+            "file": "src/hello.py",
+            "line": 1,
+            "title": "Greeting text is wrong",
+            "detail": "Output mismatch",
+        }
+        write_reviewer_findings(project, "correctness", [original])
+        write_reviewer_findings(project, "security", [])
+        write_reviewer_findings(project, "architecture", [])
+        code, out, err = run_cli(["review", "--project", str(project)])
+        assert code == 0, err or out
+        first = json.loads(out)["fix_queue"][0]
+        code, out, err = run_cli(
+            [
+                "waive",
+                "--project",
+                str(project),
+                "--finding",
+                first["id"],
+                "--reason",
+                "accepted wording",
+            ]
+        )
+        assert code == 0, err or out
+        waiver = json.loads(
+            (project / star_forge.WAIVES_FILE).read_text(encoding="utf-8")
+        )
+        assert waiver["fingerprint"] == first["fingerprint"]
+        assert waiver["source_hash"] == first.get(
+            "reviewed_source_hash",
+            star_forge.source_hash(project),
+        )
+
+        source = project / "src" / "hello.py"
+        source.write_text("print('new behavior')\n", encoding="utf-8")
+        unrelated = {
+            "severity": "high",
+            "file": "src/other.py",
+            "line": 40,
+            "title": "Unrelated crash in worker",
+            "detail": "The worker raises on empty input",
+        }
+        write_reviewer_findings(project, "correctness", [unrelated])
+        write_reviewer_findings(project, "security", [])
+        write_reviewer_findings(project, "architecture", [])
+        scope = star_forge.scope_hash(project) or "noscope"
+        merged = star_forge.merge_review(project, scope)
+        replacement = next(
+            item
+            for item in merged["findings"]
+            if item["title"] == unrelated["title"]
+        )
+        assert replacement["id"] == first["id"]
+        assert replacement["waived"] is False
+        assert replacement in merged["fix_queue"]
+
+
 def test_review_goes_stale_after_source_change() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         project = Path(tmp).resolve()
@@ -1884,7 +2014,7 @@ def test_malformed_findings_files_report_problems() -> None:
 def test_malformed_dict_finding_does_not_pass_done() -> None:
     # Regression: a findings file whose `findings` array contains a non-object
     # entry (dict-shaped but a string here) must register a file_problem and
-    # block done — the malformed entry can't be smuggled past the gate.
+    # block done because the malformed entry cannot be smuggled past the gate.
     with tempfile.TemporaryDirectory() as tmp:
         project = Path(tmp).resolve()
         tasks = reviewable_project(project)
@@ -2030,6 +2160,33 @@ def test_done_happy_path_writes_complete_proof() -> None:
             "verdict",
             "witness",
         }
+
+
+def test_done_requires_change_packet_for_post_proof_drift_without_run() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        build_completed_project(project)
+        code, payload = run_done(project)
+        assert code == 0, payload
+
+        source = project / "src" / "hello.py"
+        source.write_text("print('changed after proof')\n", encoding="utf-8")
+        record_verify(project, "SF-1")
+        write_clean_review_wave(project)
+        code, out, err = run_cli(
+            ["review", "--project", str(project), "--strict"]
+        )
+        assert code == 0, err or out
+        commit_all(project, "post proof drift without run")
+
+        code, payload = run_done(project)
+        assert code == 1, payload
+        assert payload["drift"]["detected"] is True
+        assert payload["drift"]["actionable"] is True
+        assert any(
+            item.get("rule") == "post-proof-change-packet-required"
+            for item in payload["problems"]
+        )
 
 
 def test_post_done_drift_creates_single_draft_change_packet() -> None:
@@ -2285,6 +2442,85 @@ def test_run_product_slug_on_fresh_foreign_root_isolates_cleanly() -> None:
         assert not (root / ".git").exists()
         state = json.loads((nested / ".starforge" / "state.json").read_text(encoding="utf-8"))
         assert state["project"] == str(nested)
+
+
+def test_project_redirect_rejects_absolute_sibling_project_escape() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp).resolve()
+        selected = root / "selected"
+        sibling = root / "sibling"
+        selected.mkdir()
+        init_project(sibling)
+        (selected / ".starforge").mkdir()
+        (selected / ".starforge" / "project.json").write_text(
+            json.dumps({
+                "schema": "star-forge.project-redirect.v1",
+                "project_root": str(sibling),
+            }) + "\n",
+            encoding="utf-8",
+        )
+        code, out, err = run_cli(["status", "--project", str(selected)])
+        assert code == 1, out
+        assert "redirect" in err.lower()
+        assert str(sibling) in err
+
+
+def test_project_redirect_rejects_symlinked_managed_target() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp).resolve()
+        selected = root / "selected"
+        external = root / "external"
+        selected.mkdir()
+        init_project(external)
+        (selected / "work").mkdir()
+        (selected / "work" / "app").symlink_to(external, target_is_directory=True)
+        (selected / ".starforge").mkdir()
+        (selected / ".starforge" / "project.json").write_text(
+            json.dumps({
+                "schema": "star-forge.project-redirect.v1",
+                "project_root": str(selected / "work" / "app"),
+            }) + "\n",
+            encoding="utf-8",
+        )
+        code, out, err = run_cli(["status", "--project", str(selected)])
+        assert code == 1, out
+        assert "symlink" in err.lower()
+
+
+def test_state_commands_reject_symlinked_starforge_root_without_external_write() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp).resolve()
+        project = root / "project"
+        external = root / "external-state"
+        project.mkdir()
+        external.mkdir()
+        sentinel = external / "sentinel.txt"
+        sentinel.write_text("unchanged\n", encoding="utf-8")
+        (project / ".starforge").symlink_to(external, target_is_directory=True)
+        code, out, err = run_cli(["init", "--project", str(project), "--no-agents"])
+        assert code == 1, out
+        assert "symlink" in err.lower()
+        assert sentinel.read_text(encoding="utf-8") == "unchanged\n"
+        assert sorted(path.name for path in external.iterdir()) == ["sentinel.txt"]
+
+
+def test_state_commands_reject_nested_state_symlink_without_external_write() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp).resolve()
+        project = root / "project"
+        external = root / "external-runs"
+        init_project(project)
+        runs = project / ".starforge" / "runs"
+        runs.rmdir()
+        external.mkdir()
+        sentinel = external / "sentinel.txt"
+        sentinel.write_text("unchanged\n", encoding="utf-8")
+        runs.symlink_to(external, target_is_directory=True)
+        code, out, err = run_cli(["status", "--project", str(project)])
+        assert code == 1, out
+        assert "symlink" in err.lower()
+        assert sentinel.read_text(encoding="utf-8") == "unchanged\n"
+        assert sorted(path.name for path in external.iterdir()) == ["sentinel.txt"]
 
 
 def test_init_no_hooks_and_no_agents_control_distinct_surfaces() -> None:

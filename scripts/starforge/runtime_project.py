@@ -11,12 +11,65 @@ from starforge import lifecycle as project_lifecycle
 from starforge import review_policy as adaptive_review_policy
 from .policy_data import mapping as _policy_mapping, record as _policy_record
 from .policy_data import value as _policy_value
-from .runtime_support import *
+from .runtime_support import BLUEPRINT_FILE, HOOK_EVENTS, LEDGER_FILE, PLAN_FILE, PROJECT_MANIFEST, PROOF_FILE, REVIEWS_DIR, REVIEW_PROFILE_ROLES, SOURCE_PROFILE_FILE, SOURCE_PROFILE_SCHEMA, STAR_FORGE_STATE_VERSION, STATE_DIR, STOPWORDS, ForgeError, file_sha256, git_head, git_status, git_status_path, is_git_repo, jsonl_payloads, now_utc, read_json, read_text, release_snapshot, release_snapshot_unavailable, repo_root, run_git, slugify, source_hash, stable_json_hash, strip_volatile, write_json, write_json_if_changed, write_text
+from .runtime_plan import blueprint_is_approved, blueprint_text_is_approved, parse_tasks, parse_tasks_from_text, plan_is_placeholder
 
 _POLICY = _policy_value("runtime_project.POLICY")
+_STATE_POLICY = _policy_value("runtime_orchestration.POLICY")
+
+def assert_project_state_safe(project: Path) -> None:
+    """Reject state paths that can escape the resolved project through symlinks."""
+    root, state_root = project.resolve(), project / STATE_DIR
+    if not state_root.exists() and not state_root.is_symlink():
+        return
+    try:
+        if state_root.is_symlink():
+            raise ForgeError(f"Refusing unsafe Star Forge state symlink: {state_root}")
+        if not state_root.is_dir():
+            raise ForgeError(f"Refusing non-directory Star Forge state root: {state_root}")
+        if not state_root.resolve(strict=True).is_relative_to(root):
+            raise ForgeError(f"Refusing Star Forge state outside project root: {state_root}")
+        for path in state_root.rglob("*"):
+            if path.is_symlink():
+                raise ForgeError(f"Refusing unsafe Star Forge state symlink: {path}")
+            if not path.resolve(strict=True).is_relative_to(root):
+                raise ForgeError(f"Refusing Star Forge state outside project root: {path}")
+    except ForgeError:
+        raise
+    except OSError as exc:
+        raise ForgeError(f"Cannot safely inspect Star Forge state: {exc}") from exc
+
+def ensure_state_dirs(project: Path) -> None:
+    project = project.resolve()
+    assert_project_state_safe(project)
+    for path in _STATE_POLICY["state_dirs"]:
+        target = project / path
+        if not target.is_relative_to(project):
+            raise ForgeError(f"Refusing state directory outside project root: {target}")
+        target.mkdir(parents=True, exist_ok=True)
+    assert_project_state_safe(project)
+    if not (project / LEDGER_FILE).exists():
+        write_text(project / LEDGER_FILE, "")
+
+def hooks_liveness(project: Path) -> dict[str, Any]:
+    events = jsonl_payloads(project / HOOK_EVENTS)
+    last_event = (str(events[-1].get("timestamp") or "") or None) if events else None
+    return _policy_mapping("hooks_liveness", local_events_observed=last_event is not None,
+                           local_last_event_at=last_event, **_STATE_POLICY["hook_liveness"])
+
+def enforcement_mode(project: Path) -> str:
+    return "witnessed" if hooks_liveness(project)["events_observed"] else "advisory"
+
+def source_hash_unavailable_state(
+    profile_lock: dict[str, Any], *, problems: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    return _policy_mapping(
+        "source_hash_unavailable",
+        problems=list(problems) if problems is not None else profile_lock.get("problems") or [])
 
 def has_star_forge_project_markers(project: Path) -> bool:
-    return (project / PROJECT_MANIFEST).exists()
+    assert_project_state_safe(project)
+    return (project / PROJECT_MANIFEST).is_file()
 
 def _optional_load(path: Path, loader: Any, errors: tuple[type[BaseException], ...], default: Any) -> Any:
     if not path.exists():
@@ -42,10 +95,26 @@ def follow_project_redirect(candidate: Path) -> Path:
     manifest = _read_json_if_possible(candidate / PROJECT_MANIFEST)
     raw_root = (str(manifest.get("project_root") or "")
                 if manifest.get("schema") == _POLICY["redirect_schema"] else "")
-    target = Path(raw_root) if raw_root else candidate
-    valid = (target.resolve() != candidate.resolve() and target.exists()
-             and has_star_forge_project_markers(target))
-    return target.resolve() if valid else candidate
+    if not raw_root:
+        return candidate
+    target, managed = Path(raw_root), candidate.resolve() / "work"
+    if any(path.is_symlink() for path in (managed, target)):
+        raise ForgeError(f"Refusing symlinked project redirect target: {raw_root}")
+    if not target.is_absolute() or target.parent != managed:
+        raise ForgeError(f"Refusing unsafe project redirect outside managed work directory: {raw_root}")
+    try:
+        resolved = target.resolve(strict=True)
+    except OSError as exc:
+        raise ForgeError(f"Refusing invalid project redirect {raw_root}: {exc}") from exc
+    nested = _read_json_if_possible(resolved / PROJECT_MANIFEST)
+    valid = (
+        resolved.parent == managed and has_star_forge_project_markers(resolved)
+        and nested.get("schema") != _POLICY["redirect_schema"]
+        and Path(str(nested.get("project_root") or "")).resolve() == resolved
+    )
+    if not valid:
+        raise ForgeError(f"Refusing unbound project redirect target: {raw_root}")
+    return resolved
 
 def resolve_project(raw: str) -> Path:
     start = Path(raw).resolve()
@@ -170,6 +239,16 @@ def try_source_hash(project: Path) -> tuple[str | None, dict[str, Any] | None]:
     except (PermissionError, OSError) as exc:
         return None, source_hash_exception_problem(exc)
 
+def safe_release_snapshot(project: Path) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    problem = source_hash_unavailable_problem(project)
+    if problem:
+        return release_snapshot_unavailable(project, [problem]), problem
+    try:
+        return release_snapshot(project), None
+    except (PermissionError, OSError) as exc:
+        problem = source_hash_exception_problem(exc)
+        return release_snapshot_unavailable(project, [problem]), problem
+
 def read_source_profile_payload(project: Path) -> dict[str, Any]:
     return dict(_source_profile_status(project)["payload"])
 
@@ -203,7 +282,7 @@ def _profile_gate_reasons(project: Path, *, extended: bool) -> list[str]:
         if extended:
             reasons.append(_POLICY["gate_reasons"]["plan_exists"])
         reasons.append(_POLICY["gate_reasons"]["plan_tasks"])
-    if extended and load_proof(project) is not None:
+    if extended and _read_json_if_possible(project / PROOF_FILE):
         reasons.append(_POLICY["gate_reasons"]["proof"])
     if extended and review_records_exist(project):
         reasons.append(_POLICY["gate_reasons"]["reviews"])

@@ -309,6 +309,18 @@ maybe_record = lambda commands, cwd: {name: live_common.run_trusted_command(
 security_provider = lambda schema_family: str(EVIDENCE_ROUTES["codex-security" if schema_family == "codex-security" else "fallback"]["provider"])
 
 
+def provider_receipt_valid(receipt: Any, input_sha256: str) -> bool:
+    return bool(
+        isinstance(receipt, Mapping)
+        and receipt.get("source") == "codex-security-direct"
+        and receipt.get("input_sha256") == input_sha256
+        and receipt.get("scanner") == "codex-security"
+        and receipt.get("scanner_version")
+        and receipt.get("ruleset") and receipt.get("scan_scope")
+        and isinstance(receipt.get("source_binding"), Mapping)
+    )
+
+
 def write_evidence_envelope(
     project: Path,
     manifest_path: Path,
@@ -344,7 +356,9 @@ def write_evidence_envelope(
         envelope_path, envelope, project_root=project, verify_artifacts=True)
 
 
-def adapt(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
+def adapt(
+    args: argparse.Namespace, *, provider_receipt: Mapping[str, Any] | None = None,
+) -> tuple[int, dict[str, Any]]:
     project = Path(args.project).resolve()
     root = live_common.live_collector_dir(project, args.task, "security")
     problems: list[dict[str, Any]] = []
@@ -366,12 +380,20 @@ def adapt(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
             rule="security-input-json", path=live_common.project_relative(project, input_path),
         )
     source_schema, schema_family, trusted_schema = detect_schema(payload)
-    scanner, version = scanner_name(payload, args, schema_family), scanner_version(payload, args)
-    ruleset, scope = ruleset_metadata(payload, args), scan_scope(payload, args)
-    binding = source_binding(payload, args)
-    source_binding_ok = validate_source_binding(project, binding, problems)
     actual_input_hash = file_sha256(input_path) if input_path.exists() else ""
-    declared_hash = declared_input_hash(payload, args)
+    trusted_provenance = provider_receipt_valid(provider_receipt, actual_input_hash)
+    if trusted_provenance:
+        assert provider_receipt is not None
+        scanner, version = "codex-security", str(provider_receipt["scanner_version"])
+        ruleset, scope = provider_receipt["ruleset"], provider_receipt["scan_scope"]
+        binding = dict(provider_receipt["source_binding"])
+    else:
+        scanner, version = scanner_name(payload, args, schema_family), scanner_version(payload, args)
+        ruleset, scope = ruleset_metadata(payload, args), scan_scope(payload, args)
+        binding = source_binding(payload, args)
+    source_binding_ok = validate_source_binding(project, binding, problems)
+    declared_hash = (str(provider_receipt["input_sha256"])
+                     if trusted_provenance and provider_receipt else declared_input_hash(payload, args))
     input_hash_ok = bool(declared_hash and actual_input_hash and declared_hash.lower() == actual_input_hash.lower())
     dependency_manifests = dependency_manifest_records(project, payload, args, problems)
     validate_required_metadata(
@@ -379,6 +401,11 @@ def adapt(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
         ruleset=ruleset, scope=scope, input_hash_ok=input_hash_ok,
         source_binding_ok=source_binding_ok, problems=problems,
     )
+    if not trusted_provenance:
+        problems.append(live_common.problem(
+            "Imported security JSON has no independently verified direct-provider receipt",
+            rule="security-provider-provenance", severity="medium", blocking=False,
+        ))
     redaction_totals: dict[str, Any] = dict(REDACTION_COUNTS)
     normalized = [
         normalized_finding(
@@ -398,7 +425,8 @@ def adapt(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
     values: dict[str, Any] = {
         **vars(args), **locals(), "version": version, "findings": normalized,
         "input_path": live_common.project_relative(project, input_path) if input_path.exists() else "",
-        "report_provenance": payload.get("provenance") if isinstance(payload, Mapping) else {},
+        "report_provenance": (dict(provider_receipt) if trusted_provenance and provider_receipt
+                              else payload.get("provenance") if isinstance(payload, Mapping) else {}),
     }
     def clean(value: Any) -> Any:
         nonlocal redaction_totals
@@ -435,7 +463,7 @@ def adapt(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
         artifacts[f"dependency-manifest-{index + 1}"] = project / record["path"]
 
     values.update({
-        "trusted_provenance": bool(trusted_schema and scanner and version),
+        "trusted_provenance": trusted_provenance,
         "summary_ruleset": ruleset if ruleset not in (None, "", {}, []) else "",
         "summary_scope": scope if scope not in (None, "", {}, []) else "",
         "summary_input_hash": declared_hash if input_hash_ok else "",
@@ -450,7 +478,9 @@ def adapt(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
         artifacts=artifacts, summary=summary, degraded=bool(problems), problems=problems,
     )
     envelope_path, envelope = write_evidence_envelope(
-        project, manifest_path, schema_family=schema_family, scanner=scanner,
+        project, manifest_path,
+        schema_family=schema_family if trusted_provenance else "unsupported",
+        scanner=scanner,
         scanner_version_value=version,
         source_schema=source_schema, source_binding_value={**binding, "fresh": source_binding_ok},
     )
@@ -482,13 +512,17 @@ def adapt(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
         name.replace("-", "_"): live_common.project_relative(project, path)
         for name, path in artifacts.items() if not name.startswith("dependency-")
     } | {"manifest": live_common.project_relative(project, manifest_path)}
+    blocking = any(item.get("blocking", True) for item in problems)
     values.update({**locals(),
-        "verdict": "FAIL" if problems else "PASS", "result_artifacts": result_artifacts,
+        "verdict": "FAIL" if blocking else "DEGRADED" if problems else "PASS",
+        "result_artifacts": result_artifacts,
         "evidence_path": live_common.project_relative(project, envelope_path),
         "evidence_schema": envelope["schema"], "evidence_verdict": envelope["verdict"],
-        "provider": security_provider(schema_family), "commands": commands,
+        "provider": security_provider(schema_family if trusted_provenance else "unsupported"),
+        "commands": commands,
     })
     result = render_descriptor(PAYLOAD_TEMPLATES["result"], values)
+    result["trusted_provenance"] = trusted_provenance
     if record_results:
         result["record_results"] = record_results
     return (1 if record_failed or (args.strict and problems) else 0), result

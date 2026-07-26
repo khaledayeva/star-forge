@@ -8,7 +8,7 @@ from typing import Any, Mapping, Sequence
 from starforge import changes as project_changes
 from starforge import contracts as project_contracts
 from starforge import lifecycle as project_lifecycle
-from .runtime_project import *
+from .runtime_support import BLUEPRINT_FILE, PLAN_FILE, ForgeError, read_json, read_text, write_text
 
 PLAN_POLICY = _policy_value("runtime_plan.POLICY")
 VALID_STATUSES, VALID_MODES = (set(PLAN_POLICY[key]) for key in ("statuses", "modes"))

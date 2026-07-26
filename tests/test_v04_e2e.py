@@ -601,6 +601,8 @@ def exercise_project(project: Path, scenario: dict[str, Any]) -> dict[str, Any]:
         str(scenario["verify_command"]),
         "--strict",
     )
+    if scenario["name"] == "web":
+        record_browser_proof(project)
     commit_all(project, "Complete verified fixture task")
     phase_sequence.append(run_state(project)["phase"])
     assert phase_sequence[-1] == "review"

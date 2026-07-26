@@ -10,7 +10,10 @@ import sys
 import tempfile
 from pathlib import Path
 from typing import Any, Sequence
-from .runtime_orchestration import *
+from .runtime_support import AUTO_CONTINUE_FILE, CANONICAL_STATE, CHANGED_FILES, HANDOFF_ARTIFACT, HOOK_EVENTS, INCIDENTS_FILE, MAX_AUTO_CONTINUES, PLUGIN_NAME, SF_VERSION, SUBAGENT_EVENTS, append_jsonl, architecture_debt_findings, blocking_items, iter_project_files, now_utc, plugin_root, read_json, read_text, redact, relative_to_project, repo_root, scan_paths, stable_json_hash, write_json, write_json_if_changed
+from .runtime_project import enforcement_mode, ensure_state_dirs, find_star_forge_project_root, has_star_forge_project_markers
+from .runtime_review import done_payload
+from .runtime_orchestration import version_core
 
 def load_hook_event() -> dict[str, Any]:
     # Hooks must never crash on hostile/garbled stdin: UnicodeDecodeError is a
@@ -301,6 +304,10 @@ def cmd_self_test(args: argparse.Namespace) -> int:
         check(f"agent-{role}", path.exists() and "## Mission" in read_text(path), str(path))
     for template in ["Blueprint.md", "Plan.md"]:
         check(f"template-{template}", (root / "templates" / template).exists(), template)
+    help_process = subprocess.run(
+        [sys.executable, str(root / "scripts" / "star_forge.py"), "--help"],
+        cwd=str(root), text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+    help_text = help_process.stdout + help_process.stderr
     for command in [
             "run",
             "init",
@@ -326,12 +333,7 @@ def cmd_self_test(args: argparse.Namespace) -> int:
             "status",
             "quality",
     ]:
-        parser = build_parser()
-        subcommands: set[str] = set()
-        for action in parser._actions:
-            if isinstance(action, argparse._SubParsersAction):
-                subcommands.update(action.choices.keys())
-        check(f"command-{command}", command in subcommands, command)
+        check(f"command-{command}", help_process.returncode == 0 and command in help_text, command)
     try:
         json.loads(read_text(root / "hooks" / "hooks.json"))
         check("hooks-json", True, "hooks/hooks.json parsed")

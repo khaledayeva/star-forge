@@ -301,6 +301,37 @@ Status: approved
     assert len(standard.roles) == review_policy.MAX_REVIEW_AGENTS
 
 
+def test_incomplete_risk_contract_retains_conservative_review_floors() -> None:
+    cases = {
+        "partial": [
+            ("User-facing UI", "no", "no interface"),
+        ],
+        "unresolved": [
+            (
+                name,
+                "TBD" if name == "Authentication or authorization" else "no",
+                "pending risk decision",
+            )
+            for name in FLAG_NAMES
+        ],
+        "duplicate": [
+            *[
+                (name, "no", "resolved")
+                for name in FLAG_NAMES
+            ],
+            ("User-facing UI", "no", "duplicate row"),
+        ],
+    }
+    for name, rows in cases.items():
+        result = review_policy.select_review_policy(
+            blueprint(rows=rows),
+            profile="fast-mvp",
+        )
+        assert {"correctness", "security", "architecture"}.issubset(
+            result.roles
+        ), (name, result.roles)
+
+
 def test_modern_fast_mvp_still_selects_applicable_roles() -> None:
     text = blueprint(
         {
@@ -424,18 +455,20 @@ def test_lifecycle_delivery_contract_establishes_review_floor() -> None:
     )
 
 
-def test_duplicate_flag_rows_cannot_duplicate_roles_or_reasons() -> None:
+def test_duplicate_flag_rows_trigger_one_conservative_role_floor() -> None:
     rows = [
         ("Authentication or authorization", "yes", "required auth"),
         ("Authentication or authorization", "yes", "required auth"),
         ("Privacy obligations", "yes", "privacy handling"),
     ]
     result = review_policy.select_review_policy(blueprint(rows=rows))
-    assert result.roles == ("correctness", "security")
-    assert result.reasons_for("security") == (
-        "Risk flag `Authentication or authorization` is yes: required auth",
-        "Risk flag `Privacy obligations` is yes: privacy handling",
+    assert result.roles == (
+        "correctness",
+        "security",
+        "architecture",
     )
+    assert len(result.roles) == len(set(result.roles))
+    assert len(result.reasons_for("security")) == 1
 
 
 def test_cli_policy_is_source_bound_and_spawn_plan_carries_reasons() -> None:

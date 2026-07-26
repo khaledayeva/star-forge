@@ -281,19 +281,19 @@ def _mobbin_toml_connections(value: Any, path: tuple[str, ...] = ()) -> Iterable
         elif isinstance(child, Mapping):
             yield from _mobbin_toml_connections(child, child_path)
 
-def _connection_json_paths(codex_home: Path, source_root: Path) -> list[Path]:
+def _connection_json_paths(codex_home: Path) -> list[Path]:
     candidates: set[Path] = set()
-    for root in (codex_home / "plugins" / "cache", source_root):
-        if root.is_dir():
-            for pattern in POLICY["connection_globs"]:
-                candidates.update(root.rglob(pattern))
+    root = codex_home / "plugins" / "cache"
+    if root.is_dir():
+        for pattern in POLICY["connection_globs"]:
+            candidates.update(root.rglob(pattern))
     candidates.update(codex_home / name for name in POLICY["connection_json_names"] if (codex_home / name).is_file())
     return sorted(candidates, key=str)
 
-def _mobbin_connections(codex_home: Path, source_root: Path, config: Mapping[str, Any]) -> list[dict[str, Any]]:
+def _mobbin_connections(codex_home: Path, config: Mapping[str, Any]) -> list[dict[str, Any]]:
     config_path = codex_home / "config.toml"
     connections = [{"kind": "config", "locator": f"{_path_text(config_path)}#{table}"} for table in dict.fromkeys(_mobbin_toml_connections(config))]
-    for path in _connection_json_paths(codex_home, source_root):
+    for path in _connection_json_paths(codex_home):
         try:
             payload = _read_json(path)
             contains_mobbin = "mobbin" in json.dumps(payload, sort_keys=True, default=str).lower()
@@ -338,7 +338,7 @@ def diagnose_installation(
     active = _select_active_install(installs, source_root, active_plugin_root)
     marketplaces, marketplace_findings = _stale_marketplace_findings(config, installs)
     hook_records, hook_findings = _stale_hook_findings(codex_home, source, installs)
-    connections = _mobbin_connections(codex_home, source_root, config)
+    connections = _mobbin_connections(codex_home, config)
     findings = marketplace_findings + _duplicate_install_findings(installs) + _active_drift_findings(source, active) + hook_findings + _duplicate_mobbin_findings(connections)
     details = {
         RULE_STALE_MARKETPLACE: marketplaces,

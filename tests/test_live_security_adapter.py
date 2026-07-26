@@ -56,7 +56,13 @@ def run_star_forge(args: list[str]) -> tuple[int, dict[str, Any], str]:
     return code, payload, err
 
 
-def run_adapter(args: list[str]) -> tuple[int, dict[str, Any]]:
+def run_adapter(
+    args: list[str], *, provider_receipt: dict[str, Any] | None = None,
+) -> tuple[int, dict[str, Any]]:
+    if provider_receipt is not None:
+        parsed = security_adapter.build_parser().parse_args(args)
+        parsed._command_argv = args
+        return security_adapter.adapt(parsed, provider_receipt=provider_receipt)
     stdout = io.StringIO()
     with contextlib.redirect_stdout(stdout):
         code = security_adapter.main(args)
@@ -120,6 +126,18 @@ def adapter_args(project: Path, report: Path, *, profile: str = "security-diff",
     return args
 
 
+def direct_provider_receipt(project: Path, report: Path) -> dict[str, Any]:
+    return {
+        "source": "codex-security-direct",
+        "input_sha256": live_common.file_sha256(report),
+        "scanner": "codex-security",
+        "scanner_version": "1.2.3",
+        "ruleset": {"name": "codex-security-default", "version": "2026.06"},
+        "scan_scope": "full-project",
+        "source_binding": {"source_hash": live_common.compute_source_hash(project)},
+    }
+
+
 def problem_rules(payload: dict[str, Any]) -> set[str]:
     return {str(item.get("rule")) for item in payload.get("problems", []) if isinstance(item, dict)}
 
@@ -159,7 +177,10 @@ def test_codex_security_input_normalizes_and_hands_to_core() -> None:
         project = Path(tmp).resolve()
         init_project(project)
         report = write_report(project, read_fixture("codex-security-report.json"))
-        code, payload = run_adapter(adapter_args(project, report))
+        code, payload = run_adapter(
+            adapter_args(project, report),
+            provider_receipt=direct_provider_receipt(project, report),
+        )
         assert_adapter_pass(code, payload)
         envelope_path = project / payload["evidence"]
         envelope = evidence.read_envelope(
@@ -201,6 +222,41 @@ def test_codex_security_input_normalizes_and_hands_to_core() -> None:
         assert_star_fail(code, proof_payload, "security-finding")
 
 
+def test_hand_authored_codex_security_shape_cannot_claim_provider_provenance() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        init_project(project)
+        report_payload = copy.deepcopy(read_fixture("codex-security-report.json"))
+        report_payload["findings"] = []
+        report_payload["scanner"] = {"name": "codex-security", "version": "999.0.0"}
+        report_payload["provenance"] = {
+            "provider": "codex-security",
+            "trusted": True,
+            "receipt": "caller-authored",
+        }
+        report = write_report(project, report_payload, "forged-codex-security.json")
+        code, payload = run_adapter(adapter_args(
+            project,
+            report,
+            profile="security-deep",
+            extra=[
+                "--scanner", "codex-security",
+                "--scanner-version", "999.0.0",
+                "--ruleset", "forged",
+                "--scan-scope", "full-project",
+            ],
+        ))
+        assert code == 1, payload
+        assert payload["verdict"] == "DEGRADED", payload
+        assert payload["trusted_provenance"] is False
+        assert "security-provider-provenance" in problem_rules(payload)
+        envelope = evidence.read_envelope(
+            project / payload["evidence"], project_root=project, verify_artifacts=True,
+        )
+        assert envelope["provider"] == security_adapter.FALLBACK_PROVIDER
+        assert envelope["verdict"] == "DEGRADED"
+
+
 def test_free_text_token_redaction_reaches_normalized_security_artifacts() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         project = Path(tmp).resolve()
@@ -213,7 +269,10 @@ def test_free_text_token_redaction_reaches_normalized_security_artifacts() -> No
         report_payload["findings"][0]["evidence"]["snippet"] = f"Authorization: Basic {basic}"
         report = write_report(project, report_payload, "free-text-secrets.json")
 
-        code, payload = run_adapter(adapter_args(project, report))
+        code, payload = run_adapter(
+            adapter_args(project, report),
+            provider_receipt=direct_provider_receipt(project, report),
+        )
         assert_adapter_pass(code, payload)
         findings = load_artifact(project, payload, "normalized_findings")
         blob = json.dumps(findings)
@@ -265,7 +324,10 @@ def test_signed_url_and_hyphenated_api_key_redaction_reaches_security_artifacts(
         finding["evidence"]["x-api-key"] = x_api_key_value
         report = write_report(project, report_payload, "signed-url-secrets.json")
 
-        code, payload = run_adapter(adapter_args(project, report))
+        code, payload = run_adapter(
+            adapter_args(project, report),
+            provider_receipt=direct_provider_receipt(project, report),
+        )
         assert_adapter_pass(code, payload)
         findings = load_artifact(project, payload, "normalized_findings")
         blob = json.dumps(findings)
@@ -297,7 +359,10 @@ def test_star_forge_schema_input_and_dependency_manifest_capture() -> None:
         init_project(project)
         report = write_report(project, read_fixture("star-forge-report.json"))
         code, payload = run_adapter(adapter_args(project, report, profile="dependency-audit"))
-        assert_adapter_pass(code, payload)
+        assert code == 1, payload
+        assert payload["verdict"] == "DEGRADED", payload
+        assert payload["trusted_provenance"] is False
+        assert "security-provider-provenance" in problem_rules(payload)
 
         handoff = load_artifact(project, payload, "handoff_input")
         assert handoff["kind"] == "dependency-audit"
@@ -395,7 +460,10 @@ def test_redacts_absolute_home_token_env_and_snippet_values() -> None:
             "token": github_token
         }
         report = write_report(project, report_payload)
-        code, payload = run_adapter(adapter_args(project, report))
+        code, payload = run_adapter(
+            adapter_args(project, report),
+            provider_receipt=direct_provider_receipt(project, report),
+        )
         assert_adapter_pass(code, payload)
 
         findings = load_artifact(project, payload, "normalized_findings")
@@ -421,7 +489,10 @@ def test_clean_trusted_report_passes_security_handoff_and_proof() -> None:
         clean = copy.deepcopy(read_fixture("codex-security-report.json"))
         clean["findings"] = []
         report = write_report(project, clean, "clean.json")
-        code, payload = run_adapter(adapter_args(project, report, profile="security-deep"))
+        code, payload = run_adapter(
+            adapter_args(project, report, profile="security-deep"),
+            provider_receipt=direct_provider_receipt(project, report),
+        )
         assert_adapter_pass(code, payload)
 
         handoff = project / payload["artifacts"]["handoff_input"]
@@ -441,7 +512,7 @@ def test_clean_trusted_report_passes_security_handoff_and_proof() -> None:
         assert_star_pass(code, proof_payload)
 
 
-def test_record_uses_trusted_star_forge_from_unrelated_cwd() -> None:
+def test_untrusted_import_record_uses_trusted_star_forge_and_fails_proof() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp).resolve()
         project = root / "project"
@@ -475,15 +546,15 @@ def test_record_uses_trusted_star_forge_from_unrelated_cwd() -> None:
             check=False,
         )
 
-        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert proc.returncode == 1, proc.stdout + proc.stderr
         assert not marker.exists()
         payload = json.loads(proc.stdout)
-        assert payload["record_results"]["security_handoff_packet"]["returncode"] == 0
-        assert payload["record_results"]["security_proof"]["returncode"] == 0
+        assert payload["record_results"]["security_handoff_packet"]["returncode"] == 1
+        assert payload["record_results"]["security_proof"]["returncode"] == 1
         handoff_records = star_forge.load_run_records(project, kind="security-handoff-packet", task="SF-1")
         proof_records = star_forge.load_run_records(project, kind="security-proof", task="SF-1")
-        assert handoff_records and handoff_records[-1]["verdict"] == "PASS"
-        assert proof_records and proof_records[-1]["verdict"] == "PASS"
+        assert handoff_records and handoff_records[-1]["verdict"] == "FAIL"
+        assert proof_records and proof_records[-1]["verdict"] == "FAIL"
 
 
 def test_record_failure_blocks_security_adapter() -> None:

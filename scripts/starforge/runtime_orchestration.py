@@ -15,7 +15,10 @@ from starforge import lifecycle as project_lifecycle
 from starforge import quality as project_quality
 from starforge import review_policy as adaptive_review_policy
 from .policy_data import mapping as policy_mapping, project as project_record, record as policy_record, value as _policy_value
-from .runtime_review import *
+from .runtime_support import AGENT_NAME_PREFIX, BLOCKING_SEVERITIES, BLUEPRINT_FILE, CANONICAL_STATE, HOOK_EVENTS, HOOK_TRUST_NOTICE_FILE, INCIDENTS_FILE, LEDGER_FILE, PLAN_FILE, PROJECT_MANIFEST, REVIEW_ROLE_LENSES, SF_VERSION, SOURCE_PROFILE_FILE, ForgeError, append_jsonl, blocking_items, ensure_git_repo, ensure_gitignore_entries, file_sha256, git_status, git_status_path, is_git_repo, jsonl_payloads, now_utc, plugin_root, read_json, read_text, relative_to_project, slugify, snapshot_file_candidates, template_text, write_json, write_json_stable, write_text
+from .runtime_project import enforcement_mode, ensure_project_manifest, ensure_state_dirs, fast_mvp_profile_lock_state, fast_mvp_profile_selected_before_gates, find_star_forge_project_root, hooks_liveness, normalize_project_profile, profile_downgrade_lock_reasons, project_profile, required_review_policy, resolve_project, review_profile, root_needs_product_isolation, setup_ledger_records_fast_mvp_before_gates, source_hash_exception_problem, source_hash_unavailable_problem, source_hash_unavailable_state, source_profile_path, try_source_hash
+from .runtime_plan import all_tasks_complete, append_plan_task, blueprint_has_valid_lock, blueprint_is_approved, blueprint_lifecycle_contract, blueprint_lock_state, command_is_noop, lifecycle_gate_state, parse_tasks, plan_contract_mode, plan_is_placeholder, plan_parse_problem, ready_tasks, scope_hash, task_allows_noop_verification, task_counts, task_files, task_requires_real_workers, task_verify_command, update_plan_task_row, validate_project_plan_contract, validate_tasks
+from .runtime_review import annotate_drift_coverage, change_packet_for_drift, change_scope_files, completed_amendment_covering_drift, completed_change_packet_covering_drift, detect_drift, done_payload, load_merged_review, load_proof, review_findings_for_done, reviews_scope_dir
 
 ORCHESTRATION = _policy_value("runtime_orchestration.POLICY")
 
@@ -72,17 +75,6 @@ def cmd_learn(args: argparse.Namespace) -> int:
     _print_record("learn", result, record)
     return 0
 
-def ensure_state_dirs(project: Path) -> None:
-    for path in ORCHESTRATION["state_dirs"]:
-        (project / path).mkdir(parents=True, exist_ok=True)
-    if not (project / LEDGER_FILE).exists():
-        write_text(project / LEDGER_FILE, "")
-
-def hooks_liveness(project: Path) -> dict[str, Any]:
-    events = jsonl_payloads(project / HOOK_EVENTS)
-    local_last_event_at = (str(events[-1].get("timestamp") or "") or None) if events else None
-    return policy_mapping("hooks_liveness", local_events_observed=local_last_event_at is not None, local_last_event_at=local_last_event_at, **ORCHESTRATION["hook_liveness"])
-
 def hook_trust_notice(project: Path) -> dict[str, Any]:
     show = bool(not hooks_liveness(project).get("local_events_observed") and not (project / HOOK_TRUST_NOTICE_FILE).exists())
     return policy_mapping("hook_notice", show=show, message=ORCHESTRATION["hook_notice"]["message"], marker=str(HOOK_TRUST_NOTICE_FILE))
@@ -90,9 +82,6 @@ def hook_trust_notice(project: Path) -> dict[str, Any]:
 def mark_hook_trust_notice_seen(project: Path) -> None:
     ensure_state_dirs(project)
     write_json_stable(project / HOOK_TRUST_NOTICE_FILE, policy_record("hook_trust_notice", shown_at=now_utc(), message=ORCHESTRATION["hook_notice"]["shown_message"]))
-
-def enforcement_mode(project: Path) -> str:
-    return "witnessed" if hooks_liveness(project)["events_observed"] else "advisory"
 
 def version_core(raw: str) -> str:
     return re.split(r"[+-]", raw, maxsplit=1)[0]
@@ -408,9 +397,6 @@ def canonical_state_payload(
     )
     state["operating_card"] = operating_card(project, state)
     return state
-
-def source_hash_unavailable_state(profile_lock: dict[str, Any], *, problems: Sequence[dict[str, Any]] | None = None) -> dict[str, Any]:
-    return policy_mapping("source_hash_unavailable", problems=list(problems) if problems is not None else profile_lock.get("problems") or [])
 
 def review_summary_source_hash_unavailable(project: Path, scope: str, profile_lock: dict[str, Any], *, problems: Sequence[dict[str, Any]] | None = None) -> dict[str, Any]:
     merged = load_merged_review(project, scope)

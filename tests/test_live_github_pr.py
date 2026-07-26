@@ -327,17 +327,18 @@ def test_gh_read_only_path_writes_source_packet_and_core_passes() -> None:
         assert_production_proof_fails(project, manifest, "github-fixture-provenance")
 
 
-def test_connector_input_emits_production_proof_commands_and_core_passes() -> None:
+def test_connector_input_writes_degraded_packet_without_provider_receipt() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         project = Path(tmp).resolve()
         init_project(project)
         input_path = connector_input(project)
         code, out, manifest = collect_connector_input(project, input_path)
-        assert code == 0, out
+        assert code == 1, out
         assert "source-packet-github-pr-review" in out
         assert "source-packet-proof" in out
         payload = load_json(manifest)
-        assert payload["summary"]["source"] == "github-connector-live"
+        assert payload["summary"]["source"] == "github-import-live"
+        assert payload["degraded"] is True
         transcript = project / ".starforge" / "live" / TASK / "github" / "operation-transcript.json"
         assert transcript.exists()
         transcript_hash = github_pr.live_common.file_sha256(transcript)
@@ -350,13 +351,52 @@ def test_connector_input_emits_production_proof_commands_and_core_passes() -> No
             verify_artifacts=True,
         )
         assert envelope["capability"] == github_pr.CAPABILITY
-        assert envelope["provider"] == github_pr.PREFERRED_PROVIDER
-        assert envelope["verdict"] == "PASS"
-        assert envelope["provenance"]["route"]["fallback"] is False
+        assert envelope["provider"] == "github-unavailable"
+        assert envelope["verdict"] == "FAIL"
+        assert envelope["provenance"]["route"]["fallback"] is True
         assert envelope["provenance"]["repository"]["full_name"] == REPO
         assert envelope["provenance"]["pull_request"]["number"] == PR
         assert envelope["provenance"]["source_binding"]["source_hash"] == payload["source_hash_after"]
-        assert_core_passes(project, manifest)
+        assert_core_fails(project, manifest, "github-provider-receipt")
+
+
+def test_self_authored_connector_json_cannot_claim_live_github_provenance() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        init_project(project)
+        input_path = connector_input(project)
+        payload = load_json(input_path)
+        payload["live_provenance"]["receipt"] = "caller-authored"
+        payload["live_provenance"]["trusted"] = True
+        write_json(input_path, payload)
+        code, out, manifest = collect_connector_input(project, input_path)
+        assert code == 1, out
+        manifest_payload = load_json(manifest)
+        assert manifest_payload["degraded"] is True
+        assert "github-provider-receipt" in rules_from_manifest(manifest)
+        assert manifest_payload["summary"]["source"] == "github-import-live"
+        assert_core_fails(project, manifest, "github-provider-receipt")
+        assert_production_proof_fails(project, manifest, "github-provider-receipt")
+
+
+def test_direct_connector_receipt_binds_import_to_exact_payload() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        init_project(project)
+        input_path = connector_input(project)
+        receipt = {
+            "source": "github-connector-direct",
+            "input_sha256": github_pr.live_common.file_sha256(input_path),
+            "operation_id": "connector-read-42",
+            "collected_at": "2026-06-18T12:06:00Z",
+        }
+        assert github_pr.load_connector_input(
+            input_path, provider_receipt=receipt,
+        ).source == "github-connector-live"
+        receipt["input_sha256"] = "0" * 64
+        assert github_pr.load_connector_input(
+            input_path, provider_receipt=receipt,
+        ).source == "github-import-live"
 
 
 def test_connector_input_records_source_bound_foundation_identity() -> None:
@@ -424,7 +464,7 @@ def test_connector_input_records_source_bound_foundation_identity() -> None:
             input_path,
             ["--foundation-evidence", str(foundation_path)],
         )
-        assert code == 0, out
+        assert code == 1, out
         envelope = evidence.read_envelope(
             evidence_path(project),
             project_root=project,
@@ -439,7 +479,7 @@ def test_connector_input_records_source_bound_foundation_identity() -> None:
         assert foundation["initial_commit"]["tree_source_hash"] == source_hash
         assert foundation["ci"]["path"] == ".github/workflows/ci.yml"
         assert foundation["provider_route"]["preferred_provider"] == "github-connector"
-        assert_core_passes(project, manifest)
+        assert_core_fails(project, manifest, "github-provider-receipt")
 
 
 def test_foundation_gh_creation_requires_the_exact_private_fallback() -> None:
@@ -543,16 +583,16 @@ def test_connector_input_record_runs_both_strict_proof_commands() -> None:
         init_project(project)
         input_path = connector_input(project)
         code, out, _ = collect_connector_input(project, input_path, ["--record"])
-        assert code == 0, out
+        assert code == 1, out
         assert "source-packet-github-pr-review" in out
         assert "source-packet-proof" in out
         github_records = star_forge.load_run_records(project, kind="source-packet-github-pr-review", task=TASK)
         production_records = star_forge.load_run_records(project, kind="source-packet-proof", task=TASK)
-        assert github_records and github_records[-1]["verdict"] == "PASS"
-        assert production_records and production_records[-1]["verdict"] == "PASS"
+        assert github_records and github_records[-1]["verdict"] == "FAIL"
+        assert production_records == []
 
 
-def test_connector_input_record_uses_trusted_star_forge_from_unrelated_cwd() -> None:
+def test_connector_input_record_uses_bundled_star_forge_from_unrelated_cwd() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp).resolve()
         project = root / "project"
@@ -587,14 +627,14 @@ def test_connector_input_record_uses_trusted_star_forge_from_unrelated_cwd() -> 
             check=False,
         )
 
-        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert proc.returncode == 1, proc.stdout + proc.stderr
         assert not marker.exists()
         assert "source-packet-github-pr-review" in proc.stdout
         assert "source-packet-proof" in proc.stdout
         github_records = star_forge.load_run_records(project, kind="source-packet-github-pr-review", task=TASK)
         production_records = star_forge.load_run_records(project, kind="source-packet-proof", task=TASK)
-        assert github_records and github_records[-1]["verdict"] == "PASS"
-        assert production_records and production_records[-1]["verdict"] == "PASS"
+        assert github_records and github_records[-1]["verdict"] == "FAIL"
+        assert production_records == []
 
 
 def test_connector_input_rejects_unbound_ci_log_identity() -> None:
@@ -653,11 +693,13 @@ def test_connector_input_accepts_pr_bound_ci_log_identity() -> None:
 
         input_path = connector_input(project, mutate)
         code, _, manifest = collect_connector_input(project, input_path, ["--include-ci-logs", "--max-log-bytes", "128"])
-        assert code == 0
+        assert code == 1
+        assert "github-command" not in rules_from_manifest(manifest)
+        assert "github-logs" not in rules_from_manifest(manifest)
         logs = load_json(project / ".starforge" / "live" / TASK / "github" / "ci-log-excerpts.json")
         assert logs["logs"][0]["check_run_id"] == "501"
         assert logs["logs"][0]["captured_head_sha"] == "2222222222222222222222222222222222222222"
-        assert_core_passes(project, manifest)
+        assert_core_fails(project, manifest, "github-provider-receipt")
 
 
 def test_connector_input_requires_provenance_repo_and_pr_without_synthesis() -> None:
@@ -821,7 +863,7 @@ def test_core_rejects_contradictory_secondary_pr_url_identity() -> None:
         init_project(project)
         input_path = connector_input(project)
         code, _, manifest = collect_connector_input(project, input_path)
-        assert code == 0
+        assert code == 1
         pr_path = project / ".starforge" / "live" / TASK / "github" / "pr.json"
         pr_payload = load_json(pr_path)
         pr_payload["html_url"] = f"https://github.com/{REPO}/pull/99"

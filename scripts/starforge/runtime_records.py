@@ -1,19 +1,20 @@
 """Cohesive Star Forge runtime extracted from the CLI facade."""
-
 from __future__ import annotations
 import argparse
 import json
 import re
 import socket
 import subprocess
-import time
 import urllib.parse
 from pathlib import Path
 from typing import Any, Sequence
 from live_collectors import common as live_common
 from .policy_data import mapping as _policy_mapping, value as _policy_value
-from .runtime_plan import *
-
+from .runtime_support import RUNS_DIR, SCREENSHOTS_DIR, SCREENSHOT_MANIFEST, SERVER_LEASE, ForgeError, artifact_entry, blocking_items, decode_image_meta, file_sha256, now_utc, read_json, redact, relative_to_project, slugify, source_hash, write_json
+from .runtime_project import ensure_state_dirs, resolve_project, safe_release_snapshot, try_source_hash
+from .runtime_plan import command_is_noop, normalize_command, task_allows_noop_verification, task_is_visual, task_plan, task_verify_command
+from .runtime_preview import current_live_source_hash, is_task_scoped_live_path, live_manifest_summary, load_and_validate_live_manifest, require_raw_hash_for_artifact
+from .runtime_store import load_run_records, run_record_path, write_run_record
 RECORD_POLICY = _policy_value("runtime_records.POLICY")
 def _finish_record(project: Path, payload: dict[str, Any], strict: bool) -> int:
     path = write_run_record(project, payload)
@@ -33,47 +34,6 @@ def _report_browser_if(condition: bool, problems: list[dict[str, Any]], name: st
                        path: str = "", **values: object) -> None:
     if condition:
         problems.append(_browser_problem(name, path, **values))
-def run_record_path(project: Path, *, kind: str, task: str | None = None,
-                    digest: str | None = None) -> Path:
-    parts = [timestamp_slug(), slugify(kind)]
-    if task:
-        parts.append(slugify(task))
-    if digest:
-        parts.append(slugify(digest[:12]))
-    return project / RUNS_DIR / ("-".join(parts) + ".json")
-def write_run_record(project: Path, payload: dict[str, Any]) -> Path:
-    ensure_state_dirs(project)
-    payload = dict(payload)
-    payload.setdefault("created_at", now_utc())
-    payload.setdefault("recorded_ns", time.time_ns())
-    payload.setdefault("project", str(project))
-    kind = str(payload.get("kind") or payload.get("schema") or RECORD_POLICY["kinds"]["run_default"])
-    task = str(payload.get("task") or "") or None
-    digest = stable_json_hash(redact({key: value for key, value in payload.items() if key != "artifact"}))
-    path = run_record_path(project, kind=kind, task=task, digest=digest)
-    write_json(path, payload)
-    ledger = _policy_mapping(
-        "ledger_event", schema=RECORD_POLICY["schemas"]["ledger"],
-        timestamp=now_utc(), event=kind, task=task,
-        verdict=payload.get("verdict"), summary=payload.get("summary") or "",
-        artifacts=[relative_to_project(path, project)])
-    append_jsonl(project / LEDGER_FILE, ledger)
-    return path
-def load_run_records(project: Path, *, kind: str, task: str | None = None) -> list[dict[str, Any]]:
-    root = project / RUNS_DIR
-    if not root.exists():
-        return []
-    records: list[dict[str, Any]] = []
-    for path in sorted(root.glob("*.json")):
-        try:
-            payload = read_json(path)
-        except Exception:
-            continue
-        if payload.get("kind") != kind or task is not None and payload.get("task") != task:
-            continue
-        payload["_artifact"] = relative_to_project(path, project)
-        records.append(payload)
-    return records
 def command_output_tail(text: str, limit: int = 6000) -> str:
     return text[-limit:] if len(text) > limit else text
 def cmd_verify(args: argparse.Namespace) -> int:
@@ -133,8 +93,12 @@ def fresh_passing_verify(project: Path, task: dict[str, Any]) -> bool:
         and not item.get("noop") and isinstance(item.get("source_snapshot"), dict)
         and item["source_snapshot"].get("source_hash") == current for item in runs)
 def has_noop_verify(project: Path, task_id: str) -> bool:
+    current, hash_problem = try_source_hash(project)
     runs = load_run_records(project, kind="verify-run", task=task_id)
-    return any(item.get("verdict") == RECORD_POLICY["verdicts"]["pass"] and item.get("noop") for item in runs)
+    return bool(not hash_problem and current is not None and any(
+        item.get("verdict") == RECORD_POLICY["verdicts"]["pass"] and item.get("noop")
+        and isinstance(item.get("source_snapshot"), dict)
+        and item["source_snapshot"].get("source_hash") == current for item in runs))
 def verify_findings(project: Path, tasks: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
     findings: list[dict[str, Any]] = []
     for task in tasks:
@@ -366,11 +330,17 @@ def cmd_browser_run(args: argparse.Namespace) -> int:
         problems=problems, summary=args.summary)
     return _finish_record(project, payload, args.strict)
 def passing_browser_runs(project: Path, task_id: str | None = None) -> list[dict[str, Any]]:
-    return [item for item in load_run_records(project, kind=RECORD_POLICY["kinds"]["browser"], task=task_id) if item.get("verdict") == RECORD_POLICY["verdicts"]["pass"]]
+    current, hash_problem = try_source_hash(project)
+    if hash_problem or current is None:
+        return []
+    return [item for item in load_run_records(
+        project, kind=RECORD_POLICY["kinds"]["browser"], task=task_id)
+        if item.get("verdict") == RECORD_POLICY["verdicts"]["pass"]
+        and isinstance(item.get("source_snapshot"), dict)
+        and item["source_snapshot"].get("source_hash") == current]
 def browser_findings(project: Path, tasks: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
     return [
         _task_finding("browser_missing", task["id"]) for task in tasks
         if task.get("status") == RECORD_POLICY["verify"]["complete_status"]
         and task_is_visual(task) and not passing_browser_runs(project, task["id"])]
-
 __all__ = tuple(name for name in globals() if not name.startswith("__"))

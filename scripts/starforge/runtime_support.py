@@ -26,9 +26,10 @@ SCRIPT_DIR = Path(__file__).resolve().parents[1]
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 SUPPORT_POLICY = _policy_value("runtime_support.POLICY")
-globals().update(SUPPORT_POLICY["constants"])
-globals().update({name: Path(value) for name, value in SUPPORT_POLICY["paths"].items()})
-globals().update(SUPPORT_POLICY["sets"])
+_CONSTANTS, _PATHS, _SETS = (SUPPORT_POLICY[name] for name in ("constants", "paths", "sets"))
+SF_VERSION, PLUGIN_NAME, BLUEPRINT_FILE, PLAN_FILE, SOURCE_PROFILE_FILE, SOURCE_PROFILE_SCHEMA, AGENT_NAME_PREFIX, MAX_AUTO_CONTINUES, STAR_FORGE_STATE_VERSION = (_CONSTANTS[name] for name in ("SF_VERSION", "PLUGIN_NAME", "BLUEPRINT_FILE", "PLAN_FILE", "SOURCE_PROFILE_FILE", "SOURCE_PROFILE_SCHEMA", "AGENT_NAME_PREFIX", "MAX_AUTO_CONTINUES", "STAR_FORGE_STATE_VERSION"))
+LOOP_DIR, STATE_DIR, STATE_SUBDIR, RUNS_DIR, TASKS_DIR, FINAL_DIR, REVIEWS_DIR, SCREENSHOTS_DIR, RUNTIME_DIR, CANONICAL_STATE, PROJECT_MANIFEST, PROOF_FILE, FINAL_SUMMARY, LEDGER_FILE, HOOK_EVENTS, SUBAGENT_EVENTS, AUTO_CONTINUE_FILE, CHANGED_FILES, HANDOFF_ARTIFACT, WAIVES_FILE, INCIDENTS_FILE, HOOK_TRUST_NOTICE_FILE, SERVER_LEASE, SCREENSHOT_MANIFEST = (Path(_PATHS[name]) for name in ("LOOP_DIR", "STATE_DIR", "STATE_SUBDIR", "RUNS_DIR", "TASKS_DIR", "FINAL_DIR", "REVIEWS_DIR", "SCREENSHOTS_DIR", "RUNTIME_DIR", "CANONICAL_STATE", "PROJECT_MANIFEST", "PROOF_FILE", "FINAL_SUMMARY", "LEDGER_FILE", "HOOK_EVENTS", "SUBAGENT_EVENTS", "AUTO_CONTINUE_FILE", "CHANGED_FILES", "HANDOFF_ARTIFACT", "WAIVES_FILE", "INCIDENTS_FILE", "HOOK_TRUST_NOTICE_FILE", "SERVER_LEASE", "SCREENSHOT_MANIFEST"))
+VALID_STATUSES, VALID_MODES, BLOCKING_SEVERITIES, FINDING_SEVERITIES, INFRASTRUCTURE_DOCUMENT_SUFFIXES, PYTHON_CONTROL_PLANE_PARTS, SECRET_PRONE_SUFFIXES = (_SETS[name] for name in ("VALID_STATUSES", "VALID_MODES", "BLOCKING_SEVERITIES", "FINDING_SEVERITIES", "INFRASTRUCTURE_DOCUMENT_SUFFIXES", "PYTHON_CONTROL_PLANE_PARTS", "SECRET_PRONE_SUFFIXES"))
 FINDING_SEVERITY_RANK = SUPPORT_POLICY["finding_severity_rank"]
 SOURCE_SNAPSHOT_NAMES = set(SUPPORT_POLICY["source_snapshot_names"])
 TEXT_SUFFIXES = set(SUPPORT_POLICY["text_suffixes"])
@@ -39,16 +40,9 @@ AI_RESIDUAL_PATTERNS = [
 PNG_MAGIC = bytes.fromhex(SUPPORT_POLICY["image_magic_hex"]["png"])
 JPEG_MAGIC = bytes.fromhex(SUPPORT_POLICY["image_magic_hex"]["jpeg"])
 
-def _install_aliases() -> None:
-    sources = {
-        "live_common": live_common,
-        "review_policy": adaptive_review_policy,
-        "project_quality": project_quality,
-    }
-    for group, aliases in SUPPORT_POLICY["aliases"].items():
-        globals().update({name: getattr(sources[group], target) for name, target in aliases.items()})
-
-_install_aliases()
+now_utc, file_sha256, run_git, is_git_repo, git_status_path, snapshot_file_candidates, source_snapshot_includes, files_fingerprint, source_hash, source_snapshot_rel_paths, dirty_paths_missing_from_source_snapshot = (getattr(live_common, name) for name in ("now_utc", "file_sha256", "run_git", "is_git_repo", "git_status_path", "snapshot_file_candidates", "source_snapshot_includes", "files_fingerprint", "compute_source_hash", "source_snapshot_rel_paths", "dirty_paths_missing_from_source_snapshot"))
+REVIEW_PROFILE_ROLES, KNOWN_REVIEW_ROLES, REVIEW_ROLE_LENSES = adaptive_review_policy.LEGACY_PROFILE_ROLES, adaptive_review_policy.ALL_REVIEW_ROLES, adaptive_review_policy.ROLE_LENSES
+is_source_file, architecture_debt_findings = project_quality.is_source_file, project_quality.architecture_debt_findings
 STOPWORDS = _policy_value('runtime_support.STOPWORDS')
 SOURCE_SNAPSHOT_SUFFIXES = _policy_value('runtime_support.SOURCE_SNAPSHOT_SUFFIXES')
 SOURCE_SNAPSHOT_NAME_PREFIXES = _policy_value('runtime_support.SOURCE_SNAPSHOT_NAME_PREFIXES')
@@ -148,6 +142,15 @@ def append_jsonl(path: Path, payload: dict[str, Any]) -> None:
         raise _error("symlink_append", path=path)
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(redact(payload), sort_keys=True) + "\n")
+
+def jsonl_payloads(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    try:
+        return [payload for line in read_text(path).splitlines() if line.strip()
+                for payload in [json.loads(line)] if isinstance(payload, dict)]
+    except Exception:
+        return []
 
 def redact(value: Any) -> Any:
     if isinstance(value, str):
@@ -325,16 +328,6 @@ def release_snapshot_unavailable(project: Path, problems: Sequence[dict[str, Any
         blueprint_hash=file_sha256(blueprint) if blueprint.exists() else None,
         plan_hash=file_sha256(plan) if plan.exists() else None,
     )
-
-def safe_release_snapshot(project: Path) -> tuple[dict[str, Any], dict[str, Any] | None]:
-    problem = source_hash_unavailable_problem(project)
-    if problem:
-        return release_snapshot_unavailable(project, [problem]), problem
-    try:
-        return release_snapshot(project), None
-    except (PermissionError, OSError) as exc:
-        problem = source_hash_exception_problem(exc)
-        return release_snapshot_unavailable(project, [problem]), problem
 
 def artifact_entry(project: Path, path: Path, *, kind: str) -> dict[str, Any]:
     candidate = path if path.is_absolute() else project / path

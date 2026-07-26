@@ -1,5 +1,4 @@
 """Cohesive Star Forge runtime extracted from the CLI facade."""
-
 from __future__ import annotations
 from .policy_data import mapping as policy_mapping, project as project_record, record as policy_record, value as _policy_value
 import argparse
@@ -9,26 +8,23 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 from starforge import changes as project_changes
 from starforge import contracts as project_contracts
-from .runtime_security import *
-
+from .runtime_support import BLOCKING_SEVERITIES, FINAL_SUMMARY, FINDING_SEVERITIES, FINDING_SEVERITY_RANK, INCIDENTS_FILE, KNOWN_REVIEW_ROLES, LEDGER_FILE, PLAN_FILE, PROOF_FILE, REVIEWS_DIR, REVIEW_PROFILE_ROLES, STATE_SUBDIR, SUBAGENT_EVENTS, WAIVES_FILE, ForgeError, append_jsonl, architecture_debt_findings, blocking_items, finding_problem, git_head, git_status, is_git_repo, iter_project_files, jsonl_payloads, now_utc, read_json, read_text, relative_to_project, run_git, scan_paths, slugify, source_dirty_entries, source_hash, write_json, write_text
+from .runtime_project import enforcement_mode, ensure_state_dirs, fast_mvp_profile_lock_state, hooks_liveness, project_profile, read_source_profile, required_review_policy, required_review_roles, resolve_project, review_profile, safe_release_snapshot, source_hash_exception_problem, source_hash_unavailable_problem, source_hash_unavailable_state, try_source_hash
+from .runtime_plan import all_tasks_complete, blueprint_is_approved, blueprint_lifecycle_contract, lifecycle_gate_state, parse_depends, parse_tasks, plan_is_placeholder, plan_parse_problem, scope_hash, task_allows_noop_verification, task_counts, task_is_visual, task_plan, task_requires_real_workers, update_plan_task_row, validate_project_plan_contract, validate_tasks
+from .runtime_records import browser_findings, fresh_passing_verify, has_noop_verify, passing_browser_runs, verify_findings
 REVIEW_POLICY = _policy_value("runtime_review.POLICY")
-
 def reviews_scope_dir(project: Path, scope: str) -> Path:
     return project / REVIEWS_DIR / slugify(scope or "noscope")
-
 def review_file_problem(file: str, kind: str, *, rule: str = "review-findings-shape", **values: Any) -> dict[str, Any]:
     message = REVIEW_POLICY["review_file_errors"][kind].format(**values)
     return policy_mapping("review_problem", rule=rule, file=file, message=message)
-
 def normalize_review_finding(item: Mapping[str, Any], role: str, agent_id: Any) -> dict[str, Any]:
     severity = str(item.get("severity") or "medium").lower()
     return policy_mapping(
         "normalized_review_finding", id=str(item.get("id") or ""), role=role, agent_id=agent_id,
         severity=severity if severity in FINDING_SEVERITIES else "medium", file=str(item.get("file") or ""), line=item.get("line"),
         title=str(item.get("title") or item.get("summary") or "")[:200], detail=str(item.get("detail") or item.get("evidence") or "")[:600],
-        suggested_fix=str(item.get("suggested_fix") or "")[:400],
-    )
-
+        suggested_fix=str(item.get("suggested_fix") or "")[:400])
 def review_file_header(path: Path, rel: str, payload: Any) -> tuple[tuple[str, str, list[Any]] | None, dict[str, Any] | None]:
     if not isinstance(payload, dict):
         return None, review_file_problem(rel, "object")
@@ -46,7 +42,6 @@ def review_file_header(path: Path, rel: str, payload: Any) -> tuple[tuple[str, s
     ]
     problem = next((review_file_problem(rel, kind, **values) for failed, kind, values in checks if failed), None)
     return (None, problem) if problem else ((role, source_attestation, findings), None)
-
 def load_review_findings(project: Path, scope: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Read and normalize source-attested reviewer findings for one scope."""
     files: list[dict[str, Any]] = []
@@ -59,32 +54,26 @@ def load_review_findings(project: Path, scope: str) -> tuple[list[dict[str, Any]
         try:
             payload = json.loads(path.read_bytes().decode("utf-8"))
         except Exception as exc:
-            problems.append(review_file_problem(rel, "unreadable", rule="review-findings-invalid", error=exc))
-            continue
+            problems.append(review_file_problem(rel, "unreadable", rule="review-findings-invalid", error=exc)); continue
         header, problem = review_file_header(path, rel, payload)
         if problem:
-            problems.append(problem)
-            continue
+            problems.append(problem); continue
         assert header is not None
         role, source_attestation, raw = header
         normalized: list[dict[str, Any]] = []
         for item in raw:
             if not isinstance(item, dict):
-                problems.append(review_file_problem(rel, "finding_object"))
-                continue
+                problems.append(review_file_problem(rel, "finding_object")); continue
             normalized.append(normalize_review_finding(item, role, payload.get("agent_id")))
         files.append(policy_mapping("review_file", path=rel, role=role, agent_id=payload.get("agent_id"), declared_source_hash=source_attestation, findings=normalized))
     return files, problems
-
 def finding_fingerprint(finding: dict[str, Any]) -> str:
     file, bucket, _tokens = finding_match_parts(finding)
     return f"{file}:{bucket}:{finding_issue_signature(finding)}"
 FINDING_DUPLICATE_STOPWORDS = _policy_value('runtime_review.FINDING_DUPLICATE_STOPWORDS')
 FINDING_MARKERS = _policy_value('runtime_review.FINDING_MARKERS')
-
 def finding_text(finding: dict[str, Any]) -> str:
     return " ".join(str(finding.get(key) or "") for key in REVIEW_POLICY["finding_text_fields"]).lower()
-
 def finding_issue_signature(finding: dict[str, Any]) -> str:
     text = finding_text(finding)
     for marker, needles in FINDING_MARKERS.items():
@@ -94,13 +83,11 @@ def finding_issue_signature(finding: dict[str, Any]) -> str:
     if not tokens:
         return re.sub(r"[^a-z0-9]+", "", str(finding.get("title") or "").lower())[:40]
     return "-".join(list(dict.fromkeys(tokens))[:8])
-
 def finding_match_parts(finding: dict[str, Any]) -> tuple[str, int, set[str]]:
     file = re.sub(r"\s+", "", str(finding.get("file") or "")).lower()
     line = finding.get("line")
     tokens = {token for token in re.findall(r"[a-z0-9_@-]{4,}", finding_text(finding)) if token not in FINDING_DUPLICATE_STOPWORDS}
     return file, int(line) // 4 if isinstance(line, int) else -1, tokens
-
 def findings_are_duplicate_variants(existing: dict[str, Any], candidate: dict[str, Any]) -> bool:
     existing_file, existing_bucket, existing_tokens = finding_match_parts(existing)
     candidate_file, candidate_bucket, candidate_tokens = finding_match_parts(candidate)
@@ -115,10 +102,8 @@ def findings_are_duplicate_variants(existing: dict[str, Any], candidate: dict[st
     overlap = len(existing_tokens & candidate_tokens)
     smaller = min(len(existing_tokens), len(candidate_tokens))
     return overlap >= 2 and overlap / max(1, smaller) >= 0.5
-
 def finding_severity_rank(severity: Any) -> int:
     return FINDING_SEVERITY_RANK.get(str(severity or "").lower(), 0)
-
 def merge_duplicate_finding(existing: dict[str, Any], candidate: dict[str, Any]) -> None:
     agreed_by = existing.setdefault("agreed_by", [])
     for role in (existing.get("role"), candidate.get("role")):
@@ -134,7 +119,6 @@ def merge_duplicate_finding(existing: dict[str, Any], candidate: dict[str, Any])
         for key in REVIEW_POLICY["finding_upgrade_fields"]:
             if candidate.get(key):
                 existing[key] = candidate.get(key)
-
 def assign_finding_ids(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for finding in findings:
@@ -147,23 +131,18 @@ def assign_finding_ids(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
         finding["fingerprint"] = finding_fingerprint(finding)
         out.append(finding)
     return out
-
-def load_waives(project: Path, scope: str) -> set[str]:
-    path = project / WAIVES_FILE
-    waived: set[str] = set()
-    if not path.exists():
-        return waived
-    try:
-        for line in read_text(path).splitlines():
-            if not line.strip():
-                continue
-            payload = json.loads(line)
-            if payload.get("scope") in {None, scope} and payload.get("finding"):
-                waived.add(str(payload["finding"]))
-    except Exception:
-        return waived
-    return waived
-
+def load_waives(project: Path, scope: str, *,
+                findings: Sequence[Mapping[str, Any]] = (),
+                source_hash_value: str | None = None) -> set[str]:
+    current_by_fingerprint = {
+        str(finding.get("fingerprint") or ""): str(finding.get("id") or "")
+        for finding in findings if finding.get("fingerprint") and finding.get("id")
+    }
+    return {
+        current_by_fingerprint[str(payload.get("fingerprint") or "")]
+        for payload in jsonl_payloads(project / WAIVES_FILE)
+        if payload.get("scope") == scope and payload.get("source_hash") == source_hash_value
+        and str(payload.get("fingerprint") or "") in current_by_fingerprint}
 def tree_scan_finding(finding: Mapping[str, Any], *, architecture: bool = False) -> dict[str, Any]:
     rule, id_rule, file = finding.get("rule"), finding.get("rule", "scan"), finding.get("file", "")
     suffix = "" if architecture else f"-{finding.get('line', 0)}"
@@ -174,39 +153,19 @@ def tree_scan_finding(finding: Mapping[str, Any], *, architecture: bool = False)
         file=finding.get("file"), line=finding.get("line"),
         title=rule if architecture else f"{rule} in tree",
         detail=finding.get("evidence", ""),
-        suggested_fix="" if architecture else REVIEW_POLICY["scan_remediation"],
-    )
-
+        suggested_fix="" if architecture else REVIEW_POLICY["scan_remediation"])
 def secret_scan_findings(project: Path) -> list[dict[str, Any]]:
     paths = list(iter_project_files(project, all_files=True))
-    return [
-        tree_scan_finding(finding, architecture=architecture)
+    return [tree_scan_finding(finding, architecture=architecture)
         for architecture, findings in ((False, scan_paths(paths, project)), (True, architecture_debt_findings(paths, project))) for finding in findings
-        if finding.get("severity", "medium") in BLOCKING_SEVERITIES
-    ]
-
-def jsonl_payloads(path: Path) -> list[dict[str, Any]]:
-    if not path.exists():
-        return []
-    try:
-        return [payload for line in read_text(path).splitlines() if line.strip() for payload in [json.loads(line)] if isinstance(payload, dict)]
-    except Exception:
-        return []
-
+        if finding.get("severity", "medium") in BLOCKING_SEVERITIES]
 def subagent_ids_from(path: Path) -> set[str]:
     return {str(payload["agent_id"]) for payload in jsonl_payloads(path) if payload.get("event") == "SubagentStart" and payload.get("agent_id")}
-
 def local_subagent_ids(project: Path) -> set[str]:
     return subagent_ids_from(project / SUBAGENT_EVENTS)
-
 def known_subagent_ids(project: Path) -> set[str]:
-    """Trusted subagent ids that could qualify review or done as witnessed.
-    This version has no supported host-controlled witness source. Project-local
-    subagent events remain useful diagnostics, but they cannot witness reviewer
-    files or completion.
-    """
+    """Return host-controlled reviewer witnesses, unavailable in this version."""
     return set()
-
 def review_payload_source_hash_unavailable(project: Path, scope: str, problem: dict[str, Any]) -> dict[str, Any]:
     profile_lock = fast_mvp_profile_lock_state(project)
     required_roles = list(REVIEW_PROFILE_ROLES["standard"])
@@ -217,9 +176,7 @@ def review_payload_source_hash_unavailable(project: Path, scope: str, problem: d
         review_profile="standard", reviewer_roles=[], reviewer_count=0,
         required_review_roles=required_roles, required_reviewer_count=len(required_roles),
         missing_review_roles=required_roles, stale_roles=[], reviewers_witnessed=False, findings=[],
-        fix_queue=[problem], waived=sorted(load_waives(project, scope)), file_problems=[problem],
-    )
-
+        fix_queue=[problem], waived=sorted(load_waives(project, scope)), file_problems=[problem])
 def merge_review(project: Path, scope: str) -> dict[str, Any]:
     files, file_problems = load_review_findings(project, scope)
     current, hash_problem = try_source_hash(project)
@@ -232,7 +189,7 @@ def merge_review(project: Path, scope: str) -> dict[str, Any]:
     stale_roles = [entry["role"] for entry in files if entry.get("declared_source_hash") != current]
     reviewers_witnessed = bool(known_ids) and all(str(entry.get("agent_id") or "") in known_ids for entry in fresh_entries)
     merged = assign_finding_ids([*fresh_findings, *secret_scan_findings(project)])
-    waived = load_waives(project, scope)
+    waived = load_waives(project, scope, findings=merged, source_hash_value=current)
     for finding in merged:
         finding["waived"] = finding["id"] in waived
     open_blocking = [finding for finding in merged if finding["severity"] in BLOCKING_SEVERITIES and not finding["waived"]]
@@ -250,12 +207,10 @@ def merge_review(project: Path, scope: str) -> dict[str, Any]:
         review_policy=policy.to_dict(), missing_review_roles=missing_roles, stale_roles=sorted(set(stale_roles)),
         findings=merged, fix_queue=open_blocking, waived=sorted(waived),
     )
-
 def write_merged_review(project: Path, payload: dict[str, Any]) -> Path:
     path = reviews_scope_dir(project, payload.get("scope") or "noscope") / "merged.json"
     write_json(path, payload)
     return path
-
 def load_optional_json(path: Path) -> dict[str, Any] | None:
     if not path.exists():
         return None
@@ -263,14 +218,11 @@ def load_optional_json(path: Path) -> dict[str, Any] | None:
         return read_json(path)
     except Exception:
         return None
-
 def load_merged_review(project: Path, scope: str) -> dict[str, Any] | None:
     return load_optional_json(reviews_scope_dir(project, scope) / "merged.json")
-
 def done_gate_finding(rule: str, *, file: Any = None, **values: Any) -> list[dict[str, Any]]:
     message = REVIEW_POLICY["review_gate_messages"][rule].format(**values)
     return [policy_mapping("done_gate_finding", rule=rule, file=str(REVIEWS_DIR) if file is None else file, message=message)]
-
 def review_findings_for_done(project: Path, tasks: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
     """Done-time review gate rebuilt from reviewer files and the current tree."""
     if not all_tasks_complete(tasks):
@@ -297,10 +249,10 @@ def review_findings_for_done(project: Path, tasks: Sequence[dict[str, Any]]) -> 
         "review-fix-queue-open": (bool(queue), {"queue_count": len(queue), "finding_id": first_queue.get("id"), "title": first_queue.get("title"), "finding_file": first_queue.get("file")}),
     }
     return next((done_gate_finding(rule, **gates[rule][1]) for rule in REVIEW_POLICY["review_gate_order"] if rule in gates and gates[rule][0]), [])
-
 def append_policy_event(project: Path, path: str, record: str, **values: Any) -> None:
     append_jsonl(project / path, policy_record(record, timestamp=now_utc(), **values))
-
+def extended_policy_record(name: str, extras: Mapping[str, Any], **values: Any) -> dict[str, Any]:
+    return policy_record(name, **values) | dict(extras)
 def cmd_review(args: argparse.Namespace) -> int:
     project = resolve_project(args.project)
     ensure_state_dirs(project)
@@ -311,25 +263,39 @@ def cmd_review(args: argparse.Namespace) -> int:
     print(json.dumps(payload, indent=2))
     blocked = bool(payload.get("fix_queue") or not payload.get("reviewer_roles") or payload.get("missing_review_roles") or payload.get("file_problems"))
     return 0 if not blocked or not args.strict else 1
-
 def cmd_waive(args: argparse.Namespace) -> int:
     project = resolve_project(args.project)
     ensure_state_dirs(project)
     if not str(args.reason or "").strip():
         raise ForgeError(REVIEW_POLICY["waive_reason_error"])
     scope = scope_hash(project) or "noscope"
-    append_policy_event(project, WAIVES_FILE, "waive", scope=scope, finding=args.finding, reason=args.reason)
-    append_policy_event(project, INCIDENTS_FILE, "incident_waive", kind="waive", finding=args.finding, reason=args.reason)
+    before = merge_review(project, scope)
+    target = next((finding for finding in before.get("findings") or []
+                   if isinstance(finding, dict) and finding.get("id") == args.finding), None)
+    if target is None:
+        raise ForgeError(f"Cannot waive unknown current finding {args.finding!r}")
+    fingerprint = str(target.get("fingerprint") or "")
+    reviewed_source_hash = str(before.get("source_hash") or "")
+    if not fingerprint or not reviewed_source_hash:
+        raise ForgeError(f"Cannot waive finding {args.finding!r} without current source binding")
+    binding = {"scope": scope, "fingerprint": fingerprint, "source_hash": reviewed_source_hash}
+    append_jsonl(project / WAIVES_FILE, extended_policy_record(
+        "waive", binding, timestamp=now_utc(), scope=scope,
+        finding=args.finding, reason=args.reason))
+    append_jsonl(project / INCIDENTS_FILE, extended_policy_record(
+        "incident_waive", binding, timestamp=now_utc(), kind="waive",
+        finding=args.finding, reason=args.reason))
     # Re-merge so the fix queue reflects the waive immediately.
     payload = merge_review(project, scope)
     write_merged_review(project, payload)
-    print(json.dumps(policy_record("waive_output", finding=args.finding, reason=args.reason, open_findings=len(payload["fix_queue"])), indent=2))
+    output = extended_policy_record(
+        "waive_output", binding, finding=args.finding, reason=args.reason,
+        open_findings=len(payload["fix_queue"]))
+    print(json.dumps(output, indent=2))
     return 0
-
 def task_completion_finding(rule: str, **values: Any) -> dict[str, Any]:
     severity = "critical" if rule == "task-missing" else "high"
     return policy_mapping("task_completion_finding", severity=severity, rule=rule, message=REVIEW_POLICY["task_completion_messages"][rule].format(**values))
-
 def evaluate_task_completion(project: Path, args: argparse.Namespace, task: Mapping[str, Any], tasks: Sequence[dict[str, Any]], source_problem: Any) -> list[dict[str, Any]]:
     complete_ids = {item["id"] for item in tasks if item.get("status") == "complete"}
     unmet = [dep for dep in parse_depends(task.get("depends", "")) if dep not in complete_ids]
@@ -343,7 +309,6 @@ def evaluate_task_completion(project: Path, args: argparse.Namespace, task: Mapp
         "changed-file-missing": (not any(str(item).strip() for item in (args.changed_file or [])), {}),
     }
     return [task_completion_finding(rule, **conditions[rule][1]) for rule in REVIEW_POLICY["task_completion_order"] if conditions[rule][0]]
-
 def cmd_complete_task(args: argparse.Namespace) -> int:
     project = resolve_project(args.project)
     ensure_state_dirs(project)
@@ -373,7 +338,6 @@ def cmd_complete_task(args: argparse.Namespace) -> int:
     append_policy_event(project, LEDGER_FILE, "ledger_task_complete", event="task-complete", task=args.task, summary=summary, artifacts=args.changed_file or [])
     print(json.dumps(payload | {"updated": True, "plan": relative_to_project(plan_path, project)}, indent=2))
     return 0
-
 def done_lifecycle_gates(project: Path, contract: Mapping[str, Any], source_hash_value: str | None) -> tuple[dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
     modern = not contract.get("legacy", True)
     gates = {
@@ -390,7 +354,6 @@ def done_lifecycle_gates(project: Path, contract: Mapping[str, Any], source_hash
         for name, gate in gates.items() if modern and not gate.get("satisfied")
     ]
     return gates["foundation"], gates["delivery"], problems
-
 def done_witness(project: Path, tasks: Sequence[dict[str, Any]], merged: Mapping[str, Any] | None, enforcement: str) -> tuple[dict[str, Any], list[str], int]:
     hooks = hooks_liveness(project)
     trusted_subagent_observed = bool(known_subagent_ids(project))
@@ -406,12 +369,10 @@ def done_witness(project: Path, tasks: Sequence[dict[str, Any]], merged: Mapping
     conditions = {"hooks": enforcement != "witnessed", "delegation": delegated_complete and not trusted_subagent_observed, "review": review_performed and not review_witnessed}
     reasons = [text for key, text in REVIEW_POLICY["advisory_reasons"].items() if conditions[key]]
     return witness, reasons, waive_count
-
 def done_verdict(blocking: Sequence[Any], advisory_reasons: Sequence[str], waive_count: int) -> str:
     verdicts = REVIEW_POLICY["done_verdicts"]
     verdict = verdicts["blocked"] if blocking else f"{verdicts['complete']} (advisory: {'; '.join(advisory_reasons)})" if advisory_reasons else verdicts["complete"]
     return verdict + (f" [{waive_count} waived finding(s)]" if verdict.startswith(verdicts["complete"]) and waive_count else "")
-
 def done_payload(project: Path) -> dict[str, Any]:
     problems: list[dict[str, Any]] = []
     tasks: list[dict[str, Any]] = []
@@ -446,10 +407,6 @@ def done_payload(project: Path) -> dict[str, Any]:
     dirty = source_dirty_entries(git_status(project))
     if dirty:
         problems.append({"severity": "medium", "message": REVIEW_POLICY["done_messages"]["dirty"], "files": dirty[:30]})
-    # Drift vs a prior proof is informational here: the verify/review freshness
-    # gates above already force a real re-pass after any source change, so a
-    # passing predicate legitimately supersedes the old proof. Change-packet
-    # re-entry is `run`'s job.
     proof = load_proof(project)
     if hash_problem:
         drift = source_hash_unavailable_state(profile_lock, problems=[hash_problem])
@@ -460,6 +417,13 @@ def done_payload(project: Path) -> dict[str, Any]:
             hash_problem = source_hash_exception_problem(exc)
             problems.append(finding_problem(hash_problem))
             drift = source_hash_unavailable_state(profile_lock, problems=[hash_problem])
+    if proof and drift.get("detected") and not hash_problem:
+        drift = annotate_drift_coverage(
+            project, tasks, drift, require_current_proof=True)
+        if drift.get("actionable"):
+            problems.append({"severity": "high", "rule": "post-proof-change-packet-required",
+                             "message": "Source drift after a final proof requires a completed, "
+                                        "approved, source-fresh change packet before done can pass."})
     snapshot, snapshot_problem = safe_release_snapshot(project)
     if snapshot_problem and not hash_problem:
         problems.append(finding_problem(snapshot_problem))
@@ -480,12 +444,9 @@ def done_payload(project: Path) -> dict[str, Any]:
         "done", locals(), created_at=now_utc(), project=str(project),
         is_complete=verdict.startswith("COMPLETE"), task_count=len(tasks), counts=task_counts(tasks),
         foundation=foundation_gate, delivery=delivery_gate,
-        source_hash_unavailable=bool(hash_problem or snapshot_problem),
-    )
-
+        source_hash_unavailable=bool(hash_problem or snapshot_problem))
 def load_proof(project: Path) -> dict[str, Any] | None:
     return load_optional_json(project / PROOF_FILE)
-
 def detect_drift(project: Path, proof: dict[str, Any] | None) -> dict[str, Any]:
     if not proof:
         return policy_mapping("drift_empty")
@@ -497,15 +458,12 @@ def detect_drift(project: Path, proof: dict[str, Any] | None) -> dict[str, Any]:
     if source_changed:
         changed = source_dirty_entries(git_status(project)) or _diff_since(project, proof.get("head"))
     return policy_mapping("drift", detected=bool(source_changed or scope_changed), source_changed=source_changed, scope_changed=scope_changed, changed_files=changed)
-
 def completed_task_matches_source(project: Path, task_id: str, current: str, *, attest_task: bool = False) -> bool:
     payload = load_optional_json(project / STATE_SUBDIR / f"complete-task-{slugify(task_id)}.json")
     snapshot = payload.get("source_snapshot") if payload else None
-    return bool(
-        payload and payload.get("verdict") == "COMPLETE" and isinstance(snapshot, dict)
-        and snapshot.get("source_hash") == current and (not attest_task or payload.get("task") == task_id)
-    )
-
+    return bool(payload and payload.get("verdict") == "COMPLETE" and isinstance(snapshot, dict)
+                and snapshot.get("source_hash") == current
+                and (not attest_task or payload.get("task") == task_id))
 def completed_amendment_covering_drift(project: Path, tasks: Sequence[dict[str, Any]], drift: dict[str, Any]) -> str | None:
     if not drift.get("detected"):
         return None
@@ -518,15 +476,12 @@ def completed_amendment_covering_drift(project: Path, tasks: Sequence[dict[str, 
         if completed_task_matches_source(project, task_id, current, attest_task=True):
             return task_id
     return None
-
 def change_scope_files(drift: Mapping[str, Any]) -> list[str]:
-    return [str(path) for path in (drift.get("changed_files") or []) if not str(path).strip().strip('"').endswith(project_contracts.BLUEPRINT_LOCK_FILE)]
-
-def change_packet_for_drift(
-    project: Path,
-    drift: Mapping[str, Any],
-    proof: Mapping[str, Any] | None,
-) -> dict[str, Any] | None:
+    paths = project_changes.normalize_changed_files(drift.get("changed_files") or [])
+    return [path for path in paths if path and not path.startswith(".starforge/")
+            and not path.endswith(project_contracts.BLUEPRINT_LOCK_FILE)]
+def change_packet_for_drift(project: Path, drift: Mapping[str, Any],
+                            proof: Mapping[str, Any] | None) -> dict[str, Any] | None:
     if not drift.get("detected") or not proof:
         return None
     try:
@@ -545,12 +500,14 @@ def change_packet_for_drift(
         if not packet_tasks or not all_tasks_complete(packet_tasks):
             return packet
     return matches[-1] if matches else None
-
+def task_has_current_proof(project: Path, task: Mapping[str, Any]) -> bool:
+    verified = (has_noop_verify(project, str(task["id"])) if task_allows_noop_verification(task)
+                else fresh_passing_verify(project, dict(task)))
+    return bool(verified and (not task_is_visual(task)
+                             or passing_browser_runs(project, str(task["id"]))))
 def completed_change_packet_covering_drift(
-    project: Path,
-    drift: Mapping[str, Any],
-    proof: Mapping[str, Any] | None,
-) -> str | None:
+        project: Path, drift: Mapping[str, Any], proof: Mapping[str, Any] | None,
+        *, require_current_proof: bool = False) -> str | None:
     packet = change_packet_for_drift(project, drift, proof)
     if not packet or packet["approval_state"] != "approved":
         return None
@@ -561,41 +518,42 @@ def completed_change_packet_covering_drift(
     if not tasks or not all_tasks_complete(tasks):
         return None
     current = source_hash(project)
-    return str(packet["change_id"]) if all(completed_task_matches_source(project, task["id"], current) for task in tasks) else None
-
-def annotate_drift_coverage(project: Path, tasks: Sequence[dict[str, Any]], drift: dict[str, Any]) -> dict[str, Any]:
+    if not all(completed_task_matches_source(project, task["id"], current)
+               for task in tasks):
+        return None
+    if require_current_proof and not all(task_has_current_proof(project, task)
+                                         for task in tasks):
+        return None
+    return str(packet["change_id"])
+def annotate_drift_coverage(
+        project: Path, tasks: Sequence[dict[str, Any]], drift: dict[str, Any],
+        *, require_current_proof: bool = False) -> dict[str, Any]:
     proof = load_proof(project)
-    covered_by_packet = completed_change_packet_covering_drift(project, drift, proof)
+    covered_by_packet = completed_change_packet_covering_drift(
+        project, drift, proof, require_current_proof=require_current_proof)
     covered_by_legacy = completed_amendment_covering_drift(project, tasks, drift)
     covered_by = covered_by_packet or covered_by_legacy
-    return dict(drift) | {
-        "covered_by_completed_amendment": covered_by_legacy,
-        "covered_by_completed_change_packet": covered_by_packet,
-        "actionable": bool(drift.get("detected") and not covered_by),
-    }
-
+    return dict(drift) | {"covered_by_completed_amendment": covered_by_legacy,
+                          "covered_by_completed_change_packet": covered_by_packet,
+                          "actionable": bool(drift.get("detected") and not covered_by)}
 def _diff_since(project: Path, head: str | None) -> list[str]:
     if head and is_git_repo(project):
         code, out, _ = run_git(["diff", "--name-only", f"{head}..HEAD"], project)
         return [line.strip() for line in out.splitlines() if line.strip()] if code == 0 else []
     return []
-
 def cmd_done(args: argparse.Namespace) -> int:
     project = resolve_project(args.project)
     payload = done_payload(project)
     if payload["is_complete"]:
         ensure_state_dirs(project)
-        write_json(
-            project / PROOF_FILE,
-            policy_record("proof", created_at=now_utc(), head=git_head(project), source_hash=source_hash(project), scope_hash=scope_hash(project) or "noscope", verdict=payload["verdict"]),
-        )
+        write_json(project / PROOF_FILE, policy_record(
+            "proof", created_at=now_utc(), head=git_head(project), source_hash=source_hash(project),
+            scope_hash=scope_hash(project) or "noscope", verdict=payload["verdict"]))
         if args.write_summary:
             write_text(project / FINAL_SUMMARY, done_summary_markdown(payload))
             payload["summary_artifact"] = str(FINAL_SUMMARY)
     print(json.dumps(payload, indent=2))
     return 0 if payload["is_complete"] or not args.strict else 1
-
 def done_summary_markdown(payload: dict[str, Any]) -> str:
     return REVIEW_POLICY["done_summary"].format(**{field: payload.get(field) for field in ("created_at", "verdict", "project", "task_count", "counts", "enforcement")})
-
 __all__ = tuple(name for name in globals() if not name.startswith("__"))
