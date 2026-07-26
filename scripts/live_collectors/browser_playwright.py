@@ -47,6 +47,7 @@ globals().update(CONSTANTS)
 
 
 descriptor = render_descriptor
+_UNSET = object()
 
 
 class BrowserDependencyError(Exception):
@@ -437,10 +438,10 @@ def _run_playwright_scenario(context: BrowserExecutionContext) -> BrowserExecuti
     return result
 
 
-def validate_console_artifact(path: Path, project: Path) -> list[dict[str, Any]]:
+def validate_console_artifact(path: Path, project: Path, payload: Any = _UNSET) -> list[dict[str, Any]]:
     rel = live_common.project_relative(project, path)
     try:
-        payload = read_json_file(path)
+        payload = read_json_file(path) if payload is _UNSET else payload
     except Exception as exc:
         return [problem(f"console evidence is malformed JSON: {exc}", rule="console-evidence", path=rel)]
     if not isinstance(payload, dict) or not isinstance(payload.get("events"), list):
@@ -457,10 +458,10 @@ def validate_console_artifact(path: Path, project: Path) -> list[dict[str, Any]]
     return problems
 
 
-def validate_interaction_artifact(path: Path, project: Path) -> list[dict[str, Any]]:
+def validate_interaction_artifact(path: Path, project: Path, payload: Any = _UNSET) -> list[dict[str, Any]]:
     rel = live_common.project_relative(project, path)
     try:
-        payload = read_json_file(path)
+        payload = read_json_file(path) if payload is _UNSET else payload
     except Exception as exc:
         return [problem(f"interaction evidence is malformed JSON: {exc}", rule="interaction-evidence", path=rel)]
     if not isinstance(payload, dict):
@@ -483,10 +484,10 @@ def validate_interaction_artifact(path: Path, project: Path) -> list[dict[str, A
     return problems
 
 
-def validate_request_safety_artifact(path: Path, project: Path, *, allowed_local_origins: Sequence[str] = ()) -> list[dict[str, Any]]:
+def validate_request_safety_artifact(path: Path, project: Path, *, allowed_local_origins: Sequence[str] = (), payload: Any = _UNSET) -> list[dict[str, Any]]:
     rel = live_common.project_relative(project, path)
     try:
-        payload = read_json_file(path)
+        payload = read_json_file(path) if payload is _UNSET else payload
     except Exception as exc:
         return [problem(f"interaction evidence is malformed JSON: {exc}", rule="interaction-evidence", path=rel)]
     if not isinstance(payload, Mapping):

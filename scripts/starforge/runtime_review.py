@@ -425,6 +425,12 @@ def done_payload(project: Path) -> dict[str, Any]:
         gate_findings = [finding for finder in (verify_findings, browser_findings) for finding in finder(project, tasks)]
         gate_findings.extend(review_findings_for_done(project, tasks))
         problems.extend(finding_problem(finding) for finding in gate_findings if finding["severity"] in BLOCKING_SEVERITIES)
+    repository_available, repository_head = is_git_repo(project), git_head(project)
+    repository_problem = (
+        ("git-repository-required", "Local Git repository is required for strict completion.") if not repository_available
+        else ("git-head-required", "A readable Git HEAD is required for strict completion.") if not repository_head else None)
+    if repository_problem:
+        problems.append({"severity": "high", "rule": repository_problem[0], "message": repository_problem[1]})
     dirty = source_dirty_entries(git_status(project))
     if dirty:
         problems.append({"severity": "medium", "message": REVIEW_POLICY["done_messages"]["dirty"], "files": dirty[:30]})

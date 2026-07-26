@@ -16,6 +16,7 @@ import io
 import json
 import os
 import shlex
+import shutil
 import sys
 import tempfile
 import traceback
@@ -2471,6 +2472,27 @@ def test_done_fails_closed_when_git_status_is_unavailable() -> None:
             "<git status unavailable>" in str(problem)
             for problem in payload["problems"]
         )
+
+
+def test_done_fails_closed_without_repository_and_preserves_prior_proof() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        build_completed_project(project)
+        code, payload = run_done(project)
+        assert code == 0, payload
+        proof_path = project / star_forge.PROOF_FILE
+        prior_proof = proof_path.read_bytes()
+
+        shutil.rmtree(project / ".git")
+        code, payload = run_done(project)
+
+        assert code == 1, payload
+        assert payload["is_complete"] is False
+        assert any(
+            problem.get("rule") == "git-repository-required"
+            for problem in payload["problems"]
+        )
+        assert proof_path.read_bytes() == prior_proof
 
 
 def test_done_requires_change_packet_for_post_proof_drift_without_run() -> None:

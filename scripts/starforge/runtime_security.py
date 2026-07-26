@@ -226,7 +226,7 @@ def cmd_security_handoff_packet(args: argparse.Namespace) -> int:
     if input_path is not None:
         manifest_candidate = input_path.parent / "manifest.json"
         manifest, manifest_path = load_and_validate_live_manifest(project, manifest_candidate, problems, task=task or None, collector="security", require_scoped=True)
-        require_raw_hash_for_artifact(project, manifest, input_path, problems, label="handoff input", rule="security-clean-proof")
+        require_raw_hash_for_artifact(project, manifest, input_path, problems, label="handoff input", rule="security-clean-proof", attested_entry=input_entry)
     flag_live_problem(problems, not str(args.kind or "").strip(), "security handoff packet requires --kind", rule="security-kind")
     profile = ""
     scanner = ""
@@ -307,6 +307,7 @@ def validate_github_operation_transcript(
     problems: list[dict[str, Any]],
     *,
     path: str,
+    attested_entry: Mapping[str, Any] | None = None,
     check_runs_payload: Any = None,
     pr_payload: Any = None,
 ) -> str:
@@ -317,6 +318,7 @@ def validate_github_operation_transcript(
         problems,
         label="GitHub operation transcript",
         rule="github-live-provenance",
+        attested_entry=attested_entry,
     )
     if not isinstance(transcript_payload, dict):
         problems.append(live_problem("GitHub operation transcript must be a JSON object", rule="github-live-provenance", path=path))
@@ -490,6 +492,7 @@ def validate_source_packet_manifest(project: Path, manifest: dict[str, Any] | No
             summary,
             problems,
             path=transcript_entry.get("path", ""),
+            attested_entry=transcript_entry,
             check_runs_payload=check_runs_payload,
             pr_payload=pr_payload,
         )

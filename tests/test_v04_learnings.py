@@ -416,6 +416,60 @@ class SchemaAndRedactionTests(unittest.TestCase):
             self.assertEqual(report["items"], [])
             self.assertEqual(report["records_rejected"], 1)
 
+    def test_write_rejects_a_swapped_configured_store_parent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as base_tmp, tempfile.TemporaryDirectory() as outside_tmp:
+            project, base, outside = Path(tmp), Path(base_tmp) / "configured-parent", Path(outside_tmp)
+            base.mkdir()
+            store = base / "store"
+            detached = Path(base_tmp) / "detached-parent"
+            original = learnings.safe_io.create_text_exclusive
+            swapped = False
+
+            def swap_store_parent(root: Path, path: Path, text: str) -> None:
+                nonlocal swapped
+                if not swapped:
+                    base.rename(detached)
+                    base.symlink_to(outside, target_is_directory=True)
+                    swapped = True
+                original(root, path, text)
+
+            with mock.patch.dict(os.environ, {learnings.HOME_ENV: str(store)}, clear=False):
+                with mock.patch.object(learnings.safe_io, "create_text_exclusive", side_effect=swap_store_parent):
+                    with self.assertRaises(learnings.LearningsError):
+                        learnings.write_learning(
+                            project, title="Root swap record",
+                            rule="Verify the result independently",
+                            triggers=["py"], category="verification",
+                            source_hash=SOURCE_HASH)
+            self.assertFalse((outside / "store").exists())
+
+    def test_read_rejects_a_swapped_configured_store_parent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as base_tmp, tempfile.TemporaryDirectory() as outside_tmp:
+            project, base, outside = Path(tmp), Path(base_tmp) / "configured-parent", Path(outside_tmp)
+            base.mkdir()
+            store = base / "store"
+            write_learning(project, store, title="Trusted root record")
+            write_learning(project, outside / "store", title="Injected root record")
+            detached = Path(base_tmp) / "detached-parent"
+            original = learnings.safe_io.read_snapshot
+            swapped = False
+
+            def swap_store_parent(
+                    root: Path, path: Path, *,
+                    max_bytes: int | None = None) -> tuple[bytes, str, int]:
+                nonlocal swapped
+                if not swapped:
+                    base.rename(detached)
+                    base.symlink_to(outside, target_is_directory=True)
+                    swapped = True
+                return original(root, path, max_bytes=max_bytes)
+
+            with mock.patch.object(learnings.safe_io, "read_snapshot", side_effect=swap_store_parent):
+                report = read_learning(project, store)
+            self.assertEqual(report["items"], [])
+            self.assertEqual(report["records_accepted"], 0)
+            self.assertEqual(report["records_rejected"], 1)
+
     def test_discovered_path_outside_store_is_rejected_before_read(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as store_tmp, tempfile.TemporaryDirectory() as outside_tmp:
             project, store, outside = Path(tmp), Path(store_tmp), Path(outside_tmp)

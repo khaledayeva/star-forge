@@ -213,15 +213,19 @@ def require_raw_hash_for_artifact(
 ) -> str:
     rel = live_rel(project, path)
     actual = str(attested_entry.get("sha256") or "") if attested_entry else ""
+    if attested_entry and not path.is_file():
+        problems.append(live_problem(f"{label} cannot be hashed from current bytes", rule=rule, path=rel))
+        return ""
+    if not actual:
+        try:
+            actual = file_sha256(path)
+        except OSError:
+            problems.append(live_problem(f"{label} cannot be hashed from current bytes", rule=rule, path=rel))
+            return ""
     record = manifest_artifact_record_for_path(project, manifest, path)
     if record is None:
         problems.append(live_problem(f"{label} must be recorded in manifest artifacts", rule=rule, path=rel))
     else:
-        if not actual:
-            try:
-                actual = file_sha256(path)
-            except OSError:
-                actual = ""
         record_hash = str(record.get("sha256") or "")
         if not record_hash:
             problems.append(live_problem(f"{label} manifest artifact is missing sha256", rule=rule, path=rel))
@@ -231,11 +235,6 @@ def require_raw_hash_for_artifact(
     if not expected:
         problems.append(live_problem(f"{label} must be recorded in raw_artifact_hashes", rule=rule, path=rel))
         return ""
-    if not actual:
-        try:
-            actual = file_sha256(path)
-        except OSError:
-            return expected
     if actual != expected:
         problems.append(live_problem(f"{label} raw artifact hash does not match current bytes", rule=rule, path=rel))
     return actual

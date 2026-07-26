@@ -17,7 +17,8 @@ _FILE_FLAGS = _CLOEXEC | _NOFOLLOW
 def _require_support() -> None:
     supported = (_NOFOLLOW, _DIRECTORY, os.open in os.supports_dir_fd,
                  os.mkdir in os.supports_dir_fd, os.stat in os.supports_dir_fd,
-                 os.unlink in os.supports_dir_fd, os.listdir in os.supports_fd)
+                 os.unlink in os.supports_dir_fd, os.link in os.supports_dir_fd,
+                 os.link in os.supports_follow_symlinks, os.listdir in os.supports_fd)
     if not all(supported):
         raise SafeIOError("descriptor-relative no-follow filesystem APIs are unavailable")
 def infer_root(path: str | Path) -> Path:
@@ -105,13 +106,14 @@ def make_directory(root: str | Path, path: str | Path) -> None:
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
-def atomic_write_bytes(root: str | Path, path: str | Path, data: bytes) -> None:
+def _publish_bytes(root: str | Path, path: str | Path, data: bytes, *,
+                   replace: bool) -> None:
     parent, name = _parent_fd(root, path, True)
     temporary = f".{name}.{secrets.token_hex(12)}.tmp"
     descriptor = -1
     try:
-        existing = _entry(parent, name)
-        if existing is not None and not stat.S_ISREG(existing.st_mode):
+        existing = _entry(parent, name) if replace else None
+        if replace and existing is not None and not stat.S_ISREG(existing.st_mode):
             raise SafeIOError(f"confined destination is not a regular file: {name}")
         mode = stat.S_IMODE(existing.st_mode) if existing else 0o600
         descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _FILE_FLAGS,
@@ -121,9 +123,17 @@ def atomic_write_bytes(root: str | Path, path: str | Path, data: bytes) -> None:
         os.close(descriptor)
         descriptor = -1
         try:
-            os.replace(temporary, name, src_dir_fd=parent, dst_dir_fd=parent)
+            if replace:
+                os.replace(temporary, name, src_dir_fd=parent, dst_dir_fd=parent)
+            else:
+                os.link(temporary, name, src_dir_fd=parent, dst_dir_fd=parent,
+                        follow_symlinks=False)
         except TypeError as exc:
-            raise SafeIOError("descriptor-relative atomic replacement is unavailable") from exc
+            operation = "replacement" if replace else "hard-link publication"
+            raise SafeIOError(
+                f"descriptor-relative atomic {operation} is unavailable") from exc
+        if not replace:
+            os.unlink(temporary, dir_fd=parent)
         os.fsync(parent)
     finally:
         if descriptor >= 0:
@@ -133,24 +143,13 @@ def atomic_write_bytes(root: str | Path, path: str | Path, data: bytes) -> None:
         except FileNotFoundError:
             pass
         os.close(parent)
+def atomic_write_bytes(root: str | Path, path: str | Path, data: bytes) -> None:
+    _publish_bytes(root, path, data, replace=True)
 def atomic_write_text(root: str | Path, path: str | Path, text: str) -> None:
     atomic_write_bytes(root, path, text.encode("utf-8"))
 def create_bytes_exclusive(root: str | Path, path: str | Path, data: bytes) -> None:
     """Create one regular file without following or replacing any entry."""
-    parent, name = _parent_fd(root, path, True)
-    descriptor = -1
-    try:
-        descriptor = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _FILE_FLAGS,
-                             0o600, dir_fd=parent)
-        _write_all(descriptor, data)
-        os.fsync(descriptor)
-        os.close(descriptor)
-        descriptor = -1
-        os.fsync(parent)
-    finally:
-        if descriptor >= 0:
-            os.close(descriptor)
-        os.close(parent)
+    _publish_bytes(root, path, data, replace=False)
 def create_text_exclusive(root: str | Path, path: str | Path, text: str) -> None:
     create_bytes_exclusive(root, path, text.encode("utf-8"))
 def atomic_create_bundle(root: str | Path, path: str | Path, *,

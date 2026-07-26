@@ -167,15 +167,10 @@ def opt_in_status(
 def _path_has_symlink_component(path: Path) -> bool:
     absolute = Path(os.path.abspath(str(path)))
     current = Path(absolute.anchor)
-    safe_system_aliases = {Path(alias): Path(target) for alias, target in LEARNING_POLICY["safe_system_aliases"].items()}
     for part in absolute.parts[1:]:
         current /= part
         try:
             if current.is_symlink():
-                expected = safe_system_aliases.get(current)
-                if expected is not None and current.resolve() == expected:
-                    current = expected
-                    continue
                 return True
         except OSError:
             return True
@@ -191,16 +186,16 @@ def _safe_root(
     status = opt_in_status(project, action=action, explicit=explicit, environ=environ)
     if not status["enabled"]:
         return None, status
-    root = learnings_home(environ)
+    root = Path(os.path.abspath(str(learnings_home(environ))))
+    for alias, target in LEARNING_POLICY["safe_system_aliases"].items():
+        if root == Path(alias) or root.is_relative_to(alias):
+            root = Path(target) / root.relative_to(alias)
+            break
     if _path_has_symlink_component(root):
         return None, {**status, "enabled": False, "reason": "unsafe-store-symlink"}
-    try:
-        resolved = root.resolve(strict=False)
-    except OSError:
-        return None, {**status, "enabled": False, "reason": "unsafe-store-path"}
-    if resolved == Path(resolved.anchor):
+    if root == Path(root.anchor):
         return None, {**status, "enabled": False, "reason": "unsafe-store-root"}
-    return resolved, status
+    return root, status
 
 def project_identity(project: Path) -> dict[str, str]:
     resolved = project.resolve()
@@ -384,9 +379,8 @@ def write_learning(
         opt_in_reason=str(opt_in["reason"]),
     )
     serialized = _serialize_record(record)
-    category_dir = root / normalized_category
-    path = category_dir / f"{_slug(normalized_text['title'], fallback='learning')}.md"
-    io_root = safe_io.infer_root(root)
+    path = root / _record_relative(root, root / normalized_category / f"{_slug(normalized_text['title'], fallback='learning')}.md")
+    io_root = Path(root.anchor)
     try:
         existing, _digest, _size = safe_io.read_snapshot(
             io_root, path, max_bytes=MAX_RECORD_BYTES)
@@ -446,7 +440,7 @@ def read_digest(
     report = policy_mapping("learning_digest", enabled=bool(root is not None), opt_in=opt_in, limit=bounded_limit)
     if root is None or bounded_limit == 0:
         return report
-    io_root = safe_io.infer_root(root)
+    io_root = Path(root.anchor)
     try:
         store_exists = safe_io.directory_exists(io_root, root)
     except OSError:

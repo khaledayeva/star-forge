@@ -14,7 +14,7 @@ from .policy_data import mapping as _policy_mapping, value as _policy_value
 from .runtime_support import RUNS_DIR, SCREENSHOTS_DIR, SCREENSHOT_MANIFEST, SERVER_LEASE, ForgeError, artifact_entry, blocking_items, decode_image_meta, file_sha256, now_utc, read_json, relative_to_project, slugify, source_hash, write_json
 from .runtime_project import ensure_state_dirs, resolve_project, safe_release_snapshot, try_source_hash
 from .runtime_plan import command_is_noop, normalize_command, task_allows_noop_verification, task_is_visual, task_plan, task_verify_command
-from .runtime_preview import current_live_source_hash, is_task_scoped_live_path, live_manifest_summary, load_and_validate_live_manifest, require_raw_hash_for_artifact
+from .runtime_preview import current_live_source_hash, is_task_scoped_live_path, live_manifest_summary, load_and_validate_live_manifest, require_raw_hash_for_artifact, validate_artifact_arg
 from .runtime_store import load_run_records, write_run_record
 RECORD_POLICY = _policy_value("runtime_records.POLICY")
 def _finish_record(project: Path, payload: dict[str, Any], strict: bool) -> int:
@@ -235,7 +235,7 @@ def validate_browser_artifact_path(project: Path, entry: dict[str, Any], *, task
     if manifest_paths and rel not in manifest_paths:
         problems.append(_browser_problem("artifact_manifest", rel))
     require_raw_hash_for_artifact(
-        project, manifest, path, problems, label="browser artifact", rule="artifact-hash")
+        project, manifest, path, problems, label="browser artifact", rule="artifact-hash", attested_entry=entry)
     return path
 def cmd_browser_run(args: argparse.Namespace) -> int:
     project = resolve_project(args.project)
@@ -244,8 +244,9 @@ def cmd_browser_run(args: argparse.Namespace) -> int:
     snapshot, snapshot_problem = safe_release_snapshot(project)
     problems = [snapshot_problem] if snapshot_problem else []
     manifest = manifest_path = browser_playwright = None
-    browser_interaction_paths: list[Path] = []
+    browser_interaction_artifacts: list[tuple[Path, Any]] = []
     browser_allowed_local_origins: tuple[str, ...] = ()
+    artifact_payloads: dict[str, Any] = {}
     for raw in args.viewport or []:
         name, entry = parse_viewport_spec(raw, project)
         viewports[name] = entry
@@ -267,7 +268,10 @@ def cmd_browser_run(args: argparse.Namespace) -> int:
         for raw in getattr(args, key) or []:
             path = Path(raw)
             candidate = path if path.is_absolute() else project / path
-            entry = artifact_entry(project, candidate, kind=kind)
+            entry, payload = validate_artifact_arg(
+                project, str(candidate), kind, problems, require_scoped=False, require_json=True)
+            entry = entry or {"kind": kind, "path": str(candidate), "exists": False}
+            artifact_payloads[str(entry.get("path") or "")] = payload
             artifacts[key].append(entry)
             path = str(entry.get("path") or "")
             _report_browser_if(not entry.get("exists"), problems, "evidence_missing", path, kind=kind)
@@ -294,9 +298,10 @@ def cmd_browser_run(args: argparse.Namespace) -> int:
                 path = validate_browser_artifact_path(project, entry, task=args.task, manifest=manifest, manifest_paths=manifest_paths, problems=problems)
                 if path is not None and browser_playwright is not None:
                     validator = getattr(browser_playwright, f"validate_{kind}_artifact")
-                    problems.extend(validator(path, project))
+                    payload = artifact_payloads.get(str(entry.get("path") or ""))
+                    problems.extend(validator(path, project, payload))
                     if kind == "interaction":
-                        browser_interaction_paths.append(path)
+                        browser_interaction_artifacts.append((path, payload))
         if manifest is not None:
             summary = live_manifest_summary(manifest)
             _report_browser_if(not summary.get("url"), problems, "browser_url_missing")
@@ -323,9 +328,9 @@ def cmd_browser_run(args: argparse.Namespace) -> int:
     _report_browser_if(args.require_server_lease and not lease, problems, "server_lease_required")
     _report_browser_if(args.server_lease and not lease, problems, "server_lease_invalid")
     if args.strict and browser_playwright is not None:
-        for path in browser_interaction_paths:
+        for path, payload in browser_interaction_artifacts:
             problems.extend(browser_playwright.validate_request_safety_artifact(
-                path, project, allowed_local_origins=browser_allowed_local_origins))
+                path, project, allowed_local_origins=browser_allowed_local_origins, payload=payload))
     if viewports:
         write_screenshot_manifest(project, context={"scenario": args.scenario, "url": args.url})
     verdicts = RECORD_POLICY["verdicts"]

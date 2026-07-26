@@ -6,6 +6,7 @@ Plain-python suite. Run with: python3 tests/test_live_proof_commands.py
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import importlib.util
 import io
 import json
@@ -28,7 +29,7 @@ SPEC.loader.exec_module(star_forge)
 from live_collectors import common as live_common
 from live_collectors import browser_playwright
 from live_collectors import preview as live_preview
-from starforge import runtime_preview
+from starforge import runtime_preview, runtime_records, runtime_security
 
 os.environ["STAR_FORGE_LEARNINGS_HOME"] = tempfile.mkdtemp(prefix="star-forge-live-test-learnings-")
 
@@ -1006,6 +1007,23 @@ def test_browser_run_strict_requires_live_manifest_and_json_evidence() -> None:
 
         code, payload, _ = run_cli(base_args[:-1] + ["--live-manifest", str(manifest), "--strict"])
         assert_pass(code, payload)
+
+        invalid_interaction = browser_interaction_payload(url)
+        invalid_interaction["assertions"] = [{"passed": False}]
+        write_json(interaction, invalid_interaction)
+        refresh_manifest_artifact_hash(manifest, project, interaction)
+        real_require = runtime_records.require_raw_hash_for_artifact
+        swapped = False
+        def compare_then_swap(*call_args: Any, **call_kwargs: Any) -> str:
+            nonlocal swapped
+            result = real_require(*call_args, **call_kwargs)
+            if not swapped and call_args[2] == interaction:
+                write_json(interaction, browser_interaction_payload(url))
+                swapped = True
+            return result
+        with mock.patch.object(runtime_records, "require_raw_hash_for_artifact", side_effect=compare_then_swap):
+            code, payload, _ = run_cli(base_args[:-1] + ["--live-manifest", str(manifest), "--strict"])
+        assert_fail(code, payload, "visual-assertion")
 
         interaction_payload = browser_interaction_payload(url)
         interaction_payload["request_safety"].pop("service_workers", None)
@@ -2870,6 +2888,59 @@ def test_manifest_bound_json_uses_one_attested_descriptor_without_reopen() -> No
         assert payload == {"trusted": True}
         assert entry and entry["sha256"] == digest and entry["bytes"] == size
         assert not problems, problems
+
+def test_raw_hash_a_to_b_to_missing_fails_closed() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        artifact = write_json(project / "artifact.json", {"state": "A"})
+        rel = live_common.project_relative(project, artifact)
+        artifact.write_text('{"state":"B"}\n', encoding="utf-8")
+        expected = star_forge.file_sha256(artifact)
+        manifest = {
+            "artifacts": [{"path": rel, "sha256": expected}],
+            "raw_artifact_hashes": {rel: expected},
+        }
+        artifact.unlink()
+        problems: list[dict[str, Any]] = []
+        actual = runtime_preview.require_raw_hash_for_artifact(
+            project, manifest, artifact, problems, label="race artifact")
+        assert actual == ""
+        assert runtime_preview.live_has_blockers(problems)
+        assert any("cannot be hashed" in str(item.get("message") or "") for item in problems)
+
+def test_security_handoff_keeps_parsed_a_attestation_through_b_then_missing() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        init_project(project)
+        manifest, _findings = write_clean_security_fixture(project)
+        handoff = live_dir(project, "security") / "handoff-input.json"
+        original = handoff.read_bytes()
+        write_json(handoff, {"state": "B"})
+        refresh_manifest_artifact_hash(manifest, project, handoff)
+        handoff.write_bytes(original)
+        real_load = runtime_security.load_and_validate_live_manifest
+        real_require = runtime_security.require_raw_hash_for_artifact
+        seen_entries: list[dict[str, Any] | None] = []
+        observed_hashes: list[str] = []
+        def load_b_then_remove(*call_args: Any, **call_kwargs: Any) -> Any:
+            write_json(handoff, {"state": "B"})
+            result = real_load(*call_args, **call_kwargs)
+            handoff.unlink()
+            return result
+        def capture_attestation(*call_args: Any, **call_kwargs: Any) -> str:
+            seen_entries.append(call_kwargs.get("attested_entry"))
+            observed_hashes.append(result := real_require(*call_args, **call_kwargs))
+            return result
+        with mock.patch.object(runtime_security, "load_and_validate_live_manifest", side_effect=load_b_then_remove), \
+                mock.patch.object(runtime_security, "require_raw_hash_for_artifact", side_effect=capture_attestation):
+            code, payload, _ = run_cli([
+                "security-handoff-packet", "--project", str(project), "--kind", "security-diff",
+                "--input", str(handoff), "--strict",
+            ])
+        assert_fail(code, payload, "security-clean-proof")
+        assert seen_entries and seen_entries[0]
+        assert seen_entries[0]["sha256"] == hashlib.sha256(original).hexdigest()
+        assert observed_hashes == [""]
 
 
 def main() -> int:

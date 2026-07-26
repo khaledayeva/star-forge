@@ -119,6 +119,71 @@ class DescriptorStabilityTests(unittest.TestCase):
                 safe_io.create_text_exclusive(project, target, "replacement\n")
             self.assertEqual(outside.read_text(encoding="utf-8"), "sentinel\n")
 
+    def test_exclusive_create_partial_write_failure_publishes_nothing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp).resolve()
+            target = project / "record.txt"
+            original_write = safe_io.os.write
+            calls = 0
+
+            def partial_then_fail(descriptor: int, data: bytes) -> int:
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    return original_write(descriptor, data[:1])
+                raise OSError("simulated write failure")
+
+            with mock.patch.object(
+                safe_io.os, "write", side_effect=partial_then_fail
+            ), self.assertRaises(OSError):
+                safe_io.create_text_exclusive(project, target, "complete\n")
+            self.assertFalse(target.exists())
+            self.assertEqual(list(project.glob(".record.txt.*.tmp")), [])
+
+    def test_exclusive_create_file_fsync_failure_publishes_nothing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp).resolve()
+            target = project / "record.txt"
+            with mock.patch.object(
+                safe_io.os, "fsync", side_effect=OSError("simulated fsync failure")
+            ), self.assertRaises(OSError):
+                safe_io.create_text_exclusive(project, target, "complete\n")
+            self.assertFalse(target.exists())
+            self.assertEqual(list(project.glob(".record.txt.*.tmp")), [])
+
+    def test_exclusive_create_retries_after_a_failed_write(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp).resolve()
+            target = project / "record.txt"
+            with mock.patch.object(
+                safe_io.os, "write", side_effect=OSError("simulated write failure")
+            ), self.assertRaises(OSError):
+                safe_io.create_text_exclusive(project, target, "complete\n")
+            safe_io.create_text_exclusive(project, target, "complete\n")
+            self.assertEqual(target.read_text(encoding="utf-8"), "complete\n")
+            self.assertEqual(list(project.glob(".record.txt.*.tmp")), [])
+
+    def test_exclusive_create_preserves_a_concurrent_destination(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp).resolve()
+            target = project / "record.txt"
+            original_fsync = safe_io.os.fsync
+            raced = False
+
+            def race_after_file_sync(descriptor: int) -> None:
+                nonlocal raced
+                original_fsync(descriptor)
+                if not raced:
+                    raced = True
+                    target.write_text("concurrent\n", encoding="utf-8")
+
+            with mock.patch.object(
+                safe_io.os, "fsync", side_effect=race_after_file_sync
+            ), self.assertRaises(FileExistsError):
+                safe_io.create_text_exclusive(project, target, "replacement\n")
+            self.assertEqual(target.read_text(encoding="utf-8"), "concurrent\n")
+            self.assertEqual(list(project.glob(".record.txt.*.tmp")), [])
+
     def test_snapshot_hash_and_size_use_the_opened_descriptor(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project = Path(tmp).resolve()
