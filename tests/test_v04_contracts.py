@@ -415,5 +415,272 @@ class PlanV2ContractTests(unittest.TestCase):
             self.assertEqual(source.read_text(encoding="utf-8"), self.LEGACY)
 
 
+class PlanV2TraceabilityTests(unittest.TestCase):
+    BLUEPRINT = """# Blueprint
+
+Status: draft
+
+## Toolchain
+
+- Project class: command-line tool
+- Target platforms: Linux and macOS terminals
+
+## Delivery Contract
+
+- Delivery target: source-only
+- Platform-specific target, when selected:
+- GitHub requested: no
+
+## Acceptance Criteria
+
+- AC-1: The command produces output.
+- AC-2: The source handoff is verified.
+"""
+
+    def plan(self, tasks: list[dict[str, str]]) -> list[dict[str, object]]:
+        return contracts.parse_plan_tasks_text(
+            contracts.serialize_plan_tasks(tasks)
+        )
+
+    def messages(
+        self,
+        blueprint: str,
+        tasks: list[dict[str, str]],
+    ) -> list[str]:
+        return [
+            item["message"]
+            for item in contracts.validate_plan_v2_contract(
+                blueprint,
+                self.plan(tasks),
+            )
+        ]
+
+    def test_closed_proof_vocabulary_and_complete_traceability_pass(self) -> None:
+        self.assertEqual(
+            contracts.PLAN_PROOF_KINDS,
+            {
+                "unit",
+                "integration",
+                "browser",
+                "preview",
+                "native-ios",
+                "native-macos",
+                "security",
+                "github",
+                "package",
+                "delivery",
+            },
+        )
+        tasks = [
+            {
+                "id": "SF-1",
+                "description": "Build the command",
+                "status": "ready",
+                "mode": "delegate",
+                "files": "src/app.py",
+                "depends": "-",
+                "acs": "AC-1",
+                "proof": "unit",
+                "verify": "python3 -m unittest",
+                "evidence": "-",
+            },
+            {
+                "id": "SF-2",
+                "description": "Deliver the source handoff",
+                "status": "queued",
+                "mode": "docs",
+                "files": "HANDOFF.md",
+                "depends": "SF-1",
+                "acs": "AC-2",
+                "proof": "delivery",
+                "verify": "python3 tests/check_handoff.py",
+                "evidence": "-",
+            },
+        ]
+
+        self.assertEqual(
+            contracts.validate_plan_v2_contract(
+                self.BLUEPRINT,
+                self.plan(tasks),
+            ),
+            [],
+        )
+
+    def test_rejects_unknown_uncovered_and_missing_task_contracts(self) -> None:
+        messages = self.messages(
+            self.BLUEPRINT,
+            [
+                {
+                    "id": "SF-1",
+                    "description": "Claim a ghost criterion",
+                    "status": "queued",
+                    "mode": "delegate",
+                    "files": "src/app.py",
+                    "depends": "-",
+                    "acs": "AC-99",
+                    "proof": "unit",
+                    "verify": "python3 -m unittest",
+                    "evidence": "-",
+                }
+            ],
+        )
+
+        self.assertTrue(any("unknown Blueprint criterion `AC-99`" in msg for msg in messages))
+        self.assertTrue(any("criterion `AC-1` is not covered" in msg for msg in messages))
+        self.assertTrue(any("criterion `AC-2` is not covered" in msg for msg in messages))
+        self.assertTrue(any("no substantive delivery task" in msg for msg in messages))
+
+    def test_rejects_unknown_or_missing_proof_kinds(self) -> None:
+        messages = self.messages(
+            self.BLUEPRINT,
+            [
+                {
+                    "id": "SF-1",
+                    "description": "Build and hand off",
+                    "status": "queued",
+                    "mode": "delegate",
+                    "files": "src/app.py",
+                    "depends": "-",
+                    "acs": "AC-1, AC-2",
+                    "proof": "smoke, delivery",
+                    "verify": "python3 -m unittest",
+                    "evidence": "-",
+                },
+                {
+                    "id": "SF-2",
+                    "description": "No proof",
+                    "status": "queued",
+                    "mode": "delegate",
+                    "files": "src/more.py",
+                    "depends": "SF-1",
+                    "acs": "AC-1",
+                    "proof": "",
+                    "verify": "python3 -m unittest",
+                    "evidence": "-",
+                },
+            ],
+        )
+
+        self.assertTrue(any("unknown Proof kind `smoke`" in msg for msg in messages))
+        self.assertTrue(any("must name at least one Proof kind" in msg for msg in messages))
+
+    def test_maintenance_exemption_is_narrow_and_never_covers_an_ac(self) -> None:
+        valid_maintenance = {
+            "id": "SF-M",
+            "description": "Record the decision log",
+            "status": "queued",
+            "mode": "docs",
+            "files": "docs/decision.md",
+            "depends": "-",
+            "acs": contracts.PLAN_MAINTENANCE_EXEMPTION,
+            "proof": "",
+            "verify": "noop",
+            "evidence": "-",
+        }
+        substantive = {
+            "id": "SF-1",
+            "description": "Build and deliver",
+            "status": "queued",
+            "mode": "delegate",
+            "files": "src/app.py",
+            "depends": "SF-M",
+            "acs": "AC-1, AC-2",
+            "proof": "unit, delivery",
+            "verify": "python3 -m unittest",
+            "evidence": "-",
+        }
+        self.assertEqual(
+            self.messages(self.BLUEPRINT, [valid_maintenance, substantive]),
+            [],
+        )
+
+        fake = dict(valid_maintenance)
+        fake.update(
+            {
+                "mode": "delegate",
+                "files": "scripts/rewrite.py",
+                "acs": "maintenance, AC-2",
+                "proof": "delivery",
+            }
+        )
+        messages = self.messages(
+            self.BLUEPRINT,
+            [fake, {**substantive, "acs": "AC-1", "proof": "unit"}],
+        )
+        self.assertTrue(any("only value in ACs" in msg for msg in messages))
+        self.assertTrue(any("limited to docs-mode" in msg for msg in messages))
+        self.assertTrue(any("cannot own code or" in msg for msg in messages))
+        self.assertTrue(any("criterion `AC-2` is not covered" in msg for msg in messages))
+        self.assertTrue(any("no substantive delivery task" in msg for msg in messages))
+
+    def test_delivery_target_and_proof_must_agree(self) -> None:
+        preview_blueprint = self.BLUEPRINT.replace(
+            "Delivery target: source-only",
+            "Delivery target: preview",
+        )
+        task = {
+            "id": "SF-1",
+            "description": "Build and deliver",
+            "status": "queued",
+            "mode": "delegate",
+            "files": "src/app.py",
+            "depends": "-",
+            "acs": "AC-1, AC-2",
+            "proof": "unit, delivery",
+            "verify": "python3 -m unittest",
+            "evidence": "-",
+        }
+        messages = self.messages(preview_blueprint, [task])
+        self.assertTrue(any("requires Proof kind `preview`" in msg for msg in messages))
+
+        messages = self.messages(
+            self.BLUEPRINT,
+            [{**task, "proof": "unit, preview, delivery"}],
+        )
+        self.assertTrue(any("contradicts delivery target `source-only`" in msg for msg in messages))
+
+    def test_cli_labels_legacy_readability_and_strict_v2_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp)
+            (project / "Blueprint.md").write_text(self.BLUEPRINT, encoding="utf-8")
+            legacy = project / "Plan.md"
+            legacy.write_text(PlanV2ContractTests.LEGACY, encoding="utf-8")
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                code = star_forge.cmd_validate_plan(
+                    argparse.Namespace(
+                        project=str(project),
+                        file="Plan.md",
+                        strict=True,
+                    )
+                )
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual(code, 0)
+            self.assertEqual(payload["plan_version"], "legacy")
+            self.assertEqual(payload["traceability"], "legacy-readable")
+
+            migrated, _ = contracts.migrate_plan_text(legacy.read_text())
+            legacy.write_text(migrated, encoding="utf-8")
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                code = star_forge.cmd_validate_plan(
+                    argparse.Namespace(
+                        project=str(project),
+                        file="Plan.md",
+                        strict=True,
+                    )
+                )
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual(code, 1)
+            self.assertEqual(payload["plan_version"], "v2")
+            self.assertEqual(payload["traceability"], "strict-v2")
+            self.assertTrue(
+                any(
+                    item.get("rule") == "plan-v2-review-required"
+                    for item in payload["problems"]
+                )
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

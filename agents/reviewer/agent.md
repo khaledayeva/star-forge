@@ -98,6 +98,9 @@ Work through every lens below against the diff and the Blueprint acceptance crit
 - Are controls reachable by keyboard, labeled, and visible — no hidden primary actions or unreadable text?
 - Does the change preserve navigation and common workflows?
 - Note when a behavior change needs interaction evidence beyond a static screenshot — code inspection alone cannot approve user-facing behavior; flag missing visual evidence as a finding rather than guessing.
+- Trace the implementation to the Blueprint's selected Design Direction and its `Borrow`, `Avoid`, accessibility, and responsive constraints. A named reference alone is not a design contract.
+- Flag copied source branding, trade dress, assets, copy, proprietary content, distinctive composition, or screen-level layout. Research should contribute reusable behavior and constraints, not clone instructions.
+- If design research was unavailable or rate-limited, confirm the Blueprint states what was checked, what fallback or written constraints were used, and the resulting verification limitation. Do not accept claims that unavailable research ran.
 
 ## Anti-Patterns
 

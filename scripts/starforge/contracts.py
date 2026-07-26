@@ -42,7 +42,21 @@ PLAN_V2_COLUMNS = (
     "Evidence",
 )
 PLAN_REVIEW_REQUIRED = "REVIEW_REQUIRED"
-
+PLAN_MAINTENANCE_EXEMPTION = "maintenance"
+PLAN_PROOF_KINDS = frozenset(
+    {
+        "unit",
+        "integration",
+        "browser",
+        "preview",
+        "native-ios",
+        "native-macos",
+        "security",
+        "github",
+        "package",
+        "delivery",
+    }
+)
 _LOCK_FIELDS = frozenset(
     {
         "schema",
@@ -52,6 +66,12 @@ _LOCK_FIELDS = frozenset(
     }
 )
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_AC_ID_RE = re.compile(r"AC-[1-9][0-9]*")
+_DOCUMENT_SUFFIXES = frozenset({".md", ".mdx", ".rst", ".txt"})
+_DOCUMENT_FILENAMES = frozenset({"changelog", "license", "readme"})
+_GENERIC_DELIVERY_TARGETS = frozenset(
+    {"source-only", "private-repo", "preview", "production", "package"}
+)
 
 
 class ContractError(ValueError):
@@ -165,6 +185,397 @@ def parse_plan_tasks_text(text: str) -> list[dict[str, Any]]:
                 }
             )
     return tasks
+
+
+def _markdown_section(text: str, title: str) -> str:
+    """Return one Markdown heading section without consuming peer sections."""
+    lines = text.splitlines()
+    wanted = title.strip().casefold()
+    start = -1
+    level = 0
+    for index, line in enumerate(lines):
+        match = re.match(r"^\s*(#{1,6})\s+(.+?)\s*#*\s*$", line)
+        if match and match.group(2).strip().casefold() == wanted:
+            start = index + 1
+            level = len(match.group(1))
+            break
+    if start < 0:
+        return ""
+    end = len(lines)
+    for index in range(start, len(lines)):
+        match = re.match(r"^\s*(#{1,6})\s+", lines[index])
+        if match and len(match.group(1)) <= level:
+            end = index
+            break
+    return "\n".join(lines[start:end])
+
+
+def _blueprint_field(text: str, name: str) -> str:
+    matches = re.finditer(
+        rf"^\s*[-*]\s*(?:\*\*)?{re.escape(name)}(?:\*\*)?\s*:\s*(.*?)\s*$",
+        text,
+        re.IGNORECASE | re.MULTILINE,
+    )
+    for match in matches:
+        value = match.group(1).strip().strip("`").strip()
+        if (
+            not value
+            or re.fullmatch(r"<[^>]+>", value)
+            or value.casefold()
+            in {"-", "n/a", "na", "none", "not applicable", "unresolved"}
+        ):
+            continue
+        return value
+    return ""
+
+
+def parse_blueprint_plan_contract(text: str) -> dict[str, Any]:
+    """Extract the Blueprint fields needed for Plan v2 validation."""
+    acceptance = _markdown_section(text, "Acceptance Criteria")
+    ac_mentions = re.findall(
+        r"^\s*[-*]\s*(?:\*\*)?(AC-[1-9][0-9]*)(?:\*\*)?\s*:",
+        acceptance,
+        re.MULTILINE,
+    )
+    counts: dict[str, int] = {}
+    for ac_id in ac_mentions:
+        counts[ac_id] = counts.get(ac_id, 0) + 1
+
+    delivery = _markdown_section(text, "Delivery Contract")
+    delivery_target = _blueprint_field(delivery, "Delivery target")
+    platform_target = _blueprint_field(
+        delivery,
+        "Platform-specific target, when selected",
+    )
+    project_class = _blueprint_field(text, "Project class")
+    target_platforms = _blueprint_field(text, "Target platforms")
+    github_requested = _blueprint_field(delivery, "GitHub requested").casefold()
+    return {
+        "ac_ids": tuple(counts),
+        "duplicate_ac_ids": tuple(
+            sorted(ac_id for ac_id, count in counts.items() if count > 1)
+        ),
+        "has_acceptance_criteria": bool(acceptance.strip()),
+        "has_delivery_contract": bool(delivery.strip()),
+        "delivery_target": delivery_target.casefold(),
+        "platform_target": platform_target.casefold(),
+        "project_class": project_class.casefold(),
+        "target_platforms": target_platforms.casefold(),
+        "github_requested": github_requested,
+    }
+
+
+def _comma_values(raw: Any) -> list[str]:
+    return [item.strip() for item in str(raw or "").split(",") if item.strip()]
+
+
+def _maintenance_task_owns_non_docs(task: Mapping[str, Any]) -> bool:
+    raw = str(task.get("files") or "")
+    for item in re.split(r"[,;]", raw):
+        value = item.strip()
+        if not value or value.casefold() in {"-", "n/a", "na", "none"}:
+            continue
+        path = Path(value)
+        if (
+            path.suffix.casefold() not in _DOCUMENT_SUFFIXES
+            and path.name.casefold() not in _DOCUMENT_FILENAMES
+        ):
+            return True
+    return False
+
+
+def _plan_problem(
+    message: str,
+    *,
+    rule: str,
+    task: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    return {
+        "severity": "high",
+        "rule": rule,
+        "task": task.get("id") if task else None,
+        "line": int(task.get("line") or 0) if task else 0,
+        "message": message,
+    }
+
+
+def _platform_tokens(contract: Mapping[str, Any]) -> str:
+    return " ".join(
+        str(contract.get(field) or "")
+        for field in (
+            "project_class",
+            "target_platforms",
+            "delivery_target",
+            "platform_target",
+        )
+    )
+
+
+def validate_plan_v2_contract(
+    blueprint_text: str,
+    tasks: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Validate Plan v2 traceability while leaving legacy Plans readable."""
+    if not tasks:
+        return []
+
+    versions = {str(task.get("plan_version") or "compatible") for task in tasks}
+    has_v2 = "v2" in versions
+    compatible_v2 = any(
+        task.get("plan_version") == "compatible"
+        and {"acs", "proof"}.issubset(
+            {str(header).strip().casefold() for header in task.get("headers") or []}
+        )
+        for task in tasks
+    )
+    if not has_v2 and not compatible_v2:
+        return []
+
+    problems: list[dict[str, Any]] = []
+    if versions != {"v2"}:
+        problems.append(
+            _plan_problem(
+                "Plan v2 validation requires every task table to use the exact "
+                "ten-column v2 schema; legacy and v2 tables cannot be mixed",
+                rule="plan-v2-schema",
+            )
+        )
+    v2_tasks = [task for task in tasks if task.get("plan_version") == "v2"]
+    if not v2_tasks:
+        return problems
+
+    contract = parse_blueprint_plan_contract(blueprint_text)
+    blueprint_acs = set(contract["ac_ids"])
+    if not contract["has_acceptance_criteria"] or not blueprint_acs:
+        problems.append(
+            _plan_problem(
+                "Plan v2 requires a Blueprint Acceptance Criteria section with "
+                "at least one `AC-n` criterion",
+                rule="blueprint-acs-missing",
+            )
+        )
+    for ac_id in contract["duplicate_ac_ids"]:
+        problems.append(
+            _plan_problem(
+                f"Blueprint criterion `{ac_id}` is defined more than once",
+                rule="blueprint-ac-duplicate",
+            )
+        )
+
+    covered: set[str] = set()
+    plan_proofs: set[str] = set()
+    for task in v2_tasks:
+        ac_values = _comma_values(task.get("acs"))
+        proof_values = _comma_values(task.get("proof"))
+        maintenance_values = [
+            value
+            for value in ac_values
+            if value.casefold() == PLAN_MAINTENANCE_EXEMPTION
+        ]
+        maintenance = bool(maintenance_values)
+
+        if any(value == PLAN_REVIEW_REQUIRED for value in ac_values + proof_values):
+            problems.append(
+                _plan_problem(
+                    "migrated Plan v2 fields marked REVIEW_REQUIRED must be "
+                    "resolved before strict validation",
+                    rule="plan-v2-review-required",
+                    task=task,
+                )
+            )
+
+        if maintenance:
+            if len(ac_values) != 1:
+                problems.append(
+                    _plan_problem(
+                        "a maintenance exemption must be the only value in ACs "
+                        "and cannot claim acceptance-criterion coverage",
+                        rule="maintenance-coverage",
+                        task=task,
+                    )
+                )
+            if str(task.get("mode") or "").casefold() != "docs":
+                problems.append(
+                    _plan_problem(
+                        "maintenance exemptions are limited to docs-mode tasks",
+                        rule="maintenance-mode",
+                        task=task,
+                    )
+                )
+            if _maintenance_task_owns_non_docs(task):
+                problems.append(
+                    _plan_problem(
+                        "a maintenance-exempt task cannot own code or "
+                        "configuration files",
+                        rule="maintenance-files",
+                        task=task,
+                    )
+                )
+        elif not ac_values:
+            problems.append(
+                _plan_problem(
+                    "Plan v2 task must reference at least one Blueprint criterion "
+                    f"or `{PLAN_MAINTENANCE_EXEMPTION}`",
+                    rule="task-acs-missing",
+                    task=task,
+                )
+            )
+
+        for ac_id in ac_values:
+            if ac_id.casefold() == PLAN_MAINTENANCE_EXEMPTION:
+                continue
+            if not _AC_ID_RE.fullmatch(ac_id) or ac_id not in blueprint_acs:
+                problems.append(
+                    _plan_problem(
+                        f"unknown Blueprint criterion `{ac_id}`",
+                        rule="task-ac-unknown",
+                        task=task,
+                    )
+                )
+            elif not maintenance:
+                covered.add(ac_id)
+
+        if not proof_values and not maintenance:
+            problems.append(
+                _plan_problem(
+                    "substantive Plan v2 task must name at least one Proof kind",
+                    rule="task-proof-missing",
+                    task=task,
+                )
+            )
+        seen_proofs: set[str] = set()
+        for proof in proof_values:
+            if proof not in PLAN_PROOF_KINDS:
+                problems.append(
+                    _plan_problem(
+                        f"unknown Proof kind `{proof}`; allowed values are "
+                        + ", ".join(sorted(PLAN_PROOF_KINDS)),
+                        rule="task-proof-unknown",
+                        task=task,
+                    )
+                )
+                continue
+            if proof in seen_proofs:
+                problems.append(
+                    _plan_problem(
+                        f"duplicate Proof kind `{proof}`",
+                        rule="task-proof-duplicate",
+                        task=task,
+                    )
+                )
+            seen_proofs.add(proof)
+            if not maintenance:
+                plan_proofs.add(proof)
+
+    for ac_id in sorted(blueprint_acs - covered, key=lambda value: int(value[3:])):
+        problems.append(
+            _plan_problem(
+                f"Blueprint criterion `{ac_id}` is not covered by a substantive task",
+                rule="blueprint-ac-uncovered",
+            )
+        )
+
+    delivery_target = str(contract["delivery_target"])
+    if not contract["has_delivery_contract"] or not delivery_target:
+        problems.append(
+            _plan_problem(
+                "Plan v2 requires an explicit Blueprint Delivery Contract target",
+                rule="delivery-target-missing",
+            )
+        )
+        return problems
+
+    required_proofs = {"delivery"}
+    if delivery_target == "preview":
+        required_proofs.add("preview")
+    elif delivery_target == "private-repo":
+        required_proofs.add("github")
+    elif delivery_target == "package":
+        required_proofs.add("package")
+    elif delivery_target == "platform-specific":
+        if not contract["platform_target"]:
+            problems.append(
+                _plan_problem(
+                    "platform-specific delivery requires a named platform target",
+                    rule="delivery-platform-missing",
+                )
+            )
+
+    platforms = _platform_tokens(contract)
+    has_ios = bool(re.search(r"\bios\b|iphone|ipad|app store", platforms))
+    mac_platform = bool(re.search(r"\bmacos\b|\bmac\b|mac app", platforms))
+    native_app = bool(
+        re.search(
+            r"\b(app|application|desktop|gui|native)\b",
+            " ".join(
+                [
+                    str(contract["project_class"]),
+                    str(contract["delivery_target"]),
+                    str(contract["platform_target"]),
+                ]
+            ),
+        )
+    )
+    has_macos = mac_platform and native_app
+    if has_ios:
+        required_proofs.add("native-ios")
+    if has_macos:
+        required_proofs.add("native-macos")
+    if contract["github_requested"] == "yes":
+        required_proofs.add("github")
+
+    for proof in sorted(required_proofs - plan_proofs):
+        message = (
+            "Plan v2 has no substantive delivery task with `delivery` proof"
+            if proof == "delivery"
+            else f"Blueprint contract requires Proof kind `{proof}`"
+        )
+        problems.append(
+            _plan_problem(
+                message,
+                rule="delivery-task-missing"
+                if proof == "delivery"
+                else "blueprint-proof-missing",
+            )
+        )
+
+    if delivery_target not in {"preview", "production"} and "preview" in plan_proofs:
+        problems.append(
+            _plan_problem(
+                f"Proof kind `preview` contradicts delivery target `{delivery_target}`",
+                rule="delivery-proof-contradiction",
+            )
+        )
+    platform_delivery = (
+        delivery_target == "platform-specific"
+        or delivery_target not in _GENERIC_DELIVERY_TARGETS
+    )
+    if (
+        delivery_target != "package"
+        and not platform_delivery
+        and "package" in plan_proofs
+    ):
+        problems.append(
+            _plan_problem(
+                f"Proof kind `package` contradicts delivery target `{delivery_target}`",
+                rule="delivery-proof-contradiction",
+            )
+        )
+    if "native-ios" in plan_proofs and not has_ios:
+        problems.append(
+            _plan_problem(
+                "Proof kind `native-ios` is not supported by the Blueprint platforms",
+                rule="blueprint-proof-contradiction",
+            )
+        )
+    if "native-macos" in plan_proofs and not has_macos:
+        problems.append(
+            _plan_problem(
+                "Proof kind `native-macos` is not supported by the Blueprint platforms",
+                rule="blueprint-proof-contradiction",
+            )
+        )
+    return problems
 
 
 def _escape_plan_cell(value: Any) -> str:

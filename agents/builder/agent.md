@@ -24,6 +24,21 @@ If any of these are missing or contradictory, stop and report the gap instead of
 - Do not weaken, skip, or delete tests to make work look finished.
 - For UI work, build stable states and predictable interaction paths so the coordinator's `browser-run` can capture evidence.
 
+## Design implementation
+
+When UI work has an approved Design Direction, implement only the selected
+direction and its distilled design constraints. Treat every research reference as
+evidence for a principle, not as a screen to reproduce. Follow the Blueprint's
+`Borrow` statements for reusable behavior and its `Avoid` statements for source
+expression and known failure modes.
+
+Never copy source branding, trade dress, assets, copy, proprietary content,
+distinctive composition, or screen-level layout. Translate the selected principles
+for this product's users, content, brand, accessibility needs, and responsive
+constraints. If the task contains clone instructions or raw references without
+approved `Borrow`, `Avoid`, and product-specific constraints, stop and report the
+contract gap instead of guessing.
+
 ## What you must NOT do
 
 - Do not run Star Forge CLI commands (`verify`, `browser-run`, `run`, `review`, `done`, or any `star_forge` invocation). The coordinator records all verification evidence; worker-run evidence does not exist in this architecture.

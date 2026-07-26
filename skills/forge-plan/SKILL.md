@@ -63,11 +63,74 @@ patterns, so do not bypass that route when it is available. Valid source classes
 include Mobbin, Figma, ImageGen, user-supplied references, other capable sources,
 and a documented unavailable state.
 
+#### Mobbin-first research
+
+When Mobbin is available, research there before using another source for
+real-world interaction patterns. Build concise queries from the product domain,
+target platform, primary user job, target flow, interaction pattern, and material
+constraints. Query the closest product, platform, and primary flow first; query
+the interaction pattern and constraints second; broaden to an adjacent flow only
+when the first queries do not produce enough relevant results. Use the
+host-discovered Mobbin tool schema and supported OAuth connection. Do not invent a
+tool name or call an undocumented REST endpoint.
+
+Aim for three to five grounded research candidates when the available results
+support that range. Do not pad the set with duplicates, irrelevant screens, or
+untraceable claims. Normalize every candidate into:
+
+- candidate id and source type
+- stable reference, or the most precise tool-returned identifier available
+- product class, platform, and observed flow
+- observed interaction or information-architecture pattern
+- why the pattern is relevant to this product
+- `Borrow`: the reusable principle or behavior
+- `Avoid`: copied expression, mismatch, or failure mode to reject
+- product-specific design and verification constraints
+
+The normalized fields are the provider-neutral research record. Provider response
+objects, commands, credentials, and schemas do not belong in the Blueprint.
+
+#### OAuth setup and failure handling
+
+Star Forge packages the optional registered Mobbin App. In Codex Desktop, if
+Mobbin reports that connection or authorization is required, tell the user to
+connect the Mobbin App in ChatGPT through its supported OAuth flow, then retry in
+Codex Desktop. In Codex CLI, the supported user-scoped setup is:
+
+```text
+codex mcp add mobbin --url https://api.mobbin.com/mcp
+codex mcp login mobbin
+```
+
+Never request, store, or commit a Mobbin API key or OAuth token. Never add a
+repository `.mcp.json`, manually persist credentials, or substitute an
+undocumented REST fallback.
+
+Treat authentication failure, permission failure, transport failure, empty
+results, and rate limits as explicit states. Do not retry a rate-limited query
+indefinitely and do not fabricate missing candidates. Preserve any grounded
+candidates already returned. If three distinct candidates remain, continue with
+them and record the limitation. Otherwise try accepted fallbacks in router order.
+If no capable source succeeds, record which capabilities and queries were checked,
+the exact unavailable or rate-limited state, the written constraints used instead,
+and the resulting confidence and verification limitation. Never imply that
+unavailable research ran.
+
+#### Original synthesis
+
+Turn research into principles, not clone instructions. `Borrow` may capture
+interaction behavior, hierarchy, pacing, progressive disclosure, feedback, or
+accessibility patterns. `Avoid` must reject copying source branding, trade dress,
+assets, copy, proprietary content, distinctive composition, or screen-level
+layout. Combine findings across candidates and translate them for this product's
+users, content, brand, and constraints. A direction that merely names or recreates
+one source is invalid.
+
 When capable sources or supplied references are available, present two or three
 materially distinct, grounded directions. Each direction must connect research
 findings to an original visual system, layout and interaction model, accessibility
-constraints, and responsive constraints. Do not present clone instructions or an
-ungrounded style label.
+constraints, responsive constraints, and explicit `Borrow` and `Avoid` statements.
+Do not present clone instructions or an ungrounded style label.
 
 When no capable source is available, record which capabilities were checked, why
 they were unavailable, the written constraints used instead, and the resulting

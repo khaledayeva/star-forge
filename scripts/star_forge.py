@@ -1448,6 +1448,32 @@ def validate_tasks(tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return problems
 
 
+def plan_contract_mode(tasks: Sequence[dict[str, Any]]) -> str:
+    versions = {str(task.get("plan_version") or "compatible") for task in tasks}
+    if not versions:
+        return "unknown"
+    if versions == {"legacy"}:
+        return "legacy"
+    if versions == {"v2"}:
+        return "v2"
+    if len(versions) == 1:
+        return next(iter(versions))
+    return "mixed"
+
+
+def validate_project_plan_contract(
+    project: Path,
+    tasks: Sequence[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Apply strict traceability only when Plan v2 is present."""
+    blueprint_path = project / BLUEPRINT_FILE
+    try:
+        blueprint_text = read_text(blueprint_path) if blueprint_path.exists() else ""
+    except (OSError, UnicodeDecodeError):
+        blueprint_text = ""
+    return project_contracts.validate_plan_v2_contract(blueprint_text, tasks)
+
+
 def ready_tasks(tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
     complete = {task["id"] for task in tasks if task["status"] == "complete"}
     ready: list[dict[str, Any]] = []
@@ -5007,6 +5033,7 @@ def cmd_complete_task(args: argparse.Namespace) -> int:
     tasks = parse_tasks(plan_path)
     task = next((item for item in tasks if item.get("id") == args.task), None)
     findings: list[dict[str, Any]] = []
+    findings.extend(validate_project_plan_contract(project, tasks))
     hash_problem = source_hash_unavailable_problem(project)
     _current_source_hash, snapshot_problem = try_source_hash(project)
     if hash_problem:
@@ -5074,6 +5101,7 @@ def done_payload(project: Path) -> dict[str, Any]:
         try:
             tasks = parse_tasks(plan_path)
             problems.extend(validate_tasks(tasks))
+            problems.extend(validate_project_plan_contract(project, tasks))
             parse_problem = plan_parse_problem(plan_path, tasks)
             if parse_problem:
                 problems.append({"severity": "critical", "message": parse_problem})
@@ -6134,10 +6162,26 @@ def cmd_validate_plan(args: argparse.Namespace) -> int:
             plan_path = project_path
     tasks = parse_tasks(plan_path)
     problems = validate_tasks(tasks)
+    problems.extend(validate_project_plan_contract(project, tasks))
     if not tasks:
         problems.append({"severity": "critical", "task": None, "line": 0, "message": plan_parse_problem(plan_path, tasks) or "Plan.md contains no parseable tasks"})
     blocking = [item for item in problems if item["severity"] in BLOCKING_SEVERITIES]
-    payload = {"schema": "star-forge.plan-validate.v1", "verdict": "PASS" if not blocking else "REQUEST_CHANGES", "task_count": len(tasks), "ready": [task["id"] for task in ready_tasks(tasks)], "problems": problems}
+    mode = plan_contract_mode(tasks)
+    if mode in {"v2", "mixed"}:
+        traceability = "strict-v2"
+    elif mode == "legacy":
+        traceability = "legacy-readable"
+    else:
+        traceability = "compatible-readable"
+    payload = {
+        "schema": "star-forge.plan-validate.v1",
+        "verdict": "PASS" if not blocking else "REQUEST_CHANGES",
+        "plan_version": mode,
+        "traceability": traceability,
+        "task_count": len(tasks),
+        "ready": [task["id"] for task in ready_tasks(tasks)],
+        "problems": problems,
+    }
     print(json.dumps(payload, indent=2))
     return 0 if payload["verdict"] == "PASS" or not args.strict else 1
 

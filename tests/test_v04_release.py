@@ -19,6 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 MANIFEST_PATH = ROOT / ".codex-plugin" / "plugin.json"
 MARKETPLACE_PATH = ROOT / ".agents" / "plugins" / "marketplace.json"
 RELEASE_CHECK = ROOT / "scripts" / "release-check.sh"
+MOBBIN_APP_ID = "asdk_app_69fdb9081018819193707354f21b366e"
 
 
 def load_json(path: Path) -> dict[str, Any]:
@@ -80,8 +81,13 @@ def test_manifest_has_complete_publisher_and_interface_metadata() -> None:
     assert manifest["license"] == "MIT"
     assert manifest["skills"] == "./skills/"
     assert "hooks" not in manifest
-    assert "apps" not in manifest
+    assert manifest["apps"] == "./.app.json"
     assert "mcpServers" not in manifest
+    app_manifest_path = (ROOT / manifest["apps"]).resolve()
+    assert app_manifest_path == (ROOT / ".app.json").resolve()
+    assert load_json(app_manifest_path) == {
+        "apps": {"mobbin": {"id": MOBBIN_APP_ID}}
+    }
 
     interface = manifest["interface"]
     for field in (

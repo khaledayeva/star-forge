@@ -18,6 +18,10 @@ DECISION_DOC = ROOT / "docs" / "decisions" / "mobbin-integration.md"
 PLUGIN_MANIFEST = ROOT / ".codex-plugin" / "plugin.json"
 APP_MANIFEST = ROOT / ".app.json"
 MCP_MANIFEST = ROOT / ".mcp.json"
+CAPABILITY_ROUTING = ROOT / "config" / "capability-routing.json"
+FORGE_PLAN_SKILL = ROOT / "skills" / "forge-plan" / "SKILL.md"
+BUILDER_AGENT = ROOT / "agents" / "builder" / "agent.md"
+REVIEWER_AGENT = ROOT / "agents" / "reviewer" / "agent.md"
 
 APP_ID = "asdk_app_69fdb9081018819193707354f21b366e"
 MCP_URL = "https://api.mobbin.com/mcp"
@@ -80,20 +84,130 @@ def test_expected_app_manifest_is_minimal_and_optional() -> None:
     assert MCP_URL not in serialized
 
 
-def test_package_uses_at_most_the_selected_surface() -> None:
+def test_package_uses_only_the_selected_surface() -> None:
     expected = load_json(FIXTURES / "expected-app-manifest.json")
     manifest = load_json(PLUGIN_MANIFEST)
 
     assert not MCP_MANIFEST.exists(), "Mobbin must not be packaged through .mcp.json"
     assert "mcpServers" not in manifest
+    assert load_json(APP_MANIFEST) == expected
+    assert manifest.get("apps") == "./.app.json"
 
-    if APP_MANIFEST.exists():
-        assert load_json(APP_MANIFEST) == expected
-        assert manifest.get("apps") == "./.app.json"
-    else:
-        assert "apps" not in manifest, (
-            "plugin.json must not advertise the app surface before .app.json exists"
-        )
+
+def test_capability_route_is_mobbin_first_and_oauth_only() -> None:
+    catalog = load_json(CAPABILITY_ROUTING)
+    route = next(
+        item for item in catalog["routes"] if item["id"] == "ui-pattern-discovery"
+    )
+    mobbin = route["options"][0]
+    assert mobbin["id"] == "mobbin-mcp"
+    assert mobbin["kind"] == "mcp"
+    assert mobbin["auth"] == "oauth"
+    assert mobbin["connection"] == {
+        "package_surface": ".app.json",
+        "app_id": APP_ID,
+        "desktop_credentials": "chatgpt-app-connection",
+        "cli_add_command": f"codex mcp add mobbin --url {MCP_URL}",
+        "cli_login_command": "codex mcp login mobbin",
+        "repository_credentials_allowed": False,
+        "rest_fallback_allowed": False,
+    }
+    assert mobbin["research"] == {
+        "priority": "preferred",
+        "query_order": [
+            "product-platform-primary-flow",
+            "interaction-pattern-and-constraints",
+            "broader-adjacent-flow-if-needed",
+        ],
+        "candidate_minimum": 3,
+        "candidate_maximum": 5,
+    }
+    assert [item["id"] for item in route["options"][1:]] == [
+        "figma-plugin",
+        "imagegen",
+        "supplied-design-references",
+        "design-research-unavailable",
+    ]
+
+
+def test_plan_skill_uses_mobbin_first_queries_and_normalized_candidates() -> None:
+    text = FORGE_PLAN_SKILL.read_text(encoding="utf-8")
+    normalized = " ".join(text.split())
+    assert "#### Mobbin-first research" in text
+    assert "research there before using another source" in normalized
+    for query_input in (
+        "product domain",
+        "target platform",
+        "primary user job",
+        "target flow",
+        "interaction pattern",
+        "material constraints",
+    ):
+        assert query_input in normalized, query_input
+    assert "three to five grounded research candidates" in normalized
+    assert "Do not pad the set with duplicates" in text
+    for candidate_field in (
+        "candidate id and source type",
+        "stable reference",
+        "product class, platform, and observed flow",
+        "observed interaction or information-architecture pattern",
+        "why the pattern is relevant",
+        "`Borrow`",
+        "`Avoid`",
+        "product-specific design and verification constraints",
+    ):
+        assert candidate_field in text, candidate_field
+    assert "The normalized fields are the provider-neutral research record" in text
+
+
+def test_plan_skill_gives_supported_oauth_setup_and_explicit_failure_states() -> None:
+    text = FORGE_PLAN_SKILL.read_text(encoding="utf-8")
+    normalized = " ".join(text.split())
+    assert "connect the Mobbin App in ChatGPT" in normalized
+    assert f"codex mcp add mobbin --url {MCP_URL}" in text
+    assert "codex mcp login mobbin" in text
+    for forbidden in (
+        "request, store, or commit a Mobbin API key",
+        "repository `.mcp.json`",
+        "undocumented REST fallback",
+    ):
+        assert forbidden in text, forbidden
+    for state in (
+        "authentication failure",
+        "permission failure",
+        "transport failure",
+        "empty results",
+        "rate limits",
+    ):
+        assert state in normalized, state
+    assert "do not fabricate missing candidates" in normalized
+    assert "Otherwise try accepted fallbacks in router order" in text
+    assert "Never imply that unavailable research ran" in text
+
+
+def test_originality_constraints_reach_planners_builders_and_reviewers() -> None:
+    plan = FORGE_PLAN_SKILL.read_text(encoding="utf-8")
+    builder = BUILDER_AGENT.read_text(encoding="utf-8")
+    reviewer = REVIEWER_AGENT.read_text(encoding="utf-8")
+    combined = "\n".join((plan, builder, reviewer))
+    for token in (
+        "`Borrow`",
+        "`Avoid`",
+        "source branding",
+        "trade dress",
+        "assets",
+        "copy",
+        "proprietary content",
+        "distinctive composition",
+        "screen-level layout",
+    ):
+        assert token in combined, token
+    assert "principle, not as a screen to reproduce" in builder
+    assert "contract gap instead of guessing" in builder
+    assert "Research should contribute reusable behavior and constraints" in reviewer
+    assert "Do not accept claims that unavailable research ran" in reviewer
+    assert "single complete Blueprint approval" in plan
+    assert "never a second\napproval gate" in plan
 
 
 def test_plugin_scope_evidence_captures_duplicate_registration_risk() -> None:

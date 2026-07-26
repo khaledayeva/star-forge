@@ -19,6 +19,7 @@
     "software-factory"
   ],
   "skills": "./skills/",
+  "apps": "./.app.json",
   "interface": {
     "displayName": "Star Forge",
     "shortDescription": "Interview, plan, build, verify, review, and deliver software through one Forge Loop.",

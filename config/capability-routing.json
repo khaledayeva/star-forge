@@ -49,7 +49,26 @@
           "label": "Mobbin MCP",
           "kind": "mcp",
           "aliases": ["mobbin", "mobbin mcp"],
-          "auth": "oauth"
+          "auth": "oauth",
+          "connection": {
+            "package_surface": ".app.json",
+            "app_id": "asdk_app_69fdb9081018819193707354f21b366e",
+            "desktop_credentials": "chatgpt-app-connection",
+            "cli_add_command": "codex mcp add mobbin --url https://api.mobbin.com/mcp",
+            "cli_login_command": "codex mcp login mobbin",
+            "repository_credentials_allowed": false,
+            "rest_fallback_allowed": false
+          },
+          "research": {
+            "priority": "preferred",
+            "query_order": [
+              "product-platform-primary-flow",
+              "interaction-pattern-and-constraints",
+              "broader-adjacent-flow-if-needed"
+            ],
+            "candidate_minimum": 3,
+            "candidate_maximum": 5
+          }
         },
         {
           "id": "figma-plugin",
