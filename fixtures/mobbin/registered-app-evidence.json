@@ -1,0 +1,23 @@
+{
+  "schema": "star-forge.registered-app-evidence.v1",
+  "captured_at": "2026-07-26",
+  "source": {
+    "product": "Codex Desktop",
+    "version": "0.139.0",
+    "method": "app/list",
+    "force_refetch": true
+  },
+  "record": {
+    "id": "asdk_app_69fdb9081018819193707354f21b366e",
+    "name": "Mobbin",
+    "description": "Find UI & UX design references",
+    "distribution_channel": "ECOSYSTEM_DIRECTORY",
+    "categories": [
+      "DESIGN"
+    ],
+    "install_url": "https://chatgpt.com/apps/mobbin/asdk_app_69fdb9081018819193707354f21b366e",
+    "is_enabled": true,
+    "is_accessible": false,
+    "accessibility_is_user_specific": true
+  }
+}

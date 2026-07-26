@@ -1,0 +1,605 @@
+{
+  "schema": "star-forge.capability-routing.v1",
+  "preference_order": {
+    "plugin": 10,
+    "mcp": 10,
+    "native": 20,
+    "computer-use": 30,
+    "shell": 40,
+    "blocker": 50
+  },
+  "policy": {
+    "installation": "suggest-only",
+    "requires_user_action": true,
+    "unknown_capability": "unavailable",
+    "missing_capability": "report-with-fallback"
+  },
+  "routes": [
+    {
+      "id": "openai-api-guidance",
+      "purpose": "Requirements and OpenAI API work",
+      "selectors": {
+        "project_classes": ["openai-api", "chatgpt-app"],
+        "blueprint_flags": ["uses_openai_api"]
+      },
+      "options": [
+        {
+          "id": "openai-docs",
+          "label": "OpenAI Docs",
+          "kind": "plugin",
+          "aliases": ["openai-docs", "openai docs"]
+        },
+        {
+          "id": "official-openai-documentation",
+          "label": "Official OpenAI documentation lookup",
+          "kind": "native",
+          "aliases": ["official openai docs", "official documentation lookup"]
+        }
+      ]
+    },
+    {
+      "id": "ui-pattern-discovery",
+      "purpose": "UI pattern discovery",
+      "selectors": {
+        "blueprint_flags": ["ui", "design_research", "mobbin_research"]
+      },
+      "options": [
+        {
+          "id": "mobbin-mcp",
+          "label": "Mobbin MCP",
+          "kind": "mcp",
+          "aliases": ["mobbin", "mobbin mcp"],
+          "auth": "oauth"
+        },
+        {
+          "id": "figma-plugin",
+          "label": "Figma plugin",
+          "kind": "plugin",
+          "aliases": ["figma", "figma plugin"],
+          "install": {
+            "plugin_id": "figma@openai-curated-remote",
+            "requires_user_action": true
+          }
+        },
+        {
+          "id": "imagegen",
+          "label": "ImageGen",
+          "kind": "plugin",
+          "aliases": ["imagegen", "image generation"]
+        },
+        {
+          "id": "supplied-design-references",
+          "label": "User-supplied design references",
+          "kind": "native",
+          "aliases": ["supplied references", "attached design references"]
+        },
+        {
+          "id": "design-research-unavailable",
+          "label": "Documented design-research unavailable state",
+          "kind": "blocker",
+          "always_available": true
+        }
+      ]
+    },
+    {
+      "id": "existing-design-implementation",
+      "purpose": "Existing design implementation",
+      "selectors": {
+        "blueprint_flags": ["existing_design", "figma_source"]
+      },
+      "options": [
+        {
+          "id": "figma-plugin",
+          "label": "Figma plugin",
+          "kind": "plugin",
+          "aliases": ["figma", "figma plugin"],
+          "install": {
+            "plugin_id": "figma@openai-curated-remote",
+            "requires_user_action": true
+          }
+        },
+        {
+          "id": "supplied-design-exports",
+          "label": "Supplied exports with visual inspection",
+          "kind": "native",
+          "aliases": ["supplied design exports", "visual inspection"]
+        },
+        {
+          "id": "existing-design-unavailable",
+          "label": "Existing design source unavailable blocker",
+          "kind": "blocker",
+          "always_available": true
+        }
+      ]
+    },
+    {
+      "id": "original-visual-concepts",
+      "purpose": "Original visual concepts",
+      "selectors": {
+        "blueprint_flags": ["original_visuals", "image_generation"]
+      },
+      "options": [
+        {
+          "id": "imagegen",
+          "label": "ImageGen",
+          "kind": "plugin",
+          "aliases": ["imagegen", "image generation"]
+        },
+        {
+          "id": "structured-visual-directions",
+          "label": "Structured written design directions",
+          "kind": "native",
+          "always_available": true
+        }
+      ]
+    },
+    {
+      "id": "web-implementation",
+      "purpose": "Web implementation",
+      "selectors": {
+        "project_classes": ["web", "nextjs", "react", "full-stack-web"]
+      },
+      "options": [
+        {
+          "id": "build-web-apps",
+          "label": "Build Web Apps",
+          "kind": "plugin",
+          "aliases": ["build-web-apps", "build web apps", "frontend app builder"]
+        },
+        {
+          "id": "repository-web-guidance",
+          "label": "Repository-native framework guidance",
+          "kind": "shell",
+          "always_available": true,
+          "safe": true
+        }
+      ]
+    },
+    {
+      "id": "react-next-quality",
+      "purpose": "React and Next.js quality",
+      "selectors": {
+        "project_classes": ["nextjs", "react"],
+        "blueprint_flags": ["react_quality"]
+      },
+      "options": [
+        {
+          "id": "react-best-practices",
+          "label": "React best practices",
+          "kind": "plugin",
+          "aliases": ["react-best-practices", "react best practices", "nextjs"]
+        },
+        {
+          "id": "framework-tests-review",
+          "label": "Framework tests and review",
+          "kind": "shell",
+          "always_available": true,
+          "safe": true
+        }
+      ]
+    },
+    {
+      "id": "component-systems",
+      "purpose": "Component systems",
+      "selectors": {
+        "blueprint_flags": ["component_system", "shadcn"]
+      },
+      "options": [
+        {
+          "id": "shadcn",
+          "label": "shadcn",
+          "kind": "plugin",
+          "aliases": ["shadcn", "shadcn ui"]
+        },
+        {
+          "id": "existing-design-system",
+          "label": "Existing design system",
+          "kind": "native",
+          "aliases": ["existing design system"]
+        },
+        {
+          "id": "component-system-unavailable",
+          "label": "Component-system decision blocker",
+          "kind": "blocker",
+          "always_available": true
+        }
+      ]
+    },
+    {
+      "id": "payments",
+      "purpose": "Payments",
+      "selectors": {
+        "blueprint_flags": ["payments", "stripe"]
+      },
+      "options": [
+        {
+          "id": "stripe-guidance",
+          "label": "Stripe guidance",
+          "kind": "plugin",
+          "aliases": ["stripe", "stripe best practices", "payments"]
+        },
+        {
+          "id": "provider-docs-security-review",
+          "label": "Provider documentation and security review",
+          "kind": "native",
+          "aliases": ["payment provider docs"]
+        },
+        {
+          "id": "payments-unavailable",
+          "label": "Payment integration unavailable blocker",
+          "kind": "blocker",
+          "always_available": true
+        }
+      ]
+    },
+    {
+      "id": "postgres-data",
+      "purpose": "Postgres and backend data",
+      "selectors": {
+        "blueprint_flags": ["postgres", "supabase", "database"]
+      },
+      "options": [
+        {
+          "id": "supabase-postgres-guidance",
+          "label": "Supabase and Postgres guidance",
+          "kind": "plugin",
+          "aliases": ["supabase", "postgres best practices", "supabase postgres"]
+        },
+        {
+          "id": "repository-database-tooling",
+          "label": "Repository-native database tooling",
+          "kind": "shell",
+          "always_available": true,
+          "safe": true
+        }
+      ]
+    },
+    {
+      "id": "local-web-qa",
+      "purpose": "Local web QA",
+      "selectors": {
+        "project_classes": ["web", "nextjs", "react", "full-stack-web"],
+        "proof_kinds": ["browser"]
+      },
+      "options": [
+        {
+          "id": "in-app-browser",
+          "label": "In-app Browser",
+          "kind": "plugin",
+          "aliases": ["browser", "in-app browser", "browser plugin"]
+        },
+        {
+          "id": "playwright-collector",
+          "label": "Playwright collector",
+          "kind": "shell",
+          "aliases": ["playwright", "local playwright"],
+          "safe": true
+        },
+        {
+          "id": "web-qa-unavailable",
+          "label": "Local web QA unavailable blocker",
+          "kind": "blocker",
+          "always_available": true
+        }
+      ]
+    },
+    {
+      "id": "authenticated-browser-state",
+      "purpose": "Authenticated browser state",
+      "selectors": {
+        "blueprint_flags": ["authenticated_browser", "extension_state"]
+      },
+      "options": [
+        {
+          "id": "chrome",
+          "label": "Chrome",
+          "kind": "plugin",
+          "aliases": ["chrome", "chrome plugin"]
+        },
+        {
+          "id": "in-app-browser",
+          "label": "In-app Browser",
+          "kind": "plugin",
+          "aliases": ["browser", "in-app browser", "browser plugin"]
+        },
+        {
+          "id": "authenticated-browser-unavailable",
+          "label": "Authenticated browser unavailable blocker",
+          "kind": "blocker",
+          "always_available": true
+        }
+      ]
+    },
+    {
+      "id": "general-gui-qa",
+      "purpose": "General GUI QA",
+      "selectors": {
+        "blueprint_flags": ["gui_qa"],
+        "proof_kinds": ["gui"]
+      },
+      "options": [
+        {
+          "id": "computer-use",
+          "label": "Computer Use",
+          "kind": "computer-use",
+          "aliases": ["computer use", "computer-use"]
+        },
+        {
+          "id": "platform-specific-ui-tool",
+          "label": "Platform-specific UI tool",
+          "kind": "shell",
+          "aliases": ["platform ui tool"],
+          "safe": true
+        },
+        {
+          "id": "manual-gui-blocker",
+          "label": "Manual GUI blocker",
+          "kind": "blocker",
+          "always_available": true
+        }
+      ]
+    },
+    {
+      "id": "ios-implementation",
+      "purpose": "iOS implementation",
+      "selectors": {
+        "project_classes": ["ios"]
+      },
+      "options": [
+        {
+          "id": "build-ios-apps",
+          "label": "Build iOS Apps",
+          "kind": "plugin",
+          "aliases": ["build-ios-apps", "build ios apps"]
+        },
+        {
+          "id": "xcode-project-workflow",
+          "label": "Swift and Xcode project-native workflow",
+          "kind": "shell",
+          "always_available": true,
+          "safe": true
+        }
+      ]
+    },
+    {
+      "id": "ios-verification",
+      "purpose": "iOS verification",
+      "selectors": {
+        "project_classes": ["ios"],
+        "proof_kinds": ["native-ios"]
+      },
+      "options": [
+        {
+          "id": "xcodebuildmcp",
+          "label": "XcodeBuildMCP",
+          "kind": "mcp",
+          "aliases": ["xcodebuildmcp", "xcode build mcp"]
+        },
+        {
+          "id": "ios-simulator-browser",
+          "label": "iOS Simulator Browser",
+          "kind": "plugin",
+          "aliases": ["ios simulator browser", "simulator browser"]
+        },
+        {
+          "id": "ios-verification-unavailable",
+          "label": "iOS verification unavailable blocker",
+          "kind": "blocker",
+          "always_available": true
+        }
+      ]
+    },
+    {
+      "id": "macos-implementation",
+      "purpose": "macOS implementation and verification",
+      "selectors": {
+        "project_classes": ["macos"],
+        "proof_kinds": ["native-macos"]
+      },
+      "options": [
+        {
+          "id": "build-macos-apps",
+          "label": "Build macOS Apps",
+          "kind": "plugin",
+          "aliases": ["build-macos-apps", "build macos apps"]
+        },
+        {
+          "id": "computer-use",
+          "label": "Computer Use",
+          "kind": "computer-use",
+          "aliases": ["computer use", "computer-use"]
+        },
+        {
+          "id": "macos-project-workflow",
+          "label": "Swift, Xcode, or SwiftPM workflow",
+          "kind": "shell",
+          "always_available": true,
+          "safe": true
+        }
+      ]
+    },
+    {
+      "id": "react-native",
+      "purpose": "React Native implementation",
+      "selectors": {
+        "project_classes": ["react-native", "expo"]
+      },
+      "options": [
+        {
+          "id": "expo-plugin",
+          "label": "Expo plugin",
+          "kind": "plugin",
+          "aliases": ["expo", "expo plugin"]
+        },
+        {
+          "id": "expo-cli",
+          "label": "Repository-native Expo CLI workflow",
+          "kind": "shell",
+          "aliases": ["expo cli"],
+          "safe": true
+        },
+        {
+          "id": "react-native-unavailable",
+          "label": "React Native workflow unavailable blocker",
+          "kind": "blocker",
+          "always_available": true
+        }
+      ]
+    },
+    {
+      "id": "security",
+      "purpose": "Security review",
+      "selectors": {
+        "blueprint_flags": ["security_sensitive", "privacy_sensitive"],
+        "proof_kinds": ["security"]
+      },
+      "options": [
+        {
+          "id": "codex-security",
+          "label": "Codex Security",
+          "kind": "plugin",
+          "aliases": ["codex security", "security plugin"]
+        },
+        {
+          "id": "security-reviewer",
+          "label": "Dependency scanners and security reviewer",
+          "kind": "native",
+          "always_available": true
+        }
+      ]
+    },
+    {
+      "id": "github-lifecycle",
+      "purpose": "GitHub lifecycle",
+      "selectors": {
+        "blueprint_flags": ["github", "private_repository", "pull_request"],
+        "proof_kinds": ["github"],
+        "delivery_targets": ["github"]
+      },
+      "options": [
+        {
+          "id": "github-plugin",
+          "label": "GitHub plugin",
+          "kind": "plugin",
+          "aliases": ["github", "github plugin"]
+        },
+        {
+          "id": "gh-readonly",
+          "label": "Read-only gh workflow",
+          "kind": "shell",
+          "aliases": ["gh", "github cli"],
+          "safe": true
+        },
+        {
+          "id": "github-mutation-blocker",
+          "label": "GitHub mutation authorization blocker",
+          "kind": "blocker",
+          "always_available": true
+        }
+      ]
+    },
+    {
+      "id": "sites-delivery",
+      "purpose": "Simple or internal hosting",
+      "selectors": {
+        "delivery_targets": ["sites"]
+      },
+      "options": [
+        {
+          "id": "sites",
+          "label": "Sites",
+          "kind": "plugin",
+          "aliases": ["sites", "openai sites"]
+        },
+        {
+          "id": "source-only-handoff",
+          "label": "Source-only handoff",
+          "kind": "native",
+          "always_available": true
+        }
+      ]
+    },
+    {
+      "id": "vercel-delivery",
+      "purpose": "Production web hosting",
+      "selectors": {
+        "delivery_targets": ["vercel"]
+      },
+      "options": [
+        {
+          "id": "vercel",
+          "label": "Vercel",
+          "kind": "plugin",
+          "aliases": ["vercel", "vercel plugin"]
+        },
+        {
+          "id": "contract-selected-provider",
+          "label": "Contract-selected provider",
+          "kind": "native",
+          "aliases": ["selected hosting provider"]
+        },
+        {
+          "id": "source-only-handoff",
+          "label": "Source-only handoff",
+          "kind": "native",
+          "always_available": true
+        }
+      ]
+    },
+    {
+      "id": "ai-sdk-applications",
+      "purpose": "AI SDK applications",
+      "selectors": {
+        "blueprint_flags": ["vercel_ai_sdk", "ai_gateway"]
+      },
+      "options": [
+        {
+          "id": "vercel-ai-sdk",
+          "label": "Vercel AI SDK and AI Gateway",
+          "kind": "plugin",
+          "aliases": ["vercel ai sdk", "ai gateway"]
+        },
+        {
+          "id": "openai-sdk",
+          "label": "OpenAI SDK with official docs",
+          "kind": "native",
+          "aliases": ["openai sdk"]
+        },
+        {
+          "id": "ai-sdk-guidance-unavailable",
+          "label": "AI SDK guidance unavailable blocker",
+          "kind": "blocker",
+          "always_available": true
+        }
+      ]
+    },
+    {
+      "id": "chatgpt-applications",
+      "purpose": "ChatGPT applications",
+      "selectors": {
+        "project_classes": ["chatgpt-app"],
+        "blueprint_flags": ["chatgpt_app"]
+      },
+      "options": [
+        {
+          "id": "openai-app-guidance",
+          "label": "Relevant OpenAI app guidance",
+          "kind": "plugin",
+          "aliases": ["openai app guidance", "apps sdk"]
+        },
+        {
+          "id": "official-openai-documentation",
+          "label": "Official OpenAI documentation",
+          "kind": "native",
+          "aliases": ["official openai docs"]
+        },
+        {
+          "id": "chatgpt-guidance-unavailable",
+          "label": "ChatGPT guidance unavailable blocker",
+          "kind": "blocker",
+          "always_available": true
+        }
+      ]
+    }
+  ]
+}

@@ -1,10 +1,13 @@
 {
   "name": "star-forge",
-  "version": "0.3.0+codex.20260623224052",
-  "description": "A Codex-native software factory that plans, builds with sub-agents, reviews, and proves completion from git facts.",
+  "version": "0.3.0+codex.20260726010515",
+  "description": "A Codex-native software factory that interviews, plans, builds, verifies, reviews, and delivers complete software.",
   "author": {
-    "name": "Khaled Ayeva"
+    "name": "Khaled Ayeva",
+    "url": "https://github.com/khaledayeva"
   },
+  "homepage": "https://github.com/khaledayeva/star-forge#readme",
+  "repository": "https://github.com/khaledayeva/star-forge",
   "license": "MIT",
   "keywords": [
     "codex",
@@ -12,21 +15,24 @@
     "planning",
     "sub-agents",
     "review",
+    "delivery",
     "software-factory"
   ],
   "skills": "./skills/",
   "interface": {
     "displayName": "Star Forge",
-    "shortDescription": "Plan, build with sub-agents, review, and prove completion from git facts through the Forge Loop.",
-    "longDescription": "Star Forge is a Codex-native software factory built on the Forge Loop: plan (Blueprint with acceptance criteria, one approval) -> build (sub-agent builders, coordinator-recorded verify and browser-run evidence) -> review (reviewer agents write findings that feed a fix queue the completion gate consumes) -> done (a predicate computed from git tree state, never a recorded claim). Post-completion edits automatically reopen the project as an amendment. Hooks observe and re-anchor across compaction; they never block, and local hook ledgers are diagnostic rather than trusted completion witnesses. Live collectors supply task-scoped browser, preview, GitHub PR, native, and security proof artifacts. Lessons compound across projects via a global learnings store.",
+    "shortDescription": "Interview, plan, build, verify, review, and deliver software through one Forge Loop.",
+    "longDescription": "Star Forge is a lean Codex-native software factory. One Forge Loop turns an objective into an approved Blueprint, routes work through the most specific available capabilities, coordinates task-scoped builders, records source-bound verification, runs adaptive review, and satisfies an explicit delivery contract. Existing projects can be resumed safely, while post-completion changes reopen only their affected scope. Hook ledgers remain diagnostic rather than trusted completion witnesses.",
     "developerName": "Khaled Ayeva",
     "category": "Productivity",
     "capabilities": [
+      "Interactive",
       "Read",
       "Write",
       "Review",
       "Workflow"
     ],
+    "websiteURL": "https://github.com/khaledayeva/star-forge",
     "defaultPrompt": [
       "$forge build this idea end to end",
       "$forge resume where we left off",
@@ -34,6 +40,7 @@
     ],
     "brandColor": "#F59E0B",
     "composerIcon": "./assets/star-forge-icon.svg",
-    "logo": "./assets/star-forge-logo.svg"
+    "logo": "./assets/star-forge-logo.svg",
+    "screenshots": []
   }
 }

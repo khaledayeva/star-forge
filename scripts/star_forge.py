@@ -35,6 +35,7 @@ if str(SCRIPT_DIR) not in sys.path:
 
 from live_collectors import common as live_common
 from live_collectors import native_macos as native_macos_collector
+from starforge import doctor as installation_doctor
 
 
 SF_VERSION = "0.3.0"
@@ -6070,6 +6071,25 @@ def cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_doctor(args: argparse.Namespace) -> int:
+    """Inspect Codex installation state without mutating it."""
+    codex_home = Path(
+        args.codex_home
+        or os.environ.get("CODEX_HOME")
+        or (Path.home() / ".codex")
+    )
+    source_root = Path(args.source_root) if args.source_root else plugin_root()
+    active_root = Path(args.active_plugin_root) if args.active_plugin_root else None
+    payload = installation_doctor.diagnose_installation(
+        codex_home=codex_home,
+        source_root=source_root,
+        runtime_version=SF_VERSION,
+        active_plugin_root=active_root,
+    )
+    print(json.dumps(payload, indent=2))
+    return installation_doctor.doctor_exit_code(payload, strict=args.strict)
+
+
 def cmd_validate_plan(args: argparse.Namespace) -> int:
     raw = Path(args.file)
     project = resolve_project(args.project)
@@ -6479,6 +6499,13 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("status", help="Read-only Star Forge state (no mutation)")
     p.add_argument("--project", default=".")
     p.set_defaults(func=cmd_status)
+
+    p = sub.add_parser("doctor", help="Read-only Codex installation diagnostics")
+    p.add_argument("--codex-home", default="")
+    p.add_argument("--source-root", "--plugin-root", dest="source_root", default="")
+    p.add_argument("--active-plugin-root", default="")
+    p.add_argument("--strict", action="store_true")
+    p.set_defaults(func=cmd_doctor)
 
     p = sub.add_parser("verify", help="Run and record a Star Forge-owned verification command")
     p.add_argument("--project", default=".")

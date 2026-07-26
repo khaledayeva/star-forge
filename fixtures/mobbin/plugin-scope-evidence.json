@@ -1,0 +1,38 @@
+{
+  "schema": "star-forge.mobbin-plugin-scope-evidence.v1",
+  "official_codex_source": {
+    "plugin_loader": "https://github.com/openai/codex/blob/main/codex-rs/core-plugins/src/loader.rs",
+    "mcp_catalog": "https://github.com/openai/codex/blob/main/codex-rs/codex-mcp/src/catalog.rs",
+    "mcp_catalog_tests": "https://github.com/openai/codex/blob/main/codex-rs/codex-mcp/src/catalog_tests.rs"
+  },
+  "observed_rules": [
+    {
+      "case": "registered-app-binding",
+      "packaged_surface": ".app.json",
+      "mcp_registrations_added": 0,
+      "credential_path": "ChatGPT app connection",
+      "result": "selected"
+    },
+    {
+      "case": "plugin-mcp-only",
+      "packaged_surface": ".mcp.json",
+      "mcp_registrations_added": 1,
+      "credential_path": "plugin MCP OAuth",
+      "result": "separate-plugin-registration"
+    },
+    {
+      "case": "plugin-and-config-same-name",
+      "plugin_server_name": "mobbin",
+      "config_server_name": "mobbin",
+      "winner": "config",
+      "result": "plugin-registration-shadowed"
+    },
+    {
+      "case": "plugin-and-config-different-names",
+      "plugin_server_name": "star-forge-mobbin",
+      "config_server_name": "mobbin",
+      "active_registrations": 2,
+      "result": "duplicate-remote-connection-risk"
+    }
+  ]
+}

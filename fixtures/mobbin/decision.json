@@ -1,0 +1,27 @@
+{
+  "schema": "star-forge.mobbin-integration-decision.v1",
+  "acceptance_criterion": "AC-10",
+  "selected_surface": ".app.json",
+  "rejected_surface": ".mcp.json",
+  "app_key": "mobbin",
+  "registered_app_id": "asdk_app_69fdb9081018819193707354f21b366e",
+  "app_required": false,
+  "mcp": {
+    "url": "https://api.mobbin.com/mcp",
+    "transport": "streamable-http",
+    "authorization": "oauth",
+    "repository_api_key_allowed": false,
+    "rest_fallback_allowed": false
+  },
+  "codex_app": {
+    "credential_source": "chatgpt-app-connection",
+    "setup_surface": "ChatGPT",
+    "plugin_adds_separate_mcp_registration": false
+  },
+  "codex_cli": {
+    "add_command": "codex mcp add mobbin --url https://api.mobbin.com/mcp",
+    "login_command": "codex mcp login mobbin",
+    "scope": "user-configured",
+    "packaged_by_plugin": false
+  }
+}
