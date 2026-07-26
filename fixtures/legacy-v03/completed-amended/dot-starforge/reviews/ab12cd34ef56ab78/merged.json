@@ -1,0 +1,40 @@
+{
+  "created_at": "2026-06-20T18:00:00Z",
+  "file_problems": [],
+  "findings": [
+    {
+      "detail": "The empty state is explicit and covered by the fixture test.",
+      "file": "src/app.py",
+      "fingerprint": "src/app.py:1:empty-state-explicit",
+      "id": "legacy-note-1",
+      "line": 5,
+      "role": "correctness",
+      "severity": "low",
+      "suggested_fix": "",
+      "title": "Empty state remains explicit",
+      "waived": false
+    }
+  ],
+  "fix_queue": [],
+  "missing_review_roles": [],
+  "project": ".",
+  "required_review_roles": [
+    "correctness",
+    "security",
+    "architecture"
+  ],
+  "required_reviewer_count": 3,
+  "review_profile": "standard",
+  "reviewer_count": 3,
+  "reviewer_roles": [
+    "architecture",
+    "correctness",
+    "security"
+  ],
+  "reviewers_witnessed": false,
+  "schema": "star-forge.review.v2",
+  "scope": "ab12cd34ef56ab78",
+  "source_hash": "1111111111111111111111111111111111111111111111111111111111111111",
+  "stale_roles": [],
+  "waived": []
+}

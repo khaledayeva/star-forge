@@ -1,0 +1,16 @@
+{
+  "agent_id": "legacy-review-correctness",
+  "findings": [
+    {
+      "detail": "The empty state is explicit and covered by the fixture test.",
+      "file": "src/app.py",
+      "id": "legacy-note-1",
+      "line": 5,
+      "severity": "low",
+      "suggested_fix": "",
+      "title": "Empty state remains explicit"
+    }
+  ],
+  "role": "correctness",
+  "source_hash": "1111111111111111111111111111111111111111111111111111111111111111"
+}

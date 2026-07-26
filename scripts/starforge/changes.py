@@ -291,9 +291,30 @@ def derive_change_impact_for_project(
             raise ChangePacketError(f"delivery contract cannot be read: {exc}") from exc
         if isinstance(parsed, dict):
             delivery_contract = parsed
+    root_tasks = parse_plan_tasks_text(plan_text)
+    blueprint_acs = set(_AC_ID_RE.findall(blueprint_text))
+    unmapped = []
+    for task in root_tasks:
+        legacy_with_one_possible_ac = (
+            task.get("plan_version") == "legacy" and len(blueprint_acs) == 1
+        )
+        explicit_v2_mapping = (
+            task.get("plan_version") == "v2"
+            and _AC_ID_RE.search(str(task.get("acs") or "")) is not None
+            and bool(str(task.get("proof") or "").strip())
+            and str(task.get("proof") or "").strip() != "REVIEW_REQUIRED"
+        )
+        if not legacy_with_one_possible_ac and not explicit_v2_mapping:
+            unmapped.append(str(task.get("id") or "unknown"))
+    if unmapped:
+        raise ChangePacketError(
+            "automatic change derivation requires reviewed Plan v2 AC and Proof "
+            "mappings; create a separate migration draft and resolve mappings for: "
+            + ", ".join(unmapped)
+        )
     return derive_change_impact(
         changed_files=changed_files,
-        root_tasks=parse_plan_tasks_text(plan_text),
+        root_tasks=root_tasks,
         blueprint_text=blueprint_text,
         delivery_contract=delivery_contract,
         profile=profile,

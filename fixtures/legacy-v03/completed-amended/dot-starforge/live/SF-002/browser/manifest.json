@@ -1,0 +1,44 @@
+{
+  "artifacts": [
+    {
+      "bytes": 40,
+      "exists": true,
+      "kind": "transcript",
+      "path": ".starforge/live/SF-002/browser/result.txt",
+      "sha256": "29fc97d82a1e5dd6b19c6a8611d6419261eaff71a445b33a581974e06c3eec21"
+    }
+  ],
+  "collector": "browser",
+  "command_argv": [
+    "browser-collector",
+    "--task",
+    "SF-002"
+  ],
+  "created_at": "2026-06-20T17:45:00Z",
+  "degraded": false,
+  "problems": [],
+  "project": {
+    "name": "legacy-dashboard",
+    "path": "."
+  },
+  "raw_artifact_hashes": {
+    ".starforge/live/SF-002/browser/result.txt": {
+      "bytes": 40,
+      "sha256": "29fc97d82a1e5dd6b19c6a8611d6419261eaff71a445b33a581974e06c3eec21"
+    }
+  },
+  "redaction_report": {},
+  "runtime_asset_hash": "2222222222222222222222222222222222222222222222222222222222222222",
+  "schema": "star-forge.live-manifest.v1",
+  "source_hash_after": "1111111111111111111111111111111111111111111111111111111111111111",
+  "source_hash_before": "1111111111111111111111111111111111111111111111111111111111111111",
+  "summary": {
+    "console_errors": 0,
+    "interaction_assertions": 2
+  },
+  "task": "SF-002",
+  "tool_versions": {
+    "browser": "1.0"
+  },
+  "unavailable_capabilities": []
+}

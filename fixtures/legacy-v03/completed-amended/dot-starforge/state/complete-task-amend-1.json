@@ -1,0 +1,16 @@
+{
+  "changed_files": [
+    "src/app.py",
+    "tests/test_app.py"
+  ],
+  "created_at": "2026-06-19T15:00:00Z",
+  "schema": "star-forge.complete-task.v1",
+  "source_snapshot": {
+    "head": "123456789abcdef0123456789abcdef012345678",
+    "scope_hash": "ab12cd34ef56ab78",
+    "source_hash": "1111111111111111111111111111111111111111111111111111111111111111"
+  },
+  "summary": "Empty-state service behavior reverified.",
+  "task": "AMEND-1",
+  "verdict": "COMPLETE"
+}

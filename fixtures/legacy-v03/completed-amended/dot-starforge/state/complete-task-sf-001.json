@@ -1,0 +1,16 @@
+{
+  "changed_files": [
+    "src/app.py",
+    "tests/test_app.py"
+  ],
+  "created_at": "2026-06-18T16:00:00Z",
+  "schema": "star-forge.complete-task.v1",
+  "source_snapshot": {
+    "head": "0123456789abcdef0123456789abcdef01234567",
+    "scope_hash": "ab12cd34ef56ab78",
+    "source_hash": "1111111111111111111111111111111111111111111111111111111111111111"
+  },
+  "summary": "Dashboard data service verified.",
+  "task": "SF-001",
+  "verdict": "COMPLETE"
+}

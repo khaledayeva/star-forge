@@ -1,0 +1,13 @@
+{
+  "blueprint_path": "Blueprint.md",
+  "created_at": "2026-06-18T14:00:00Z",
+  "plan_path": "Plan.md",
+  "product_slug": "legacy-dashboard",
+  "profile": "standard",
+  "project_id": "v03-dashboard-fixture",
+  "root_mode": "adopted-root",
+  "schema": "star-forge.project.v1",
+  "source_profile_path": "StarForge.profile.json",
+  "state_machine_version": "3.0",
+  "updated_at": "2026-06-20T18:10:00Z"
+}
