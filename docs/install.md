@@ -130,5 +130,6 @@ For release work:
 scripts/release-check.sh
 ```
 
-The legacy `scripts/install-codex.sh` helper creates a local marketplace snapshot
-for checkout development. It is not the canonical public install path.
+The legacy `scripts/install-codex.sh` helper registers the current checkout as a
+local marketplace for development. It performs no recursive copy or deletion and
+is not the canonical public install path.

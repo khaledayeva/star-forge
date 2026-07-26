@@ -23,6 +23,7 @@ SCRIPTS = ROOT / "scripts"
 MANIFEST_PATH = ROOT / ".codex-plugin" / "plugin.json"
 MARKETPLACE_PATH = ROOT / ".agents" / "plugins" / "marketplace.json"
 RELEASE_CHECK = ROOT / "scripts" / "release-check.sh"
+INSTALL_CODEX = ROOT / "scripts" / "install-codex.sh"
 MOBBIN_APP_ID = "asdk_app_69fdb9081018819193707354f21b366e"
 RC_TMP_PARENT = os.environ.get("STAR_FORGE_RC_TMPDIR")
 if str(SCRIPTS) not in sys.path:
@@ -72,6 +73,45 @@ def run(
         stderr=subprocess.PIPE,
         check=False,
     )
+
+
+def test_local_installer_uses_canonical_checkout_without_outside_write() -> None:
+    with isolated_temp_directory("star-forge-install-symlink-") as tmp:
+        fixture = Path(tmp).resolve()
+        marketplace = fixture / "marketplace"
+        outside = fixture / "outside"
+        fake_bin = fixture / "bin"
+        command_log = fixture / "codex-commands.log"
+        marketplace.mkdir()
+        (outside / "star-forge").mkdir(parents=True)
+        fake_bin.mkdir()
+        sentinel = outside / "star-forge" / "outside-sentinel"
+        sentinel.write_text("preserve\n", encoding="utf-8")
+        (marketplace / "plugins").symlink_to(outside, target_is_directory=True)
+
+        fake_codex = fake_bin / "codex"
+        fake_codex.write_text(
+            '#!/bin/sh\nprintf "%s\\n" "$*" >> "$CODEX_LOG"\n',
+            encoding="utf-8",
+        )
+        fake_codex.chmod(0o700)
+        result = run(
+            ["sh", str(INSTALL_CODEX)],
+            cwd=ROOT,
+            env={
+                "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
+                "CODEX_LOG": str(command_log),
+                "STAR_FORGE_MARKETPLACE_ROOT": str(marketplace),
+            },
+        )
+
+        assert result.returncode == 0, (result.stdout, result.stderr)
+        assert command_log.read_text(encoding="utf-8").splitlines() == [
+            f"plugin marketplace add {ROOT}",
+            "plugin add star-forge@star-forge",
+        ]
+        assert sentinel.read_text(encoding="utf-8") == "preserve\n"
+        assert list((outside / "star-forge").iterdir()) == [sentinel]
 
 
 def test_marketplace_is_canonical_repo_root_package() -> None:

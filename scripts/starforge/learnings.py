@@ -188,8 +188,16 @@ def _safe_root(
         return None, status
     root = Path(os.path.abspath(str(learnings_home(environ))))
     for alias, target in LEARNING_POLICY["safe_system_aliases"].items():
-        if root == Path(alias) or root.is_relative_to(alias):
-            root = Path(target) / root.relative_to(alias)
+        alias_path, target_path = Path(alias), Path(target)
+        try:
+            matches_target = (
+                alias_path.is_symlink()
+                and alias_path.resolve(strict=True) == target_path
+            )
+        except OSError:
+            matches_target = False
+        if matches_target and (root == alias_path or root.is_relative_to(alias_path)):
+            root = target_path / root.relative_to(alias_path)
             break
     if _path_has_symlink_component(root):
         return None, {**status, "enabled": False, "reason": "unsafe-store-symlink"}

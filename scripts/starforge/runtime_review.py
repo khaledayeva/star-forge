@@ -426,12 +426,15 @@ def done_payload(project: Path) -> dict[str, Any]:
         gate_findings.extend(review_findings_for_done(project, tasks))
         problems.extend(finding_problem(finding) for finding in gate_findings if finding["severity"] in BLOCKING_SEVERITIES)
     repository_available, repository_head = is_git_repo(project), git_head(project)
+    status_entries = git_status(project)
+    repository_confirmed, confirmed_head = is_git_repo(project), git_head(project)
     repository_problem = (
-        ("git-repository-required", "Local Git repository is required for strict completion.") if not repository_available
-        else ("git-head-required", "A readable Git HEAD is required for strict completion.") if not repository_head else None)
+        ("git-repository-required", "Local Git repository is required for strict completion.") if not repository_available or not repository_confirmed
+        else ("git-head-required", "A readable Git HEAD is required for strict completion.") if not repository_head or not confirmed_head
+        else ("git-head-changed", "Git HEAD changed during strict completion.") if repository_head != confirmed_head else None)
     if repository_problem:
         problems.append({"severity": "high", "rule": repository_problem[0], "message": repository_problem[1]})
-    dirty = source_dirty_entries(git_status(project))
+    dirty = source_dirty_entries(status_entries)
     if dirty:
         problems.append({"severity": "medium", "message": REVIEW_POLICY["done_messages"]["dirty"], "files": dirty[:30]})
     proof = load_proof(project)
@@ -454,6 +457,8 @@ def done_payload(project: Path) -> dict[str, Any]:
     snapshot, snapshot_problem = safe_release_snapshot(project)
     if snapshot_problem and not hash_problem:
         problems.append(finding_problem(snapshot_problem))
+    if not repository_problem and snapshot.get("git_head") != repository_head:
+        problems.append({"severity": "high", "rule": "git-head-changed", "message": "Git HEAD changed during strict completion."})
     current_source_hash, lifecycle_hash_problem = try_source_hash(project)
     foundation_gate, delivery_gate, lifecycle_problems = done_lifecycle_gates(project, lifecycle_contract, current_source_hash)
     problems.extend(lifecycle_problems)
@@ -561,10 +566,16 @@ def _diff_since(project: Path, head: str | None) -> list[str]:
 def cmd_done(args: argparse.Namespace) -> int:
     project = resolve_project(args.project)
     payload = done_payload(project)
+    proof_head = str((payload.get("snapshot") or {}).get("git_head") or "")
+    final_status = source_dirty_entries(git_status(project))
+    final_head = git_head(project) if is_git_repo(project) else None
+    if payload["is_complete"] and (not proof_head or final_head != proof_head or final_status):
+        payload["problems"].append({"severity": "high", "rule": "git-proof-binding", "message": "Git state changed before final proof publication."})
+        payload.update(is_complete=False, verdict=REVIEW_POLICY["done_verdicts"]["blocked"])
     if payload["is_complete"]:
         ensure_state_dirs(project)
         write_json(project / PROOF_FILE, policy_record(
-            "proof", created_at=now_utc(), head=git_head(project), source_hash=source_hash(project),
+            "proof", created_at=now_utc(), head=proof_head, source_hash=source_hash(project),
             scope_hash=scope_hash(project) or "noscope", verdict=payload["verdict"]))
         if args.write_summary:
             write_text(project / FINAL_SUMMARY, done_summary_markdown(payload))

@@ -159,6 +159,26 @@ class OptInTests(unittest.TestCase):
             self.assertEqual(result["opt_in"]["reason"], "configured-store")
             self.assertTrue(Path(result["path"]).is_file())
 
+    def test_non_symlink_tmp_alias_preserves_the_requested_store(self) -> None:
+        requested = Path("/tmp/star-forge-learning-store")
+        original_is_symlink = Path.is_symlink
+
+        def simulated_is_symlink(path: Path) -> bool:
+            return False if path == Path("/tmp") else original_is_symlink(path)
+
+        with mock.patch.object(
+                learnings, "learnings_home", return_value=requested), \
+                mock.patch.object(
+                    Path, "is_symlink", autospec=True,
+                    side_effect=simulated_is_symlink):
+            root, status = learnings._safe_root(
+                None, action="read", explicit=True)
+
+        self.assertTrue(status["enabled"])
+        self.assertEqual(root, requested)
+        self.assertNotEqual(
+            root, Path("/private/tmp/star-forge-learning-store"))
+
 
 class SchemaAndRedactionTests(unittest.TestCase):
     def test_record_has_bounded_provenance_schema_and_redacts_sensitive_text(self) -> None:

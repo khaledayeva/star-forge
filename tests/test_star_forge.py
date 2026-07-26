@@ -2474,7 +2474,7 @@ def test_done_fails_closed_when_git_status_is_unavailable() -> None:
         )
 
 
-def test_done_fails_closed_without_repository_and_preserves_prior_proof() -> None:
+def test_done_fails_closed_when_repository_disappears_during_status_and_preserves_prior_proof() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         project = Path(tmp).resolve()
         build_completed_project(project)
@@ -2482,9 +2482,21 @@ def test_done_fails_closed_without_repository_and_preserves_prior_proof() -> Non
         assert code == 0, payload
         proof_path = project / star_forge.PROOF_FILE
         prior_proof = proof_path.read_bytes()
+        original_status = runtime_review.git_status
+        removed = False
 
-        shutil.rmtree(project / ".git")
-        code, payload = run_done(project)
+        def remove_repository_before_status(target: Path) -> list[str]:
+            nonlocal removed
+            if not removed:
+                shutil.rmtree(target / ".git")
+                removed = True
+            return original_status(target)
+
+        with mock.patch.object(
+            runtime_review, "git_status",
+            side_effect=remove_repository_before_status,
+        ):
+            code, payload = run_done(project)
 
         assert code == 1, payload
         assert payload["is_complete"] is False
