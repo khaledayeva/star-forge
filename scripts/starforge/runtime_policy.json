@@ -209,7 +209,7 @@
   },
   "runtime_support.POLICY": {
     "constants": {
-      "SF_VERSION": "0.3.0",
+      "SF_VERSION": "0.4.0",
       "PLUGIN_NAME": "star-forge",
       "BLUEPRINT_FILE": "Blueprint.md",
       "PLAN_FILE": "Plan.md",

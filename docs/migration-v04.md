@@ -1,8 +1,15 @@
 # Migrate From Star Forge v0.3 To v0.4
 
+Release: `0.4.0`
+
 v0.4 reads v0.3 projects in place. Migration is explicit and non-destructive.
 There is no command that deletes, rewrites, pushes, changes repository visibility,
 or deploys a legacy project.
+
+The v0.4 source release passed the isolated install, legacy migration, registered
+Mobbin App, private Foundation, platform route, full regression, and strict
+self-test gates. After installing or upgrading, use the read-only doctor to confirm
+that the active plugin root and runtime version match this release.
 
 ## Before You Start
 

@@ -1,6 +1,6 @@
 {
   "name": "star-forge",
-  "version": "0.3.0+codex.20260726010515",
+  "version": "0.4.0+codex.20260726132200",
   "description": "A Codex-native software factory that interviews, plans, builds, verifies, reviews, and delivers complete software.",
   "author": {
     "name": "Khaled Ayeva",
