@@ -35,6 +35,7 @@ if str(SCRIPT_DIR) not in sys.path:
 
 from live_collectors import common as live_common
 from live_collectors import native_macos as native_macos_collector
+from starforge import contracts as project_contracts
 from starforge import doctor as installation_doctor
 
 
@@ -1554,27 +1555,29 @@ def append_plan_task(plan_path: Path, row: dict[str, str]) -> bool:
 
 
 def blueprint_text_is_approved(text: str) -> bool:
-    text = re.sub(r"\*\*|__", "", text)
-    if re.search(r"^\s*Status\s*[:\-—]\s*approved\b", text, re.IGNORECASE | re.MULTILINE):
-        return True
-    match = re.search(r"^\s*Last approved\s*[:\-—]\s*(.+)$", text, re.IGNORECASE | re.MULTILINE)
-    if not match:
-        return False
-    return bool(re.match(r"^\d{4}-\d{2}-\d{2}\b", match.group(1).strip()))
+    """Recognize a v0.3 approval sentinel for compatibility checks."""
+    return project_contracts.blueprint_text_has_legacy_approval(text)
+
+
+def blueprint_lock_state(project: Path) -> dict[str, Any]:
+    return project_contracts.blueprint_lock_state(project)
+
+
+def blueprint_has_valid_lock(project: Path) -> bool:
+    return blueprint_lock_state(project).get("status") == "locked"
 
 
 def blueprint_is_approved(project: Path) -> bool:
-    path = project / BLUEPRINT_FILE
-    if not path.exists():
-        return False
-    return blueprint_text_is_approved(read_text(path))
+    """Accept locked v0.4 contracts and readable v0.3 legacy approvals."""
+    return bool(blueprint_lock_state(project).get("approved"))
 
 
 def scope_hash(project: Path) -> str | None:
-    path = project / BLUEPRINT_FILE
-    if not path.exists() or not blueprint_is_approved(project):
+    state = blueprint_lock_state(project)
+    if not state.get("approved"):
         return None
-    return file_sha256(path)[:16]
+    digest = str(state.get("current_sha256") or "")
+    return digest[:16] if len(digest) == 64 else None
 
 
 def lexical_terms(text: str) -> set[str]:
@@ -5647,7 +5650,7 @@ def cmd_init(args: argparse.Namespace) -> int:
         ],
     )
     created.extend(f".gitignore {item}" for item in gitignore_changes)
-    if not args.no_agents:
+    if not getattr(args, "no_agents", False):
         agents_dir = project / ".codex" / "agents"
         for role in agent_role_names():
             write_text(agents_dir / f"{AGENT_NAME_PREFIX}{role}.toml", render_agent_toml(role))
@@ -5789,6 +5792,7 @@ def operating_card(project: Path, state: dict[str, Any]) -> str:
 def canonical_state_payload(project: Path, *, objective: str = "", mode: str = "cruise", fast_mvp: bool = False) -> dict[str, Any]:
     manifest = ensure_project_manifest(project, objective=objective)
     profile_lock = fast_mvp_profile_lock_state(project)
+    blueprint_state = blueprint_lock_state(project)
     _current_source_hash, hash_problem = try_source_hash(project)
     source_hash_blocked = hash_problem is not None
     plan_path = project / PLAN_FILE
@@ -5813,9 +5817,15 @@ def canonical_state_payload(project: Path, *, objective: str = "", mode: str = "
         phase = "blocked"
     elif profile_lock.get("status") == "blocked":
         phase = "blocked"
-    elif not blueprint_is_approved(project):
+    elif not blueprint_state.get("approved"):
         phase = "plan"
     elif not tasks or plan_is_placeholder(tasks):
+        phase = "plan"
+    elif (
+        blueprint_state.get("status") == "legacy-approved"
+        and drift.get("actionable")
+        and proof
+    ):
         phase = "plan"
     elif drift.get("actionable") and proof:
         phase = "amend"
@@ -5830,6 +5840,20 @@ def canonical_state_payload(project: Path, *, objective: str = "", mode: str = "
         next_action = f"{hash_problem.get('message')} Repair the source hash blocker, then rerun."
     elif profile_lock.get("status") == "blocked" and not parse_problem:
         next_action = f"{profile_lock.get('message')} Next action: {profile_lock.get('next_action')}"
+    elif blueprint_state.get("status") in {"drifted", "invalid"}:
+        next_action = (
+            "Blueprint approval is invalid. Review the current contract with the "
+            "user, then run `approve-blueprint` after explicit approval."
+        )
+    elif (
+        blueprint_state.get("status") == "legacy-approved"
+        and drift.get("actionable")
+        and proof
+    ):
+        next_action = (
+            "This legacy Blueprint is readable, but amendments require a v0.4 "
+            "content lock. Run `approve-blueprint` only after explicit user approval."
+        )
     else:
         next_action = {
             "setup": "Initialize Star Forge project artifacts.",
@@ -5855,9 +5879,8 @@ def canonical_state_payload(project: Path, *, objective: str = "", mode: str = "
         "phase": phase,
         "scope_hash": scope,
         "blueprint": {
-            "path": BLUEPRINT_FILE,
-            "approved": blueprint_is_approved(project),
-            "sha256": file_sha256(project / BLUEPRINT_FILE) if (project / BLUEPRINT_FILE).exists() else None,
+            **blueprint_state,
+            "sha256": blueprint_state.get("current_sha256"),
         },
         "plan": {
             "path": PLAN_FILE,
@@ -5979,7 +6002,16 @@ def cmd_run(args: argparse.Namespace) -> int:
         or not (project / LEDGER_FILE).exists()
     )
     if setup_missing and not args.no_auto_init:
-        init_args = argparse.Namespace(project=str(project), force=False, no_agents=args.no_hooks, product_slug=args.product_slug, adopt_root=True, profile=requested_profile, fast_mvp=args.fast_mvp)
+        init_args = argparse.Namespace(
+            project=str(project),
+            force=False,
+            no_agents=bool(getattr(args, "no_agents", False)),
+            no_hooks=bool(getattr(args, "no_hooks", False)),
+            product_slug=args.product_slug,
+            adopt_root=True,
+            profile=requested_profile,
+            fast_mvp=args.fast_mvp,
+        )
         code = cmd_init(init_args)
         if code != 0:
             return code
@@ -6017,12 +6049,19 @@ def cmd_run(args: argparse.Namespace) -> int:
         and drift.get("detected")
         and proof
         and plan_path.exists()
+        and blueprint_has_valid_lock(project)
         and not completed_amendment_covering_drift(project, drift_tasks, drift)
     ):
         amend_id = scaffold_amend(project, drift)
         if amend_id:
             append_jsonl(project / INCIDENTS_FILE, {"schema": "star-forge.incident.v1", "timestamp": now_utc(), "kind": "post-done-drift", "amend_task": amend_id, "changed_files": drift.get("changed_files")})
     payload = canonical_state_payload(project, objective=args.objective or "", mode=args.mode, fast_mvp=review_profile(project) == "fast-mvp")
+    if getattr(args, "no_hooks", False):
+        payload["hook_trust_notice"] = {
+            **(payload.get("hook_trust_notice") or {}),
+            "show": False,
+        }
+        payload["operating_card"] = operating_card(project, payload)
     ensure_state_dirs(project)
     previous_phase: str | None = None
     state_path = project / CANONICAL_STATE
@@ -6048,6 +6087,7 @@ def cmd_status(args: argparse.Namespace) -> int:
     plan_path = project / PLAN_FILE
     tasks = parse_tasks(plan_path) if plan_path.exists() else []
     profile_lock = fast_mvp_profile_lock_state(project)
+    blueprint_state = blueprint_lock_state(project)
     hash_problem = source_hash_unavailable_problem(project)
     scope = scope_hash(project) or "noscope"
     payload = {
@@ -6057,6 +6097,7 @@ def cmd_status(args: argparse.Namespace) -> int:
         "enforcement": enforcement_mode(project),
         "hooks_live": hooks_liveness(project),
         "blueprint_approved": blueprint_is_approved(project),
+        "blueprint": blueprint_state,
         "plan_exists": plan_path.exists(),
         "task_count": len(tasks),
         "counts": task_counts(tasks),
@@ -6066,6 +6107,30 @@ def cmd_status(args: argparse.Namespace) -> int:
         "source_hash_unavailable": bool(hash_problem),
         "git_status": git_status(project),
         "canonical_state": str(project / CANONICAL_STATE) if (project / CANONICAL_STATE).exists() else None,
+    }
+    print(json.dumps(payload, indent=2))
+    return 0
+
+
+def cmd_approve_blueprint(args: argparse.Namespace) -> int:
+    """Lock the current Blueprint after the coordinator obtains user approval."""
+    project = resolve_project(args.project)
+    before = blueprint_lock_state(project)
+    try:
+        lock = project_contracts.write_blueprint_lock(project)
+    except project_contracts.ContractError as exc:
+        raise ForgeError(str(exc)) from exc
+    state = blueprint_lock_state(project)
+    payload = {
+        "schema": "star-forge.blueprint-approval.v1",
+        "project": str(project),
+        "blueprint": BLUEPRINT_FILE,
+        "lock": project_contracts.BLUEPRINT_LOCK_FILE,
+        "blueprint_sha256": lock["blueprint_sha256"],
+        "approved_at": lock["approved_at"],
+        "contract_version": lock["contract_version"],
+        "previous_status": before.get("status"),
+        "status": state.get("status"),
     }
     print(json.dumps(payload, indent=2))
     return 0
@@ -6417,7 +6482,8 @@ def cmd_self_test(args: argparse.Namespace) -> int:
     for template in ["Blueprint.md", "Plan.md"]:
         check(f"template-{template}", (root / "templates" / template).exists(), template)
     for command in [
-        "run", "init", "verify", "browser-run", "preview-proof", "proof-run",
+        "run", "init", "approve-blueprint", "verify", "browser-run",
+        "preview-proof", "proof-run",
         "native-ios-proof", "native-macos-proof", "security-proof",
         "security-handoff-packet", "source-packet-proof",
         "source-packet-github-pr-review", "server-lease", "review", "waive",
@@ -6477,18 +6543,27 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--adopt-root", action="store_true", help="Deliberately build in an existing foreign project root (recorded in the manifest)")
     p.add_argument("--strict", action="store_true")
     p.add_argument("--no-auto-init", action="store_true")
-    p.add_argument("--no-hooks", action="store_true")
+    p.add_argument("--no-hooks", action="store_true", help="Suppress optional hook trust prompts for this run")
+    p.add_argument("--no-agents", action="store_true", help="Do not generate project-local agent profiles during auto-init")
     p.set_defaults(func=cmd_run)
 
     p = sub.add_parser("init", help="Initialize Star Forge artifacts")
     p.add_argument("--project", default=".")
     p.add_argument("--force", action="store_true")
     p.add_argument("--no-agents", action="store_true")
+    p.add_argument("--no-hooks", action="store_true", help="Compatibility flag; init does not install project-local hooks")
     p.add_argument("--product-slug", default="")
     p.add_argument("--adopt-root", action="store_true")
     p.add_argument("--fast-mvp", action="store_true")
     p.add_argument("--profile", default="", choices=["", "standard", "fast-mvp"])
     p.set_defaults(func=cmd_init)
+
+    p = sub.add_parser(
+        "approve-blueprint",
+        help="Write a content lock after explicit user approval of Blueprint.md",
+    )
+    p.add_argument("--project", default=".")
+    p.set_defaults(func=cmd_approve_blueprint)
 
     p = sub.add_parser("validate-plan", help="Validate Plan.md")
     p.add_argument("--file", default=PLAN_FILE)

@@ -4,9 +4,10 @@ Status: draft
 Owner: project team
 Last approved: not approved yet
 
-<!-- Approval sentinel: Star Forge treats this blueprint as approved only when the
-     Status line reads exactly `Status: approved` or the Last approved line starts
-     with an ISO date, e.g. `Last approved: 2026-06-10`. Keep both lines intact. -->
+<!-- These status lines remain readable by v0.3 projects, but they are not a v0.4
+     content lock. After the user explicitly approves the complete contract, the
+     coordinator runs `approve-blueprint` to create Blueprint.lock.json. Editing
+     this file after approval invalidates that lock until the revision is approved. -->
 
 ## Product Summary
 

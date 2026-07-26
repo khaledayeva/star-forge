@@ -1861,6 +1861,16 @@ def test_post_done_drift_scaffolds_single_amend_task() -> None:
         code, out, err = run_cli(["run", "--project", str(project), "--no-hooks"])
         assert code == 0, err or out
         state = json.loads((project / ".starforge" / "state.json").read_text(encoding="utf-8"))
+        assert state["phase"] == "plan"
+        assert state["blueprint"]["status"] == "legacy-approved"
+        assert state["drift"]["detected"] is True
+        assert "AMEND-1" not in (project / "Plan.md").read_text(encoding="utf-8")
+        code, out, err = run_cli(["approve-blueprint", "--project", str(project)])
+        assert code == 0, err or out
+        assert json.loads(out)["status"] == "locked"
+        code, out, err = run_cli(["run", "--project", str(project), "--no-hooks"])
+        assert code == 0, err or out
+        state = json.loads((project / ".starforge" / "state.json").read_text(encoding="utf-8"))
         assert state["phase"] == "amend"
         assert state["drift"]["detected"] is True
         assert "AMEND-1" in state["plan"]["ready"]
@@ -1912,6 +1922,15 @@ def test_completed_amend_does_not_rescaffold_same_drift_but_new_source_change_do
         (project / "src" / "hello.py").write_text("print('hello forge, drifted')\n", encoding="utf-8")
         code, out, err = run_cli(["run", "--project", str(project), "--no-hooks"])
         assert code == 0, err or out
+        state = json.loads((project / ".starforge" / "state.json").read_text(encoding="utf-8"))
+        assert state["phase"] == "plan"
+        assert state["blueprint"]["status"] == "legacy-approved"
+        assert "AMEND-1" not in (project / "Plan.md").read_text(encoding="utf-8")
+        code, out, err = run_cli(["approve-blueprint", "--project", str(project)])
+        assert code == 0, err or out
+        assert json.loads(out)["status"] == "locked"
+        code, out, err = run_cli(["run", "--project", str(project), "--no-hooks"])
+        assert code == 0, err or out
         record_verify(project, "AMEND-1")
         code, payload = complete_task(project, "AMEND-1")
         assert code == 0, payload
@@ -1944,7 +1963,18 @@ def test_amend_loop_closes_and_proof_supersedes() -> None:
         proof_path = project / ".starforge" / "final" / "proof.json"
         old_proof = json.loads(proof_path.read_text(encoding="utf-8"))
         (project / "src" / "hello.py").write_text("print('hello forge, drifted')\n", encoding="utf-8")
-        run_cli(["run", "--project", str(project), "--no-hooks"])  # scaffolds AMEND-1
+        code, out, err = run_cli(["run", "--project", str(project), "--no-hooks"])
+        assert code == 0, err or out
+        state = json.loads((project / ".starforge" / "state.json").read_text(encoding="utf-8"))
+        assert state["phase"] == "plan"
+        assert state["blueprint"]["status"] == "legacy-approved"
+        assert "AMEND-1" not in (project / "Plan.md").read_text(encoding="utf-8")
+        code, out, err = run_cli(["approve-blueprint", "--project", str(project)])
+        assert code == 0, err or out
+        assert json.loads(out)["status"] == "locked"
+        code, out, err = run_cli(["run", "--project", str(project), "--no-hooks"])
+        assert code == 0, err or out
+        assert "AMEND-1" in (project / "Plan.md").read_text(encoding="utf-8")
         # Close the loop: re-verify both tasks at the new tree, complete the amend,
         # refresh the review, commit, then done passes and the proof supersedes.
         record_verify(project, "SF-1")
@@ -2038,6 +2068,42 @@ def test_run_product_slug_on_fresh_foreign_root_isolates_cleanly() -> None:
         assert state["project"] == str(nested)
 
 
+def test_init_no_hooks_and_no_agents_control_distinct_surfaces() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp).resolve()
+        hooks_disabled = root / "hooks-disabled"
+        code, out, err = run_cli(["init", "--project", str(hooks_disabled), "--no-hooks"])
+        assert code == 0, err or out
+        assert (hooks_disabled / ".codex" / "agents" / "starforge-builder.toml").exists()
+
+        agents_disabled = root / "agents-disabled"
+        code, out, err = run_cli(["init", "--project", str(agents_disabled), "--no-agents"])
+        assert code == 0, err or out
+        assert not (agents_disabled / ".codex" / "agents").exists()
+
+
+def test_run_no_hooks_and_no_agents_control_distinct_auto_init_surfaces() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp).resolve()
+        hooks_disabled = root / "hooks-disabled"
+        code, out, err = run_cli(["run", "--project", str(hooks_disabled), "--no-hooks"])
+        assert code == 0, err or out
+        assert (hooks_disabled / ".codex" / "agents" / "starforge-builder.toml").exists()
+        assert not any(line.startswith("HOOKS:") for line in out.splitlines())
+        assert not (hooks_disabled / star_forge.HOOK_TRUST_NOTICE_FILE).exists()
+        state = json.loads((hooks_disabled / ".starforge" / "state.json").read_text(encoding="utf-8"))
+        assert state["hook_trust_notice"]["show"] is False
+
+        agents_disabled = root / "agents-disabled"
+        code, out, err = run_cli(["run", "--project", str(agents_disabled), "--no-agents"])
+        assert code == 0, err or out
+        assert not (agents_disabled / ".codex" / "agents").exists()
+        assert "HOOKS: Optional observer hooks are not trusted yet." in out
+        assert (agents_disabled / star_forge.HOOK_TRUST_NOTICE_FILE).exists()
+        state = json.loads((agents_disabled / ".starforge" / "state.json").read_text(encoding="utf-8"))
+        assert state["hook_trust_notice"]["show"] is True
+
+
 def test_run_adopt_root_records_adopted_root_mode() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp).resolve()
@@ -2048,6 +2114,21 @@ def test_run_adopt_root_records_adopted_root_mode() -> None:
         assert manifest["schema"] == "star-forge.project.v1"
         assert manifest["root_mode"] == "adopted-root"
         assert (root / "Blueprint.md").exists()  # built in place, deliberately
+        assert (root / ".codex" / "agents" / "starforge-builder.toml").exists()
+        assert not any(line.startswith("HOOKS:") for line in out.splitlines())
+
+
+def test_run_adopt_root_no_agents_preserves_hook_behavior() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp).resolve()
+        make_foreign_root(root)
+        code, out, err = run_cli(["run", "--project", str(root), "--adopt-root", "--no-agents"])
+        assert code == 0, err or out
+        manifest = json.loads((root / ".starforge" / "project.json").read_text(encoding="utf-8"))
+        assert manifest["root_mode"] == "adopted-root"
+        assert not (root / ".codex" / "agents").exists()
+        assert "HOOKS: Optional observer hooks are not trusted yet." in out
+        assert (root / star_forge.HOOK_TRUST_NOTICE_FILE).exists()
 
 
 def test_init_obeys_isolation_guard() -> None:
@@ -2291,7 +2372,7 @@ def test_run_prints_hook_trust_notice_once_until_local_hooks_observed() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         project = Path(tmp).resolve()
         init_project(project)
-        code, out, err = run_cli(["run", "--project", str(project), "--objective", "Build the greeter", "--no-hooks"])
+        code, out, err = run_cli(["run", "--project", str(project), "--objective", "Build the greeter"])
         assert code == 0, err or out
         assert "HOOKS: Optional observer hooks are not trusted yet." in out
         marker = project / star_forge.HOOK_TRUST_NOTICE_FILE
@@ -2299,7 +2380,7 @@ def test_run_prints_hook_trust_notice_once_until_local_hooks_observed() -> None:
         state = json.loads((project / ".starforge" / "state.json").read_text(encoding="utf-8"))
         assert state["hook_trust_notice"]["show"] is True
 
-        code, out, err = run_cli(["run", "--project", str(project), "--objective", "Build the greeter", "--no-hooks"])
+        code, out, err = run_cli(["run", "--project", str(project), "--objective", "Build the greeter"])
         assert code == 0, err or out
         assert "HOOKS: Optional observer hooks are not trusted yet." not in out
         state = json.loads((project / ".starforge" / "state.json").read_text(encoding="utf-8"))
@@ -2309,7 +2390,7 @@ def test_run_prints_hook_trust_notice_once_until_local_hooks_observed() -> None:
         event = {"cwd": str(project), "hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": "ls"}}
         code, _, err = run_cli(["hook"], stdin_payload=event)
         assert code == 0, err
-        code, out, err = run_cli(["run", "--project", str(project), "--objective", "Build the greeter", "--no-hooks"])
+        code, out, err = run_cli(["run", "--project", str(project), "--objective", "Build the greeter"])
         assert code == 0, err or out
         assert "HOOKS: Optional observer hooks are not trusted yet." not in out
 
