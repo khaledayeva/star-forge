@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
-import hashlib
+import json
 import os
 import re
 import shutil
@@ -12,7 +12,8 @@ import tempfile
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable, Mapping, Sequence
 
-from .contracts import parse_plan_tasks_text
+from . import change_derivation
+from .contracts import parse_plan_tasks_text, serialize_plan_tasks
 
 
 CHANGE_ROOT = Path(".starforge") / "changes"
@@ -20,7 +21,9 @@ CHANGE_FILE = "change.md"
 CHANGE_PLAN_FILE = "Plan.md"
 CHANGE_EVIDENCE_DIR = "evidence"
 CHANGE_REVIEW_DIR = "review"
+CHANGE_IMPACT_FILE = "impact.json"
 CHANGE_SCHEMA = "star-forge.change-packet.v1"
+CHANGE_IMPACT_SCHEMA = change_derivation.CHANGE_IMPACT_SCHEMA
 CHANGE_APPROVAL_STATES = frozenset({"draft", "approved"})
 CHANGE_TEMPLATE_FILE = "Change.md"
 CHANGE_PLAN_TEMPLATE_FILE = "ChangePlan.md"
@@ -237,6 +240,66 @@ def _markdown_bullets(values: Iterable[str]) -> str:
     return "\n".join(f"- {value}" for value in values)
 
 
+def normalize_changed_files(changed_files: Sequence[str]) -> list[str]:
+    """Normalize Git status paths into a stable, de-duplicated scope."""
+    try:
+        return change_derivation.normalize_changed_files(changed_files)
+    except change_derivation.ChangeDerivationError as exc:
+        raise ChangePacketError(str(exc)) from exc
+
+
+def derive_change_impact(
+    *,
+    changed_files: Sequence[str],
+    root_tasks: Sequence[Mapping[str, Any]],
+    blueprint_text: str = "",
+    delivery_contract: Mapping[str, Any] | None = None,
+    profile: str = "standard",
+) -> dict[str, Any]:
+    """Derive packet tasks, risk policy, and proof from the actual changed scope."""
+    try:
+        return change_derivation.derive_change_impact(
+            changed_files=changed_files,
+            root_tasks=root_tasks,
+            blueprint_text=blueprint_text,
+            delivery_contract=delivery_contract,
+            profile=profile,
+        )
+    except change_derivation.ChangeDerivationError as exc:
+        raise ChangePacketError(str(exc)) from exc
+
+
+def derive_change_impact_for_project(
+    project: Path,
+    changed_files: Sequence[str],
+    *,
+    profile: str = "standard",
+) -> dict[str, Any]:
+    """Load the root contracts and derive one change impact without mutation."""
+    root = project.resolve()
+    try:
+        plan_text = (root / "Plan.md").read_text(encoding="utf-8")
+        blueprint_text = (root / "Blueprint.md").read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise ChangePacketError(f"root contracts cannot be read: {exc}") from exc
+    delivery_contract: dict[str, Any] = {}
+    delivery_path = root / ".starforge" / "contracts" / "delivery.json"
+    if delivery_path.exists():
+        try:
+            parsed = json.loads(delivery_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise ChangePacketError(f"delivery contract cannot be read: {exc}") from exc
+        if isinstance(parsed, dict):
+            delivery_contract = parsed
+    return derive_change_impact(
+        changed_files=changed_files,
+        root_tasks=parse_plan_tasks_text(plan_text),
+        blueprint_text=blueprint_text,
+        delivery_contract=delivery_contract,
+        profile=profile,
+    )
+
+
 def validate_change_packet(payload: Any) -> list[str]:
     """Return deterministic schema problems for a parsed change packet."""
     if not isinstance(payload, Mapping):
@@ -398,11 +461,32 @@ def read_change_packet(project: Path, change_id: str) -> dict[str, Any]:
             f"{payload['change_id']}"
         )
     _assert_packet_contents(packet, payload)
-    return {
+    record = {
         **payload,
         "kind": "change-packet",
         "path": str(packet.relative_to(project.resolve())),
     }
+    impact_path = packet / CHANGE_IMPACT_FILE
+    if impact_path.exists() or impact_path.is_symlink():
+        problem = _lstat_problem(impact_path, kind="file")
+        if problem:
+            raise ChangePacketError(problem)
+        try:
+            impact = json.loads(impact_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise ChangePacketError(
+                f"{CHANGE_IMPACT_FILE} cannot be read: {exc}"
+            ) from exc
+        if not isinstance(impact, dict) or impact.get("schema") != CHANGE_IMPACT_SCHEMA:
+            raise ChangePacketError(
+                f"{CHANGE_IMPACT_FILE} must use schema {CHANGE_IMPACT_SCHEMA}"
+            )
+        if impact.get("change_id") != change_id:
+            raise ChangePacketError(
+                f"{CHANGE_IMPACT_FILE} does not match packet {change_id}"
+            )
+        record["impact"] = impact
+    return record
 
 
 def create_change_packet(
@@ -500,6 +584,228 @@ def _fsync_directory(path: Path) -> None:
         os.close(descriptor)
 
 
+def _write_atomic_text(path: Path, text: str) -> None:
+    temporary: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            newline="\n",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temporary = handle.name
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        temporary = None
+        _fsync_directory(path.parent)
+    finally:
+        if temporary:
+            try:
+                Path(temporary).unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
+def _write_atomic_json(path: Path, payload: Mapping[str, Any]) -> None:
+    _write_atomic_text(
+        path,
+        json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
+    )
+
+
+def _replace_plan_table(text: str, tasks: Sequence[Mapping[str, Any]]) -> str:
+    lines = text.splitlines()
+    header = "| " + " | ".join(
+        (
+            "Task",
+            "Description",
+            "Status",
+            "Mode",
+            "Files",
+            "Depends",
+            "ACs",
+            "Proof",
+            "Verify",
+            "Evidence",
+        )
+    ) + " |"
+    try:
+        start = next(
+            index for index, line in enumerate(lines) if line.strip() == header
+        )
+    except StopIteration as exc:
+        raise ChangePacketError("packet Plan.md has no exact Plan v2 task table") from exc
+    end = start + 2
+    while end < len(lines) and lines[end].strip().startswith("|"):
+        end += 1
+    replacement = serialize_plan_tasks(tasks, version="v2").rstrip().splitlines()
+    lines[start:end] = replacement
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _packet_plan_tasks(impact: Mapping[str, Any], change_id: str) -> list[dict[str, str]]:
+    tasks: list[dict[str, str]] = []
+    for index, affected in enumerate(impact.get("affected_tasks") or [], start=1):
+        if not isinstance(affected, Mapping):
+            continue
+        files = [str(value) for value in affected.get("files") or []]
+        acs = [str(value) for value in affected.get("acs") or []]
+        proofs = [str(value) for value in affected.get("proof_kinds") or []]
+        tasks.append(
+            {
+                "id": f"{change_id}-T{index}",
+                "description": str(
+                    affected.get("description")
+                    or "Revalidate affected changed scope."
+                ),
+                "status": "queued",
+                "mode": str(affected.get("mode") or "delegate"),
+                "files": ", ".join(files),
+                "depends": "-",
+                "acs": ", ".join(acs),
+                "proof": ", ".join(proofs),
+                "verify": str(affected.get("verify") or "REVIEW_REQUIRED"),
+                "evidence": "-",
+            }
+        )
+    if not tasks:
+        raise ChangePacketError("derived change impact has no affected tasks")
+    return tasks
+
+
+def plan_change_packet(
+    project: Path,
+    change_id: str,
+    impact: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Write derived impact and packet-local Plan v2 rows for one draft."""
+    packet = read_change_packet(project, change_id)
+    if packet["approval_state"] != "draft":
+        raise ChangePacketError("only draft change packets can be planned")
+    if impact.get("schema") != CHANGE_IMPACT_SCHEMA:
+        raise ChangePacketError(
+            f"impact must use schema {CHANGE_IMPACT_SCHEMA}"
+        )
+    if list(impact.get("scope_delta") or []) != packet["scope_delta"]:
+        raise ChangePacketError("derived impact scope does not match change.md")
+    if list(impact.get("affected_acs") or []) != packet["affected_acs"]:
+        raise ChangePacketError("derived impact ACs do not match change.md")
+
+    packet_root = _packet_root(project, change_id)
+    plan_path = packet_root / CHANGE_PLAN_FILE
+    try:
+        original = plan_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise ChangePacketError(f"packet Plan.md cannot be read: {exc}") from exc
+    tasks = _packet_plan_tasks(impact, change_id)
+    planned = _replace_plan_table(original, tasks)
+    impact_payload = {**dict(impact), "change_id": change_id}
+    _write_atomic_text(plan_path, planned)
+    _write_atomic_json(packet_root / CHANGE_IMPACT_FILE, impact_payload)
+    return read_change_packet(project, change_id)
+
+
+def activate_change_plan(project: Path, change_id: str) -> list[dict[str, Any]]:
+    """Make an approved packet's dependency-free task rows ready."""
+    packet = read_change_packet(project, change_id)
+    if packet["approval_state"] != "approved":
+        raise ChangePacketError("change packet must be approved before activation")
+    plan_path = _packet_root(project, change_id) / CHANGE_PLAN_FILE
+    try:
+        original = plan_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise ChangePacketError(f"packet Plan.md cannot be read: {exc}") from exc
+    parsed = parse_plan_tasks_text(original)
+    if not parsed:
+        raise ChangePacketError("approved change packet has no planned tasks")
+    updated_tasks: list[dict[str, Any]] = []
+    for task in parsed:
+        updated_tasks.append(
+            {
+                **task,
+                "status": "ready" if task["status"] == "queued" else task["status"],
+            }
+        )
+    updated = _replace_plan_table(original, updated_tasks)
+    updated, count = re.subn(
+        r"(?m)^Status:\s*draft\s*$",
+        "Status: active",
+        updated,
+    )
+    if count != 1 and "Status: active" not in updated:
+        raise ChangePacketError("packet Plan.md status is missing or ambiguous")
+    _write_atomic_text(plan_path, updated)
+    return parse_plan_tasks_text(updated)
+
+
+def change_plan_tasks(project: Path, change_id: str) -> list[dict[str, Any]]:
+    """Read packet-local Plan v2 tasks without consulting the root Plan."""
+    packet = read_change_packet(project, change_id)
+    plan_path = project.resolve() / packet["path"] / packet["plan_path"]
+    try:
+        return parse_plan_tasks_text(plan_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError) as exc:
+        raise ChangePacketError(f"packet Plan.md cannot be read: {exc}") from exc
+
+
+def next_change_id(project: Path) -> str:
+    """Return the next collision-free numeric v0.4 packet id."""
+    highest = 0
+    for packet in list_change_packets(project):
+        match = re.fullmatch(r"CHANGE-([1-9][0-9]*)", packet["change_id"])
+        if match:
+            highest = max(highest, int(match.group(1)))
+    return f"CHANGE-{highest + 1}"
+
+
+def create_or_select_change_packet(
+    project: Path,
+    *,
+    original_completed_source_hash: str,
+    changed_files: Sequence[str],
+    profile: str = "standard",
+    created_at: str | None = None,
+    template_dir: Path | None = None,
+) -> dict[str, Any]:
+    """Select the exact open scope or create and derive one isolated draft."""
+    scope = normalize_changed_files(changed_files)
+    existing: list[dict[str, Any]] = []
+    for packet in list_change_packets(project):
+        if (
+            packet["original_completed_source_hash"]
+            != original_completed_source_hash
+            or packet["scope_delta"] != scope
+        ):
+            continue
+        planned = change_plan_tasks(project, packet["change_id"])
+        if planned and all(task.get("status") == "complete" for task in planned):
+            continue
+        existing.append(packet)
+    if existing:
+        return existing[-1]
+    impact = derive_change_impact_for_project(
+        project,
+        scope,
+        profile=profile,
+    )
+    packet = create_change_packet(
+        project,
+        change_id=next_change_id(project),
+        original_completed_source_hash=original_completed_source_hash,
+        scope_delta=scope,
+        affected_acs=impact["affected_acs"],
+        delivery_impact=impact["delivery_impact"],
+        created_at=created_at,
+        template_dir=template_dir,
+    )
+    return plan_change_packet(project, packet["change_id"], impact)
+
+
 def approve_change_packet(
     project: Path,
     change_id: str,
@@ -510,6 +816,11 @@ def approve_change_packet(
     current = read_change_packet(project, change_id)
     if current["approval_state"] == "approved":
         raise ChangePacketError(f"change packet is already approved: {change_id}")
+    blockers = list((current.get("impact") or {}).get("approval_blockers") or [])
+    if blockers:
+        raise ChangePacketError(
+            "change packet cannot be approved: " + "; ".join(str(item) for item in blockers)
+        )
     timestamp = approved_at or _now_utc()
     if not _valid_iso8601(timestamp):
         raise ChangePacketError(
@@ -707,20 +1018,30 @@ __all__ = [
     "CHANGE_APPROVAL_STATES",
     "CHANGE_EVIDENCE_DIR",
     "CHANGE_FILE",
+    "CHANGE_IMPACT_FILE",
+    "CHANGE_IMPACT_SCHEMA",
     "CHANGE_PLAN_FILE",
     "CHANGE_REVIEW_DIR",
     "CHANGE_ROOT",
     "CHANGE_SCHEMA",
     "ChangePacketError",
+    "activate_change_plan",
     "approve_change_packet",
     "change_history",
+    "change_plan_tasks",
+    "create_or_select_change_packet",
     "create_change_packet",
+    "derive_change_impact",
+    "derive_change_impact_for_project",
     "find_change_packets",
     "legacy_amendment_history",
     "list_change_packets",
     "lookup_change_history",
     "lookup_change_packet",
+    "next_change_id",
+    "normalize_changed_files",
     "parse_change_text",
+    "plan_change_packet",
     "read_change_packet",
     "validate_change_id",
     "validate_change_packet",

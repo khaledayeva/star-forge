@@ -1989,7 +1989,7 @@ def test_done_happy_path_writes_complete_proof() -> None:
         assert proof["scope_hash"] == star_forge.scope_hash(project)
 
 
-def test_post_done_drift_scaffolds_single_amend_task() -> None:
+def test_post_done_drift_creates_single_draft_change_packet() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         project = Path(tmp).resolve()
         build_completed_project(project)
@@ -2011,23 +2011,43 @@ def test_post_done_drift_scaffolds_single_amend_task() -> None:
         state = json.loads((project / ".starforge" / "state.json").read_text(encoding="utf-8"))
         assert state["phase"] == "amend"
         assert state["drift"]["detected"] is True
-        assert "AMEND-1" in state["plan"]["ready"]
+        assert state["change_packet"]["change_id"] == "CHANGE-1"
+        assert state["change_packet"]["approval_state"] == "draft"
+        assert state["change_packet"]["scope_delta"] == ["src/hello.py"]
+        assert state["plan"]["ready"] == []
+        assert state["spawn_plan"] == []
         plan_text = (project / "Plan.md").read_text(encoding="utf-8")
-        assert plan_text.count("| AMEND-") == 1
-        # The AMEND task inherits a REAL (non-prose, non-trivial) Verify command from
-        # an existing non-docs task, so it is actually completable under the new
-        # cell-bound verify gate. Here it equals SF-1's REAL_VERIFY command.
-        amend = next(t for t in star_forge.parse_tasks(project / "Plan.md") if t["id"] == "AMEND-1")
-        assert amend["status"] == "ready" and amend["mode"] == "solo"
-        assert amend["verify"] == REAL_VERIFY
-        assert not star_forge.command_is_noop(amend["verify"])
+        assert "| AMEND-" not in plan_text
+        packet_tasks = star_forge.project_changes.change_plan_tasks(project, "CHANGE-1")
+        assert len(packet_tasks) == 1
+        assert packet_tasks[0]["status"] == "queued"
+        assert packet_tasks[0]["mode"] == "delegate"
+        assert packet_tasks[0]["verify"] == REAL_VERIFY
+        assert "delivery" in star_forge.task_proof_kinds(packet_tasks[0])
         incidents = (project / ".starforge" / "state" / "incidents.jsonl").read_text(encoding="utf-8")
         assert '"kind": "post-done-drift"' in incidents
-        # A second drift run must NOT scaffold AMEND-2 while AMEND-1 is open.
+        assert '"change_packet": "CHANGE-1"' in incidents
+
+        # Identical drift reuses the same draft and still cannot yield work.
         code, out, err = run_cli(["run", "--project", str(project), "--no-hooks"])
         assert code == 0, err or out
-        plan_text = (project / "Plan.md").read_text(encoding="utf-8")
-        assert plan_text.count("| AMEND-") == 1
+        packets = star_forge.project_changes.list_change_packets(project)
+        assert [packet["change_id"] for packet in packets] == ["CHANGE-1"]
+        state = json.loads((project / ".starforge" / "state.json").read_text(encoding="utf-8"))
+        assert state["plan"]["ready"] == []
+        assert state["spawn_plan"] == []
+
+        code, out, err = run_cli(
+            ["approve-change", "--project", str(project), "--change", "CHANGE-1"]
+        )
+        assert code == 0, err or out
+        assert json.loads(out)["ready"] == ["CHANGE-1-T1"]
+        code, out, err = run_cli(["run", "--project", str(project), "--no-hooks"])
+        assert code == 0, err or out
+        state = json.loads((project / ".starforge" / "state.json").read_text(encoding="utf-8"))
+        assert state["change_packet"]["approval_state"] == "approved"
+        assert state["plan"]["ready"] == ["CHANGE-1-T1"]
+        assert state["spawn_plan"][0]["task"] == "CHANGE-1-T1"
 
 
 def test_scaffold_amend_preserves_complete_long_drift_file_list() -> None:
@@ -2050,7 +2070,7 @@ def test_scaffold_amend_preserves_complete_long_drift_file_list() -> None:
         assert "scrip" not in star_forge.task_files(amend)
 
 
-def test_completed_amend_does_not_rescaffold_same_drift_but_new_source_change_does() -> None:
+def test_completed_change_packet_is_reused_then_new_drift_gets_new_packet() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         project = Path(tmp).resolve()
         build_completed_project(project)
@@ -2069,30 +2089,40 @@ def test_completed_amend_does_not_rescaffold_same_drift_but_new_source_change_do
         assert json.loads(out)["status"] == "locked"
         code, out, err = run_cli(["run", "--project", str(project), "--no-hooks"])
         assert code == 0, err or out
-        record_verify(project, "AMEND-1")
-        code, payload = complete_task(project, "AMEND-1")
+        code, out, err = run_cli(
+            ["approve-change", "--project", str(project), "--change", "CHANGE-1"]
+        )
+        assert code == 0, err or out
+        record_verify(project, "CHANGE-1-T1")
+        code, payload = complete_task(project, "CHANGE-1-T1")
         assert code == 0, payload
 
         code, out, err = run_cli(["run", "--project", str(project), "--no-hooks"])
         assert code == 0, err or out
         state = json.loads((project / ".starforge" / "state.json").read_text(encoding="utf-8"))
         assert state["phase"] == "review"
-        assert state["drift"]["covered_by_completed_amendment"] == "AMEND-1"
+        assert state["drift"]["covered_by_completed_change_packet"] == "CHANGE-1"
         assert state["drift"]["actionable"] is False
         plan_text = (project / "Plan.md").read_text(encoding="utf-8")
-        assert plan_text.count("| AMEND-") == 1
+        assert "| AMEND-" not in plan_text
+        assert len(star_forge.project_changes.list_change_packets(project)) == 1
 
         (project / "src" / "hello.py").write_text("print('hello forge, drifted again')\n", encoding="utf-8")
         code, out, err = run_cli(["run", "--project", str(project), "--no-hooks"])
         assert code == 0, err or out
         state = json.loads((project / ".starforge" / "state.json").read_text(encoding="utf-8"))
         assert state["phase"] == "amend"
-        assert "AMEND-2" in state["plan"]["ready"]
-        plan_text = (project / "Plan.md").read_text(encoding="utf-8")
-        assert plan_text.count("| AMEND-") == 2
+        assert state["change_packet"]["change_id"] == "CHANGE-2"
+        assert state["change_packet"]["approval_state"] == "draft"
+        assert state["plan"]["ready"] == []
+        assert [
+            packet["change_id"]
+            for packet in star_forge.project_changes.list_change_packets(project)
+        ] == ["CHANGE-1", "CHANGE-2"]
+        assert "| AMEND-" not in (project / "Plan.md").read_text(encoding="utf-8")
 
 
-def test_amend_loop_closes_and_proof_supersedes() -> None:
+def test_change_packet_loop_closes_and_new_proof_supersedes_old_proof() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         project = Path(tmp).resolve()
         build_completed_project(project)
@@ -2112,15 +2142,22 @@ def test_amend_loop_closes_and_proof_supersedes() -> None:
         assert json.loads(out)["status"] == "locked"
         code, out, err = run_cli(["run", "--project", str(project), "--no-hooks"])
         assert code == 0, err or out
-        assert "AMEND-1" in (project / "Plan.md").read_text(encoding="utf-8")
-        # Close the loop: re-verify both tasks at the new tree, complete the amend,
+        assert "| AMEND-" not in (project / "Plan.md").read_text(encoding="utf-8")
+        assert json.loads(
+            (project / ".starforge" / "state.json").read_text(encoding="utf-8")
+        )["change_packet"]["approval_state"] == "draft"
+        code, out, err = run_cli(
+            ["approve-change", "--project", str(project), "--change", "CHANGE-1"]
+        )
+        assert code == 0, err or out
+        # Close the loop: re-verify both tasks at the new tree, complete the packet,
         # refresh the review, commit, then done passes and the proof supersedes.
         record_verify(project, "SF-1")
-        record_verify(project, "AMEND-1")
-        code, payload = complete_task(project, "AMEND-1")
+        record_verify(project, "CHANGE-1-T1")
+        code, payload = complete_task(project, "CHANGE-1-T1")
         assert code == 0, payload
         record_verify(project, "SF-1")
-        record_verify(project, "AMEND-1")
+        record_verify(project, "CHANGE-1-T1")
         # The source changed, so the prior review is stale: a real re-review must
         # re-attest the new source hash before review passes.
         write_clean_review_wave(project)
@@ -2136,6 +2173,7 @@ def test_amend_loop_closes_and_proof_supersedes() -> None:
         assert code == 0, err or out
         state = json.loads((project / ".starforge" / "state.json").read_text(encoding="utf-8"))
         assert state["phase"] == "done"
+        assert state["change_packet"] is None
 
 
 # -------------------------------------------------------------- 8. isolation

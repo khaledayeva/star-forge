@@ -3,7 +3,10 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
+import io
+import json
 import sys
 import tempfile
 import unittest
@@ -16,6 +19,7 @@ if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
 from starforge import changes
+import star_forge
 
 
 TEMPLATES = ROOT / "templates"
@@ -23,6 +27,58 @@ SOURCE_HASH = hashlib.sha256(b"completed source").hexdigest()
 
 
 class ChangePacketTests(unittest.TestCase):
+    def write_modern_project(self, project: Path) -> bytes:
+        blueprint = """# Blueprint
+
+Status: approved
+
+- **Project class**: web-app
+- **Delivery target**: preview
+
+## Risk Flags
+
+| Flag | Value | Reason |
+|---|---|---|
+| User-facing UI | no | backend-only delta |
+| Authentication or authorization | yes | signed-in API |
+| Multiple services or high coupling | no | one service |
+
+## Acceptance Criteria
+
+- AC-1: Authentication remains correct.
+- AC-2: The dashboard remains usable.
+"""
+        plan = """# Plan
+
+Status: active
+
+## Task Ledger
+
+| Task | Description | Status | Mode | Files | Depends | ACs | Proof | Verify | Evidence |
+|---|---|---|---|---|---|---|---|---|---|
+| SF-1 | Build API | complete | solo | src/api.py, tests/test_api.py | - | AC-1 | unit, security | python3 tests/test_api.py | proof-api.json |
+| SF-2 | Build dashboard | complete | delegate | web/ | - | AC-2 | browser | npm test | proof-web.json |
+"""
+        (project / "Blueprint.md").write_text(blueprint, encoding="utf-8")
+        root_plan = project / "Plan.md"
+        root_plan.write_text(plan, encoding="utf-8")
+        contract_path = project / ".starforge" / "contracts" / "delivery.json"
+        contract_path.parent.mkdir(parents=True)
+        contract_path.write_text(
+            json.dumps(
+                {
+                    "schema": "star-forge.delivery-contract.v1",
+                    "target": {
+                        "kind": "preview",
+                        "destination": "team preview",
+                    },
+                    "route": {"provider": "sites"},
+                }
+            ),
+            encoding="utf-8",
+        )
+        return root_plan.read_bytes()
+
     def create_packet(
         self,
         project: Path,
@@ -246,6 +302,131 @@ class ChangePacketTests(unittest.TestCase):
 
             with self.assertRaises(changes.ChangePacketError):
                 changes.read_change_packet(project, "CHANGE-1")
+
+    def test_scope_derivation_promotes_code_and_selects_risk_proof_delivery(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp)
+            self.write_modern_project(project)
+
+            impact = changes.derive_change_impact_for_project(
+                project,
+                ["M  src/api.py"],
+                profile="fast-mvp",
+            )
+
+            self.assertEqual(impact["scope_delta"], ["src/api.py"])
+            self.assertEqual(impact["affected_task_ids"], ["SF-1"])
+            self.assertEqual(impact["affected_acs"], ["AC-1"])
+            self.assertTrue(impact["delegation_required"])
+            task = impact["affected_tasks"][0]
+            self.assertEqual(task["mode"], "delegate")
+            self.assertEqual(task["verify"], "python3 tests/test_api.py")
+            self.assertEqual(
+                task["proof_kinds"],
+                ["delivery", "preview", "security", "unit"],
+            )
+            self.assertEqual(
+                impact["delivery_revalidation"]["target"],
+                "preview",
+            )
+            self.assertIn("security", impact["review_roles"])
+            self.assertIn("correctness", impact["review_lenses"])
+            self.assertNotIn("browser", impact["proof_kinds"])
+
+    def test_create_or_select_packet_keeps_root_historical_until_approval(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp)
+            root_plan_before = self.write_modern_project(project)
+
+            first = changes.create_or_select_change_packet(
+                project,
+                original_completed_source_hash=SOURCE_HASH,
+                changed_files=["M  src/api.py"],
+                created_at="2026-07-25T20:00:00Z",
+                template_dir=TEMPLATES,
+            )
+            second = changes.create_or_select_change_packet(
+                project,
+                original_completed_source_hash=SOURCE_HASH,
+                changed_files=["src/api.py"],
+                template_dir=TEMPLATES,
+            )
+
+            self.assertEqual(first["change_id"], "CHANGE-1")
+            self.assertEqual(second["change_id"], "CHANGE-1")
+            self.assertEqual((project / "Plan.md").read_bytes(), root_plan_before)
+            self.assertNotIn("AMEND-", (project / "Plan.md").read_text())
+            draft_tasks = changes.change_plan_tasks(project, "CHANGE-1")
+            self.assertEqual([task["status"] for task in draft_tasks], ["queued"])
+            self.assertEqual(draft_tasks[0]["mode"], "delegate")
+            self.assertEqual(
+                draft_tasks[0]["verify"],
+                "python3 tests/test_api.py",
+            )
+
+            approved = changes.approve_change_packet(
+                project,
+                "CHANGE-1",
+                approved_at="2026-07-25T21:00:00Z",
+            )
+            ready = changes.activate_change_plan(project, "CHANGE-1")
+
+            self.assertEqual(approved["approval_state"], "approved")
+            self.assertEqual([task["status"] for task in ready], ["ready"])
+            self.assertEqual((project / "Plan.md").read_bytes(), root_plan_before)
+
+    def test_unowned_code_never_inherits_unrelated_verification_or_approves(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp)
+            self.write_modern_project(project)
+
+            packet = changes.create_or_select_change_packet(
+                project,
+                original_completed_source_hash=SOURCE_HASH,
+                changed_files=["scripts/new_worker.py"],
+                template_dir=TEMPLATES,
+            )
+
+            task = changes.change_plan_tasks(project, packet["change_id"])[0]
+            self.assertEqual(task["mode"], "delegate")
+            self.assertEqual(task["verify"], "REVIEW_REQUIRED")
+            self.assertNotEqual(task["verify"], "python3 tests/test_api.py")
+            self.assertTrue(packet["impact"]["approval_blockers"])
+            with self.assertRaises(changes.ChangePacketError):
+                changes.approve_change_packet(project, packet["change_id"])
+
+    def test_approve_change_cli_preserves_command_compatibility(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp)
+            self.write_modern_project(project)
+            changes.create_or_select_change_packet(
+                project,
+                original_completed_source_hash=SOURCE_HASH,
+                changed_files=["src/api.py"],
+                template_dir=TEMPLATES,
+            )
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                code = star_forge.main(
+                    [
+                        "approve-change",
+                        "--project",
+                        str(project),
+                        "--change",
+                        "CHANGE-1",
+                    ]
+                )
+
+            payload = json.loads(output.getvalue())
+            self.assertEqual(code, 0)
+            self.assertEqual(payload["approval_state"], "approved")
+            self.assertEqual(payload["ready"], ["CHANGE-1-T1"])
 
 
 if __name__ == "__main__":

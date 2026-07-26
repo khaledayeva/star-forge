@@ -172,6 +172,7 @@ class BlueprintLockTests(unittest.TestCase):
                 "python3 -c \"print('ok')\" | .starforge/runs/verify.json |\n",
                 encoding="utf-8",
             )
+            root_plan_before = (project / "Plan.md").read_bytes()
             source = project / "src" / "app.py"
             source.parent.mkdir()
             source.write_text("print('one')\n", encoding="utf-8")
@@ -240,7 +241,20 @@ class BlueprintLockTests(unittest.TestCase):
             state = star_forge.read_json(project / star_forge.CANONICAL_STATE)
             self.assertEqual(state["phase"], "amend")
             self.assertEqual(state["blueprint"]["status"], "locked")
-            self.assertIn("AMEND-1", (project / "Plan.md").read_text())
+            self.assertEqual((project / "Plan.md").read_bytes(), root_plan_before)
+            self.assertEqual(state["change_packet"]["change_id"], "CHANGE-1")
+            self.assertEqual(state["change_packet"]["approval_state"], "draft")
+            self.assertEqual(state["plan"]["ready"], [])
+            self.assertEqual(state["spawn_plan"], [])
+            self.assertEqual(
+                [
+                    packet["change_id"]
+                    for packet in star_forge.project_changes.list_change_packets(
+                        project
+                    )
+                ],
+                ["CHANGE-1"],
+            )
 
     def test_approval_command_is_explicit_and_reports_the_locked_source(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

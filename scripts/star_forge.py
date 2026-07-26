@@ -35,6 +35,7 @@ if str(SCRIPT_DIR) not in sys.path:
 
 from live_collectors import common as live_common
 from live_collectors import native_macos as native_macos_collector
+from starforge import changes as project_changes
 from starforge import contracts as project_contracts
 from starforge import doctor as installation_doctor
 from starforge import lifecycle as project_lifecycle
@@ -1306,6 +1307,23 @@ def parse_tasks(plan_path: Path) -> list[dict[str, Any]]:
     return parse_tasks_from_text(read_text(plan_path))
 
 
+def task_plan(project: Path, task_id: str) -> tuple[Path, list[dict[str, Any]]]:
+    """Resolve a task in the historical root Plan or one packet-local Plan."""
+    root_plan = project / PLAN_FILE
+    root_tasks = parse_tasks(root_plan) if root_plan.exists() else []
+    if any(task.get("id") == task_id for task in root_tasks):
+        return root_plan, root_tasks
+    try:
+        for packet in reversed(project_changes.list_change_packets(project)):
+            packet_plan = project / packet["path"] / packet["plan_path"]
+            packet_tasks = parse_tasks(packet_plan)
+            if any(task.get("id") == task_id for task in packet_tasks):
+                return packet_plan, packet_tasks
+    except project_changes.ChangePacketError as exc:
+        raise ForgeError(str(exc)) from exc
+    return root_plan, root_tasks
+
+
 def plan_parse_problem(plan_path: Path, tasks: Sequence[dict[str, Any]]) -> str | None:
     if tasks or not plan_path.exists():
         return None
@@ -1917,14 +1935,12 @@ def cmd_verify(args: argparse.Namespace) -> int:
     ensure_state_dirs(project)
     started = now_utc()
     if args.noop:
-        plan_path = project / PLAN_FILE
-        if plan_path.exists():
-            tasks = parse_tasks(plan_path)
-            task = next((item for item in tasks if item.get("id") == args.task), None)
-            if task and not task_allows_noop_verification(task):
-                raise ForgeError(
-                    f"Task {args.task} is not eligible for no-op verification; it is mode=docs only with no code files. Run a real verification command."
-                )
+        _plan_path, tasks = task_plan(project, args.task)
+        task = next((item for item in tasks if item.get("id") == args.task), None)
+        if task and not task_allows_noop_verification(task):
+            raise ForgeError(
+                f"Task {args.task} is not eligible for no-op verification; it is mode=docs only with no code files. Run a real verification command."
+            )
         proc_returncode = 0
         stdout = args.summary or "No-op verification recorded for documentation-only task."
         stderr = ""
@@ -5297,11 +5313,13 @@ def cmd_waive(args: argparse.Namespace) -> int:
 def cmd_complete_task(args: argparse.Namespace) -> int:
     project = resolve_project(args.project)
     ensure_state_dirs(project)
-    plan_path = project / PLAN_FILE
-    tasks = parse_tasks(plan_path)
+    plan_path, tasks = task_plan(project, args.task)
     task = next((item for item in tasks if item.get("id") == args.task), None)
     findings: list[dict[str, Any]] = []
-    findings.extend(validate_project_plan_contract(project, tasks))
+    if plan_path == project / PLAN_FILE:
+        findings.extend(validate_project_plan_contract(project, tasks))
+    else:
+        findings.extend(validate_tasks(tasks))
     hash_problem = source_hash_unavailable_problem(project)
     _current_source_hash, snapshot_problem = try_source_hash(project)
     if hash_problem:
@@ -5348,7 +5366,16 @@ def cmd_complete_task(args: argparse.Namespace) -> int:
     }
     write_json(completion_artifact, payload)
     append_jsonl(project / LEDGER_FILE, {"schema": "star-forge.ledger.v1", "timestamp": now_utc(), "event": "task-complete", "task": args.task, "summary": summary, "artifacts": args.changed_file or []})
-    print(json.dumps(payload | {"updated": True, "plan": PLAN_FILE}, indent=2))
+    print(
+        json.dumps(
+            payload
+            | {
+                "updated": True,
+                "plan": relative_to_project(plan_path, project),
+            },
+            indent=2,
+        )
+    )
     return 0
 
 
@@ -5396,8 +5423,8 @@ def done_payload(project: Path) -> dict[str, Any]:
         problems.append({"severity": "medium", "message": "working tree is not clean", "files": dirty[:30]})
     # Drift vs a prior proof is informational here: the verify/review freshness
     # gates above already force a real re-pass after any source change, so a
-    # passing predicate legitimately supersedes the old proof. Amend re-entry
-    # (scaffolding the AMEND task) is `run`'s job.
+    # passing predicate legitimately supersedes the old proof. Change-packet
+    # re-entry is `run`'s job.
     proof = load_proof(project)
     if hash_problem:
         drift = source_hash_unavailable_state(profile_lock, problems=[hash_problem])
@@ -5559,10 +5586,88 @@ def completed_amendment_covering_drift(project: Path, tasks: Sequence[dict[str, 
     return None
 
 
+def change_scope_files(drift: Mapping[str, Any]) -> list[str]:
+    return [
+        str(path)
+        for path in (drift.get("changed_files") or [])
+        if not str(path).strip().strip('"').endswith(
+            project_contracts.BLUEPRINT_LOCK_FILE
+        )
+    ]
+
+
+def change_packet_for_drift(
+    project: Path,
+    drift: Mapping[str, Any],
+    proof: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    if not drift.get("detected") or not proof:
+        return None
+    try:
+        scope = project_changes.normalize_changed_files(change_scope_files(drift))
+        matches = [
+            packet
+            for packet in project_changes.list_change_packets(project)
+            if packet["original_completed_source_hash"] == proof.get("source_hash")
+            and packet["scope_delta"] == scope
+        ]
+    except project_changes.ChangePacketError:
+        return None
+    for packet in reversed(matches):
+        try:
+            packet_tasks = project_changes.change_plan_tasks(
+                project, packet["change_id"]
+            )
+        except project_changes.ChangePacketError:
+            continue
+        if not packet_tasks or not all_tasks_complete(packet_tasks):
+            return packet
+    return matches[-1] if matches else None
+
+
+def completed_change_packet_covering_drift(
+    project: Path,
+    drift: Mapping[str, Any],
+    proof: Mapping[str, Any] | None,
+) -> str | None:
+    packet = change_packet_for_drift(project, drift, proof)
+    if not packet or packet["approval_state"] != "approved":
+        return None
+    try:
+        tasks = project_changes.change_plan_tasks(project, packet["change_id"])
+    except project_changes.ChangePacketError:
+        return None
+    if not tasks or not all_tasks_complete(tasks):
+        return None
+    current = source_hash(project)
+    for task in tasks:
+        completion_path = (
+            project / STATE_SUBDIR / f"complete-task-{slugify(task['id'])}.json"
+        )
+        try:
+            completion = read_json(completion_path)
+        except Exception:
+            return None
+        snapshot = completion.get("source_snapshot")
+        if (
+            completion.get("verdict") != "COMPLETE"
+            or not isinstance(snapshot, dict)
+            or snapshot.get("source_hash") != current
+        ):
+            return None
+    return str(packet["change_id"])
+
+
 def annotate_drift_coverage(project: Path, tasks: Sequence[dict[str, Any]], drift: dict[str, Any]) -> dict[str, Any]:
-    covered_by = completed_amendment_covering_drift(project, tasks, drift)
+    proof = load_proof(project)
+    covered_by_packet = completed_change_packet_covering_drift(
+        project, drift, proof
+    )
+    covered_by_legacy = completed_amendment_covering_drift(project, tasks, drift)
+    covered_by = covered_by_packet or covered_by_legacy
     return dict(drift) | {
-        "covered_by_completed_amendment": covered_by,
+        "covered_by_completed_amendment": covered_by_legacy,
+        "covered_by_completed_change_packet": covered_by_packet,
         "actionable": bool(drift.get("detected") and not covered_by),
     }
 
@@ -6145,8 +6250,31 @@ def canonical_state_payload(project: Path, *, objective: str = "", mode: str = "
         or not (project / LEDGER_FILE).exists()
     )
     scope = scope_hash(project) or "noscope"
-    review_blockers = [] if source_hash_blocked else review_findings_for_done(project, tasks)
     drift = annotate_drift_coverage(project, tasks, drift)
+    active_change = change_packet_for_drift(project, drift, proof)
+    effective_tasks = tasks
+    effective_plan_path = PLAN_FILE
+    if active_change is not None:
+        try:
+            effective_tasks = project_changes.change_plan_tasks(
+                project, active_change["change_id"]
+            )
+            effective_plan_path = str(
+                Path(active_change["path"]) / active_change["plan_path"]
+            )
+        except project_changes.ChangePacketError:
+            effective_tasks = []
+    change_approved = bool(
+        active_change is None or active_change.get("approval_state") == "approved"
+    )
+    effective_ready = (
+        ready_tasks(effective_tasks) if change_approved else []
+    )
+    review_blockers = (
+        []
+        if source_hash_blocked
+        else review_findings_for_done(project, effective_tasks)
+    )
     foundation_gate = lifecycle_gate_state(
         project,
         kind="foundation",
@@ -6173,7 +6301,7 @@ def canonical_state_payload(project: Path, *, objective: str = "", mode: str = "
         and not plan_is_placeholder(tasks)
         and not legacy_amend_requires_lock
     )
-    build_complete = all_tasks_complete(tasks)
+    build_complete = all_tasks_complete(effective_tasks)
     review_complete = build_complete and not review_blockers
     done = done_payload(project) if review_complete else None
     phase = project_lifecycle.resolve_phase(
@@ -6231,7 +6359,14 @@ def canonical_state_payload(project: Path, *, objective: str = "", mode: str = "
             "build": "Build ready tasks — spawn starforge-builder for delegate-mode tasks — then `verify` (and `browser-run` for UI).",
             "review": "Spawn starforge-reviewer agents, run `review`, then fix or waive the queue.",
             "deliver": "Produce the exact approved delivery result and fresh source-bound delivery proof." + (f" First blocker: {delivery_blocker}" if delivery_blocker else ""),
-            "amend": "Post-completion changes were detected; an amendment task was scaffolded. Build, verify, review it, then re-run `done`.",
+            "amend": (
+                f"Review change packet {active_change['change_id']} and run "
+                f"`approve-change --change {active_change['change_id']}` only "
+                "after explicit approval."
+                if active_change
+                and active_change.get("approval_state") == "draft"
+                else "Build the approved packet tasks, repeat their affected proof and review lenses, revalidate delivery, then re-run `done`."
+            ),
             "done": "Project is complete; publish only if explicitly requested." if done and done.get("is_complete") else "Run the final completion predicate and resolve any remaining source, proof, or cleanliness blocker.",
             "blocked": f"Repair Plan.md before continuing: {parse_problem}" if parse_problem else "Inspect blockers and continue the safest unblocked phase.",
         }.get(phase, "Inspect state and continue the safest unblocked phase.")
@@ -6255,19 +6390,25 @@ def canonical_state_payload(project: Path, *, objective: str = "", mode: str = "
             "sha256": blueprint_state.get("current_sha256"),
         },
         "plan": {
-            "path": PLAN_FILE,
-            "task_count": len(tasks),
-            "counts": task_counts(tasks),
-            "ready": [task["id"] for task in ready_tasks(tasks)],
+            "path": effective_plan_path,
+            "historical_root_path": PLAN_FILE,
+            "task_count": len(effective_tasks),
+            "counts": task_counts(effective_tasks),
+            "ready": [task["id"] for task in effective_ready],
             "parse_problem": parse_problem,
         },
+        "change_packet": active_change,
         "proof": proof,
         "drift": drift,
         "foundation": foundation_gate,
         "delivery": delivery_gate,
         "review_policy": adaptive_policy.to_dict(),
         "review": review_summary_source_hash_unavailable(project, scope, profile_lock, problems=[hash_problem] if hash_problem else None) if source_hash_blocked else review_summary(project, scope),
-        "spawn_plan": spawn_plan(project, tasks, phase),
+        "spawn_plan": (
+            spawn_plan(project, effective_tasks, phase)
+            if change_approved
+            else []
+        ),
         "source_hash_unavailable": source_hash_blocked,
         "source_hash_problems": [hash_problem] if hash_problem else [],
         "learnings_digest": learnings_digest(project),
@@ -6407,7 +6548,7 @@ def cmd_run(args: argparse.Namespace) -> int:
                     update_plan_task_row(plan_path, task["id"], {"status": "ready"})
         except ForgeError:
             pass
-    # Post-done drift: scaffold an amendment task so the loop re-enters cleanly.
+    # Post-done drift: isolate new work in a scope-derived v0.4 change packet.
     proof = load_proof(project)
     profile_lock_for_run = fast_mvp_profile_lock_state(project)
     _current_source_hash, hash_problem = try_source_hash(project)
@@ -6424,12 +6565,35 @@ def cmd_run(args: argparse.Namespace) -> int:
         and drift.get("detected")
         and proof
         and plan_path.exists()
+        and change_scope_files(drift)
         and blueprint_has_valid_lock(project)
         and not completed_amendment_covering_drift(project, drift_tasks, drift)
+        and not completed_change_packet_covering_drift(project, drift, proof)
     ):
-        amend_id = scaffold_amend(project, drift)
-        if amend_id:
-            append_jsonl(project / INCIDENTS_FILE, {"schema": "star-forge.incident.v1", "timestamp": now_utc(), "kind": "post-done-drift", "amend_task": amend_id, "changed_files": drift.get("changed_files")})
+        existing_packet = change_packet_for_drift(project, drift, proof)
+        try:
+            packet = project_changes.create_or_select_change_packet(
+                project,
+                original_completed_source_hash=str(proof.get("source_hash") or ""),
+                changed_files=change_scope_files(drift),
+                profile=review_profile(project),
+            )
+        except project_changes.ChangePacketError as exc:
+            raise ForgeError(f"could not derive post-completion change packet: {exc}") from exc
+        if (
+            existing_packet is None
+            or existing_packet.get("change_id") != packet.get("change_id")
+        ):
+            append_jsonl(
+                project / INCIDENTS_FILE,
+                {
+                    "schema": "star-forge.incident.v1",
+                    "timestamp": now_utc(),
+                    "kind": "post-done-drift",
+                    "change_packet": packet["change_id"],
+                    "changed_files": drift.get("changed_files"),
+                },
+            )
     payload = canonical_state_payload(project, objective=args.objective or "", mode=args.mode, fast_mvp=review_profile(project) == "fast-mvp")
     if getattr(args, "no_hooks", False):
         payload["hook_trust_notice"] = {
@@ -6506,6 +6670,27 @@ def cmd_approve_blueprint(args: argparse.Namespace) -> int:
         "contract_version": lock["contract_version"],
         "previous_status": before.get("status"),
         "status": state.get("status"),
+    }
+    print(json.dumps(payload, indent=2))
+    return 0
+
+
+def cmd_approve_change(args: argparse.Namespace) -> int:
+    """Approve and activate one already-derived change packet."""
+    project = resolve_project(args.project)
+    try:
+        packet = project_changes.approve_change_packet(project, args.change)
+        tasks = project_changes.activate_change_plan(project, args.change)
+    except project_changes.ChangePacketError as exc:
+        raise ForgeError(str(exc)) from exc
+    payload = {
+        "schema": "star-forge.change-approval.v1",
+        "project": str(project),
+        "change_id": packet["change_id"],
+        "approval_state": packet["approval_state"],
+        "approved_at": packet["approved_at"],
+        "plan": str(Path(packet["path"]) / packet["plan_path"]),
+        "ready": [task["id"] for task in ready_tasks(tasks)],
     }
     print(json.dumps(payload, indent=2))
     return 0
@@ -6987,6 +7172,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--project", default=".")
     p.set_defaults(func=cmd_approve_blueprint)
+
+    p = sub.add_parser(
+        "approve-change",
+        help="Approve and activate a derived post-completion change packet",
+    )
+    p.add_argument("--project", default=".")
+    p.add_argument("--change", required=True)
+    p.set_defaults(func=cmd_approve_change)
 
     p = sub.add_parser("validate-plan", help="Validate Plan.md")
     p.add_argument("--file", default=PLAN_FILE)
