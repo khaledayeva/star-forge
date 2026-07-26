@@ -39,6 +39,7 @@ from starforge import changes as project_changes
 from starforge import contracts as project_contracts
 from starforge import doctor as installation_doctor
 from starforge import lifecycle as project_lifecycle
+from starforge import quality as project_quality
 from starforge import review_policy as adaptive_review_policy
 
 
@@ -1106,15 +1107,7 @@ def is_text_file(path: Path) -> bool:
 
 def iter_project_files(project: Path, *, all_files: bool = False) -> Iterable[Path]:
     if all_files:
-        for root, dirs, files in os.walk(project):
-            root_path = Path(root)
-            dirs[:] = sorted(name for name in dirs if name not in IGNORED_PARTS and not (root_path / name).is_symlink())
-            for name in sorted(files):
-                path = root_path / name
-                if any(part in IGNORED_PARTS for part in path.relative_to(project).parts):
-                    continue
-                if path.is_file() and is_text_file(path):
-                    yield path
+        yield from project_quality.iter_project_files(project)
     else:
         yield from git_changed_files(project)
 
@@ -1126,7 +1119,7 @@ def scan_paths(paths: Iterable[Path], project: Path) -> list[dict[str, Any]]:
             continue
         try:
             rel = relative_to_project(path, project)
-            if any(part in IGNORED_PARTS for part in Path(rel).parts):
+            if project_quality.exclusion_reason(path, project):
                 continue
             text = read_text(path)
         except (OSError, UnicodeDecodeError):
@@ -1141,34 +1134,11 @@ def scan_paths(paths: Iterable[Path], project: Path) -> list[dict[str, Any]]:
 
 
 def is_source_file(path: Path) -> bool:
-    rel_parts = set(path.parts)
-    if not ({"src", "app", "components", "lib", "pages", "routes", "services"} & rel_parts):
-        return False
-    return path.suffix.lower() in {".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".swift", ".kt", ".java", ".go", ".rs"}
+    return project_quality.is_source_file(path)
 
 
 def architecture_debt_findings(paths: Iterable[Path], project: Path) -> list[dict[str, Any]]:
-    findings: list[dict[str, Any]] = []
-    for path in paths:
-        if not path.exists() or not path.is_file() or not is_source_file(path):
-            continue
-        try:
-            rel = relative_to_project(path, project)
-            if any(part in IGNORED_PARTS for part in Path(rel).parts):
-                continue
-            text = read_text(path)
-        except (OSError, UnicodeDecodeError):
-            continue
-        lines = text.splitlines()
-        line_count = len(lines)
-        ts_ignore_count = len(re.findall(r"@ts-ignore", text))
-        if line_count > 1200:
-            findings.append({"severity": "medium", "rule": "architecture-debt-large-file", "file": rel, "line": 1, "evidence": f"{line_count} lines; split into smaller cohesive modules"})
-        elif line_count > 800:
-            findings.append({"severity": "low", "rule": "architecture-debt-large-file", "file": rel, "line": 1, "evidence": f"{line_count} lines; consider a follow-up split"})
-        if ts_ignore_count:
-            findings.append({"severity": "high", "rule": "architecture-debt-ts-ignore", "file": rel, "line": 1, "evidence": f"{ts_ignore_count} @ts-ignore directive(s); justify or remove"})
-    return findings
+    return project_quality.architecture_debt_findings(paths, project)
 
 
 def snapshot_file_candidates(project: Path) -> list[Path]:
@@ -6715,6 +6685,20 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     return installation_doctor.doctor_exit_code(payload, strict=args.strict)
 
 
+def cmd_quality(args: argparse.Namespace) -> int:
+    """Classify project source and report explainable architecture debt."""
+    project = resolve_project(args.project)
+    payload = project_quality.quality_report(
+        project,
+        include_files=args.include_files,
+    )
+    blocking = blocking_items(payload["findings"])
+    payload["verdict"] = "PASS" if not blocking else "REQUEST_CHANGES"
+    payload["blocking_findings"] = len(blocking)
+    print(json.dumps(payload, indent=2))
+    return 1 if args.strict and blocking else 0
+
+
 def cmd_validate_plan(args: argparse.Namespace) -> int:
     raw = Path(args.file)
     project = resolve_project(args.project)
@@ -7096,7 +7080,7 @@ def cmd_self_test(args: argparse.Namespace) -> int:
         "security-handoff-packet", "source-packet-proof",
         "source-packet-github-pr-review", "server-lease", "review", "waive",
         "complete-task", "done", "learn", "agents-install", "validate-plan",
-        "status",
+        "status", "quality",
     ]:
         parser = build_parser()
         subcommands: set[str] = set()
@@ -7210,6 +7194,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--active-plugin-root", default="")
     p.add_argument("--strict", action="store_true")
     p.set_defaults(func=cmd_doctor)
+
+    p = sub.add_parser(
+        "quality",
+        help="Classify source and report deterministic architecture debt",
+    )
+    p.add_argument("--project", default=".")
+    p.add_argument("--include-files", action="store_true")
+    p.add_argument("--strict", action="store_true")
+    p.set_defaults(func=cmd_quality)
 
     p = sub.add_parser("verify", help="Run and record a Star Forge-owned verification command")
     p.add_argument("--project", default=".")
