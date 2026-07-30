@@ -6,6 +6,7 @@ import json
 import re
 from pathlib import Path
 from typing import Any, Mapping, Sequence
+from live_collectors import common as live_common
 from starforge import changes as project_changes
 from starforge import contracts as project_contracts
 from .runtime_support import BLOCKING_SEVERITIES, FINAL_SUMMARY, FINDING_SEVERITIES, FINDING_SEVERITY_RANK, INCIDENTS_FILE, KNOWN_REVIEW_ROLES, LEDGER_FILE, PLAN_FILE, PROOF_FILE, REVIEWS_DIR, REVIEW_PROFILE_ROLES, STATE_SUBDIR, SUBAGENT_EVENTS, WAIVES_FILE, ForgeError, append_jsonl, architecture_debt_findings, blocking_items, finding_problem, git_head, git_status, is_git_repo, iter_project_files, jsonl_payloads, now_utc, read_json, relative_to_project, run_git, scan_paths, slugify, source_dirty_entries, source_hash, write_json, write_text
@@ -477,7 +478,7 @@ def detect_drift(project: Path, proof: dict[str, Any] | None) -> dict[str, Any]:
     source_changed = proof.get("source_hash") != current_source
     scope_changed = (proof.get("scope_hash") or "noscope") != current_scope
     changed = (source_dirty_entries(git_status(project)) or _diff_since(project, proof.get("head"))) if source_changed or head_changed else []
-    return policy_mapping("drift", detected=bool(head_changed or source_changed or scope_changed), head_changed=head_changed, source_changed=source_changed, scope_changed=scope_changed, changed_files=changed)
+    return policy_mapping("drift", detected=bool(head_changed or source_changed or scope_changed or not proof_is_current(project, proof)), head_changed=head_changed, source_changed=source_changed, scope_changed=scope_changed, changed_files=changed)
 def completed_task_matches_source(project: Path, task_id: str, current: str, *, attest_task: bool = False) -> bool:
     payload = load_optional_json(project / STATE_SUBDIR / f"complete-task-{slugify(task_id)}.json")
     snapshot = payload.get("source_snapshot") if payload else None
@@ -547,21 +548,31 @@ def annotate_drift_coverage(
                           "covered_by_completed_change_packet": covered_by_packet,
                           "actionable": bool(drift.get("detected") and not covered_by)}
 def _diff_since(project: Path, head: str | None) -> list[str]:
-    if head and is_git_repo(project):
-        code, out, _ = run_git(["diff", "--name-only", f"{head}..HEAD"], project)
-        return [line.strip() for line in out.splitlines() if line.strip()] if code == 0 else []
-    return []
-def proof_binding_state(project: Path) -> tuple[bool, str | None, list[str]]:
+    if not head or not is_git_repo(project):
+        return []
+    code, paths, error = live_common.run_git_path_records(
+        ["diff", "--name-only", "-z", f"{head}..HEAD", "--"], project)
+    if code != 0:
+        raise ForgeError("Cannot enumerate changed Git paths: " + error.strip())
+    return paths
+def proof_binding_state(project: Path) -> tuple[bool, str | None, list[str], str]:
     repository = is_git_repo(project)
-    return repository, git_head(project) if repository else None, source_dirty_entries(git_status(project))
-def proof_binding_matches(project: Path, head: str, source: str) -> bool:
+    return repository, git_head(project) if repository else None, source_dirty_entries(git_status(project)), scope_hash(project) or "noscope"
+def proof_binding_matches(project: Path, head: str, source: str, scope: str) -> bool:
     before = proof_binding_state(project)
     current_source, problem = try_source_hash(project)
     after = proof_binding_state(project)
-    return bool(head and source and before == (True, head, []) == after
+    return bool(head and source and scope and before == (True, head, [], scope) == after
                 and not problem and current_source == source)
+def proof_is_current(project: Path, proof: Mapping[str, Any]) -> bool:
+    return bool(proof.get("schema") == "star-forge.proof.v1"
+                and str(proof.get("verdict") or "").startswith("COMPLETE")
+                and proof_binding_matches(project, str(proof.get("head") or ""), str(proof.get("source_hash") or ""), str(proof.get("scope_hash") or "")))
+def load_current_proof(project: Path) -> dict[str, Any] | None:
+    proof = load_proof(project)
+    return proof if proof and proof_is_current(project, proof) else None
 def refuse_proof_binding(payload: dict[str, Any]) -> None:
-    payload["problems"].append({"severity": "high", "rule": "git-proof-binding", "message": "Git state changed before final proof publication."})
+    payload["problems"].append({"severity": "high", "rule": "git-proof-binding", "message": "Git state changed before completion was linearized."})
     payload.update(is_complete=False, verdict=REVIEW_POLICY["done_verdicts"]["blocked"])
 def cmd_done(args: argparse.Namespace) -> int:
     project = resolve_project(args.project)
@@ -575,11 +586,13 @@ def cmd_done(args: argparse.Namespace) -> int:
             "proof", created_at=now_utc(), head=proof_head, source_hash=proof_source_hash,
             scope_hash=scope_hash(project) or "noscope", verdict=payload["verdict"])
         ensure_state_dirs(project)
-        if not proof_binding_matches(project, proof_head, proof_source_hash):
+        if not proof_binding_matches(project, proof_head, proof_source_hash, str(proof["scope_hash"])):
             refuse_proof_binding(payload)
         else:
             write_json(proof_path, proof)
-            if args.write_summary:
+            if not proof_is_current(project, proof):
+                refuse_proof_binding(payload)
+            elif args.write_summary:
                 write_text(project / FINAL_SUMMARY, done_summary_markdown(payload))
                 payload["summary_artifact"] = str(FINAL_SUMMARY)
     print(json.dumps(payload, indent=2))

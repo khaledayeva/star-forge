@@ -165,8 +165,19 @@ def sanitize_external_path(path: Path) -> str:
 def file_sha256(path: Path, *, root: Path | None = None) -> str:
     return safe_io.digest_size(root or safe_io.infer_root(path), path)[0]
 def run_git(args: Sequence[str], cwd: Path) -> tuple[int, str, str]:
-    proc = subprocess.run(["git", *args], cwd=str(cwd), text=True, capture_output=True, check=False)
-    return proc.returncode, proc.stdout, proc.stderr
+    proc = subprocess.run(["git", *args], cwd=os.fspath(cwd), text=False,
+                          capture_output=True, check=False)
+    return proc.returncode, os.fsdecode(proc.stdout), os.fsdecode(proc.stderr)
+def run_git_path_records(args: Sequence[str], cwd: Path) -> tuple[int, list[str], str]:
+    code, output, error = run_git(args, cwd)
+    if code != 0:
+        return code, [], error
+    if output and not output.endswith("\0"):
+        raise ValueError("Git path output is not NUL terminated")
+    records = output[:-1].split("\0") if output else []
+    if "" in records:
+        raise ValueError("Git path output contains an empty record")
+    return code, records, error
 def is_git_repo(project: Path) -> bool:
     return run_git(["rev-parse", "--is-inside-work-tree"], project)[0] == 0
 def path_has_source_hash_excluded_part(rel_path: str | Path) -> bool:
@@ -177,18 +188,25 @@ def source_hash_dirty_entries(project: Path, entries: Sequence[str]) -> list[str
         if (path := git_status_path(line)) and not path_has_source_hash_excluded_part(path)
     ]
 def git_status_path(line: str) -> str:
-    path = line[3:] if len(line) > 3 else line.strip()
-    path = path.strip().strip('"')
-    return path.split(" -> ", 1)[-1].strip().strip('"')
+    return line[3:] if len(line) > 3 else line.strip()
 def git_head(project: Path) -> str:
     code, out, _ = run_git(["rev-parse", "HEAD"], project)
     return out.strip() if code == 0 else ""
 def git_status(project: Path) -> list[str]:
-    code, out, _ = run_git(["status", "--short", "--untracked-files=all", "--", "."], project)
-    return (
-        [line for line in out.splitlines() if line.strip()]
-        if code == 0 else ["?? <git status unavailable>"]
-    )
+    try:
+        code, records, _ = run_git_path_records(
+            ["status", "--porcelain=v1", "-z", "--no-renames",
+             "--untracked-files=all", "--", "."],
+            project,
+        )
+        if code != 0 or any(
+            len(record) < 4 or record[2] != " " or not record[3:]
+            for record in records
+        ):
+            raise ValueError("Git status output contains a malformed record")
+        return [record[:2] + " " + record[3:] for record in records]
+    except ValueError:
+        return ["?? <git status unavailable>"]
 def source_dirty_entries(project: Path) -> list[str]:
     return source_hash_dirty_entries(project, git_status(project))
 def source_tree_clean_at_head(project: Path) -> bool:
@@ -199,7 +217,7 @@ def dirty_paths_missing_from_source_snapshot(project: Path) -> list[str]:
     snapshot_paths = source_snapshot_rel_paths(project)
     return [
         line for line in source_dirty_entries(project)
-        if (git_status_path(line) and git_status_path(line) not in snapshot_paths)
+        if (path := git_status_path(line)) and path not in snapshot_paths
     ]
 def _source_symlink_component(project: Path, path: Path) -> Path | None:
     project_root = project.resolve()
@@ -214,36 +232,31 @@ def _source_symlink_component(project: Path, path: Path) -> Path | None:
         if current.is_symlink():
             return current
     return None
-def _safe_regular_project_file(project: Path, path: Path) -> bool:
-    """Check a source path without following any symlink component."""
-    if _source_symlink_component(project, path) is not None:
-        return False
-    try:
-        return stat.S_ISREG(_lexical_absolute(path).lstat().st_mode)
-    except OSError:
-        return False
 def _validated_source_candidate(project: Path, path: Path) -> Path | None:
     symlink = _source_symlink_component(project, path)
     if symlink is not None:
         raise ValueError(
             f"source snapshot refuses symlink: {project_relative(project, symlink)}"
         )
-    return path if _safe_regular_project_file(project, path) else None
+    try:
+        return path if stat.S_ISREG(_lexical_absolute(path).lstat().st_mode) else None
+    except OSError:
+        return None
 def snapshot_file_candidates(project: Path) -> list[Path]:
     git_repo = is_git_repo(project)
     if git_repo:
-        listings = (
-            run_git(["ls-files"], project),
-            run_git(["ls-files", "--others", "--exclude-standard"], project),
+        code, paths, error = run_git_path_records(
+            ["ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+            project,
         )
+        if code != 0:
+            raise ValueError(
+                "source snapshot cannot enumerate Git paths: "
+                f"{error.strip() or f'exit {code}'}")
         files = []
-        for code, out, _ in listings:
-            if code != 0:
-                continue
-            for rel in out.splitlines():
-                if not rel.strip() or path_has_source_hash_excluded_part(rel.strip()):
-                    continue
-                candidate = _validated_source_candidate(project, project / rel.strip())
+        for rel in paths:
+            if not path_has_source_hash_excluded_part(rel):
+                candidate = _validated_source_candidate(project, project / rel)
                 if candidate is not None:
                     files.append(candidate)
     else:
@@ -266,11 +279,6 @@ def snapshot_file_candidates(project: Path) -> list[Path]:
                 if candidate is not None:
                     files.append(candidate)
     return sorted(files, key=lambda item: project_relative(project, item))
-def source_snapshot_includes(path: Path) -> bool:
-    try:
-        return not path.is_symlink() and stat.S_ISREG(path.lstat().st_mode)
-    except OSError:
-        return False
 def files_fingerprint(project: Path, paths: Sequence[Path]) -> str:
     digest = hashlib.sha256()
     for path in paths:
@@ -280,8 +288,9 @@ def files_fingerprint(project: Path, paths: Sequence[Path]) -> str:
                 f"source fingerprint refuses symlink: {project_relative(project, symlink)}"
             )
         rel = project_relative(project, path)
-        content_hash = file_sha256(path, root=project) if _safe_regular_project_file(project, path) else ""
-        digest.update(f"{rel}\0{content_hash}\0".encode("utf-8"))
+        candidate = _validated_source_candidate(project, path)
+        content_hash = file_sha256(candidate, root=project) if candidate else ""
+        digest.update(os.fsencode(rel) + b"\0" + content_hash.encode("ascii") + b"\0")
     return digest.hexdigest()
 def tree_sha256(path: Path | None) -> str:
     return "" if path is None or not path.is_dir() else files_fingerprint(path, sorted(

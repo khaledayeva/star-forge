@@ -95,6 +95,32 @@ def git(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
         check=check,
     )
 
+def git_paths(*args: str) -> list[str]:
+    process = subprocess.run(
+        ["git", *args],
+        cwd=root,
+        text=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if process.returncode != 0:
+        raise SystemExit(
+            "release check failed: cannot enumerate Git paths: "
+            + os.fsdecode(process.stderr).strip()
+        )
+    output = process.stdout
+    if output and not output.endswith(b"\0"):
+        raise SystemExit(
+            "release check failed: Git path output is not NUL terminated"
+        )
+    records = [] if not output else output[:-1].split(b"\0")
+    if any(not record for record in records):
+        raise SystemExit(
+            "release check failed: Git path output contains an empty record"
+        )
+    return [os.fsdecode(record) for record in records]
+
 
 def commit_exists(candidate: str) -> bool:
     if not candidate:
@@ -133,16 +159,16 @@ base_candidates = [
 base = next((candidate for candidate in base_candidates if commit_exists(candidate)), "")
 if base:
     changed = [
-        line
-        for line in git("diff", "--name-only", base, "--").stdout.splitlines()
-        if line and not line.startswith(".starforge/")
+        path
+        for path in git_paths("diff", "--name-only", "-z", base, "--")
+        if not path.startswith(".starforge/")
     ]
     changed.extend(
-        line
-        for line in git(
-            "ls-files", "--others", "--exclude-standard"
-        ).stdout.splitlines()
-        if line and not line.startswith(".starforge/")
+        path
+        for path in git_paths(
+            "ls-files", "-z", "--others", "--exclude-standard"
+        )
+        if not path.startswith(".starforge/")
     )
     changed = list(dict.fromkeys(changed))
     if changed:

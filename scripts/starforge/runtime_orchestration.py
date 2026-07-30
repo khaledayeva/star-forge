@@ -1,5 +1,4 @@
 """Cohesive Star Forge runtime extracted from the CLI facade."""
-
 from __future__ import annotations
 import argparse
 import json
@@ -20,21 +19,16 @@ from .policy_data import mapping as policy_mapping, project as project_record, r
 from .runtime_support import AGENT_NAME_PREFIX, BLOCKING_SEVERITIES, BLUEPRINT_FILE, CANONICAL_STATE, HOOK_EVENTS, HOOK_TRUST_NOTICE_FILE, INCIDENTS_FILE, LEDGER_FILE, PLAN_FILE, PROJECT_MANIFEST, REVIEW_ROLE_LENSES, SF_VERSION, SOURCE_PROFILE_FILE, ForgeError, append_jsonl, blocking_items, ensure_git_repo, ensure_gitignore_entries, file_sha256, git_status, git_status_path, is_git_repo, jsonl_payloads, now_utc, plugin_root, read_json, read_text, relative_to_project, slugify, snapshot_file_candidates, template_text, write_json, write_json_stable, write_text
 from .runtime_project import enforcement_mode, ensure_project_manifest, ensure_state_dirs, fast_mvp_profile_lock_state, fast_mvp_profile_selected_before_gates, find_star_forge_project_root, hooks_liveness, normalize_project_profile, profile_downgrade_lock_reasons, project_profile, required_review_policy, resolve_project, review_profile, root_needs_product_isolation, setup_ledger_records_fast_mvp_before_gates, source_hash_exception_problem, source_hash_unavailable_problem, source_hash_unavailable_state, source_profile_path, try_source_hash
 from .runtime_plan import all_tasks_complete, append_plan_task, blueprint_has_valid_lock, blueprint_is_approved, blueprint_lifecycle_contract, blueprint_lock_state, command_is_noop, lifecycle_gate_state, parse_tasks, plan_contract_mode, plan_is_placeholder, plan_parse_problem, ready_tasks, scope_hash, task_allows_noop_verification, task_counts, task_files, task_requires_real_workers, task_verify_command, update_plan_task_row, validate_project_plan_contract, validate_tasks
-from .runtime_review import annotate_drift_coverage, change_packet_for_drift, change_scope_files, completed_amendment_covering_drift, completed_change_packet_covering_drift, detect_drift, done_payload, load_merged_review, load_proof, review_findings_for_done, reviews_scope_dir
-
+from .runtime_review import annotate_drift_coverage, change_packet_for_drift, change_scope_files, completed_amendment_covering_drift, completed_change_packet_covering_drift, detect_drift, done_payload, load_current_proof, load_merged_review, load_proof, review_findings_for_done, reviews_scope_dir
 ORCHESTRATION = _policy_value("runtime_orchestration.POLICY")
-
 def _print_record(name: str, *sources: dict[str, Any], **values: Any) -> None:
     print(json.dumps(project_record(name, *sources, **values), indent=2))
-
 def learnings_home() -> Path:
     """Compatibility wrapper for the configured, opt-in global store."""
     return global_learnings.learnings_home()
-
 def project_keywords(project: Path) -> set[str]:
     """Compatibility wrapper for deterministic project matching terms."""
     return global_learnings.project_keywords(project, candidate_names=[relative_to_project(path, project) for path in snapshot_file_candidates(project)])
-
 def learnings_report(
     project: Path,
     limit: int = 5,
@@ -52,10 +46,8 @@ def learnings_report(
             limit=max(0, min(int(limit), global_learnings.MAX_DIGEST_LIMIT)),
             rejection_reasons={type(exc).__name__: 1},
         )
-
 def learnings_digest(project: Path, limit: int = 5, *, explicit_opt_in: bool = False) -> list[dict[str, Any]]:
     return list(learnings_report(project, limit=limit, explicit_opt_in=explicit_opt_in)["items"])
-
 def cmd_learn(args: argparse.Namespace) -> int:
     if not str(args.title or "").strip() or not str(args.rule or "").strip():
         raise ForgeError("learn requires --title and --rule")
@@ -76,7 +68,6 @@ def cmd_learn(args: argparse.Namespace) -> int:
     record = result["record"]
     _print_record("learn", result, record)
     return 0
-
 def hook_trust_notice(project: Path) -> dict[str, Any]:
     show = bool(not hooks_liveness(project).get("local_events_observed") and not (project / HOOK_TRUST_NOTICE_FILE).exists())
     return policy_mapping("hook_notice", show=show, message=ORCHESTRATION["hook_notice"]["message"], marker=str(HOOK_TRUST_NOTICE_FILE))
@@ -297,7 +288,7 @@ def operating_card(project: Path, state: dict[str, Any]) -> str:
 def lifecycle_next_action(phase: str, state: Mapping[str, Any]) -> str:
     hash_problem = state.get("hash_problem")
     profile_lock, blueprint_state = state["profile_lock"], state["blueprint_state"]
-    drift, proof, parse_problem = state["drift"], state.get("proof"), state.get("parse_problem")
+    drift, proof, parse_problem = state["drift"], state.get("historical_proof") or state.get("proof"), state.get("parse_problem")
     foundation_gate, delivery_gate = state["foundation_gate"], state["delivery_gate"]
     active_change, done = state.get("active_change"), state.get("done")
     if hash_problem and not parse_problem:
@@ -343,12 +334,12 @@ def canonical_state_payload(
     tasks = parse_tasks(plan_path) if plan_path.exists() else []
     adaptive_policy = required_review_policy(project, source_hash_value=current_source_hash, bind_source_hash=not source_hash_blocked)
     parse_problem = plan_parse_problem(plan_path, tasks)
-    proof = load_proof(project)
-    drift = source_hash_unavailable_state(profile_lock, problems=[hash_problem] if hash_problem else None) if source_hash_blocked else detect_drift(project, proof)
+    historical_proof, proof = load_proof(project), load_current_proof(project)
+    drift = source_hash_unavailable_state(profile_lock, problems=[hash_problem] if hash_problem else None) if source_hash_blocked else detect_drift(project, historical_proof)
     setup_missing = (not is_git_repo(project) or not (project / BLUEPRINT_FILE).exists() or not (project / PLAN_FILE).exists() or not (project / LEDGER_FILE).exists())
     scope = scope_hash(project) or "noscope"
     drift = annotate_drift_coverage(project, tasks, drift)
-    active_change = change_packet_for_drift(project, drift, proof)
+    active_change = change_packet_for_drift(project, drift, historical_proof)
     effective_tasks = tasks
     effective_plan_path = PLAN_FILE
     if active_change is not None:
@@ -368,7 +359,7 @@ def canonical_state_payload(
         for kind in ORCHESTRATION["lifecycle_gates"]
     }
     foundation_gate, delivery_gate = gates["foundation"], gates["delivery"]
-    legacy_amend_requires_lock = bool(blueprint_state.get("status") == "legacy-approved" and drift.get("actionable") and proof)
+    legacy_amend_requires_lock = bool(blueprint_state.get("status") == "legacy-approved" and drift.get("actionable") and historical_proof)
     plan_complete = bool(blueprint_state.get("approved") and tasks and not plan_is_placeholder(tasks) and not legacy_amend_requires_lock)
     build_complete = all_tasks_complete(effective_tasks)
     review_complete = build_complete and not review_blockers
@@ -380,7 +371,7 @@ def canonical_state_payload(
         design_required=(lifecycle_contract.get("design") or {}).get("required"),
         design_complete=bool(blueprint_state.get("approved") or (lifecycle_contract.get("design") or {}).get("complete")),
         plan_complete=plan_complete, foundation_complete=bool(foundation_gate.get("satisfied")),
-        amendment_required=bool(drift.get("actionable") and proof), build_complete=build_complete,
+        amendment_required=bool(drift.get("actionable") and historical_proof), build_complete=build_complete,
         review_complete=review_complete, delivery_complete=bool(delivery_gate.get("satisfied")),
         completion_complete=bool(done and done.get("is_complete")),
     )

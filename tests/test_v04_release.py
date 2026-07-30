@@ -463,6 +463,30 @@ def test_release_gate_counts_untracked_package_files() -> None:
         assert "new-package-file.txt" in result.stderr
 
 
+def test_release_gate_preserves_special_git_paths() -> None:
+    names = (
+        "café.txt",
+        "line\nbreak.txt",
+        "tab\tname.txt",
+        'quote"name.txt',
+        "back\\slash.txt",
+    )
+    with isolated_temp_directory("star-forge-rc-special-paths-") as tmp:
+        fixture = Path(tmp).resolve()
+        base = init_release_fixture(fixture)
+        for name in names:
+            (fixture / name).write_text("new\n", encoding="utf-8")
+        result = run(
+            ["sh", "scripts/release-check.sh", "--version-only"],
+            cwd=fixture,
+            env={"STAR_FORGE_RELEASE_BASE": base},
+        )
+        assert result.returncode == 1
+        assert "without a new plugin version or cachebuster" in result.stderr
+        for name in names:
+            assert name in result.stderr, (name, result.stderr)
+
+
 def test_repository_metadata_passes_version_only_release_gate() -> None:
     result = run(
         ["sh", "scripts/release-check.sh", "--version-only"],

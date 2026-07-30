@@ -180,31 +180,27 @@ def ensure_git_repo(project: Path) -> bool:
         raise _error("git_init", error=err.strip())
     return True
 def git_status(project: Path) -> list[str]:
-    if not live_common.is_git_repo(project):
-        return []
-    code, out, _ = _run_git("status", project)
-    if code != 0:
-        return ["?? <git status unavailable>"]
-    return [line for line in out.splitlines() if line.strip()]
+    return live_common.git_status(project) if live_common.is_git_repo(project) else []
 def source_dirty_entries(entries: Sequence[str]) -> list[str]:
     """Filter Star Forge's own state writes out of dirty-tree checks."""
     return live_common.source_hash_dirty_entries(Path.cwd(), entries)
 def git_changed_files(project: Path) -> list[Path]:
     if not live_common.is_git_repo(project):
         return []
-    code, out, _ = _run_git("changed", project)
-    files = [project / line.strip() for line in out.splitlines() if line.strip()] if code == 0 else []
-    code, out, _ = _run_git("untracked", project)
-    if code == 0:
-        files.extend(project / line.strip() for line in out.splitlines() if line.strip())
-    seen: set[Path] = set()
-    unique: list[Path] = []
+    files: list[Path] = []
+    for command in ("changed", "untracked"):
+        code, paths, _ = live_common.run_git_path_records(
+            SUPPORT_POLICY["git_commands"][command], project)
+        if code != 0:
+            if command == "changed" and not git_head(project):
+                continue
+            raise ForgeError(f"Cannot enumerate {command} Git paths")
+        files.extend(project / path for path in paths)
+    unique: dict[Path, Path] = {}
     for path in files:
-        resolved = path.resolve()
-        if resolved not in seen and path.exists():
-            seen.add(resolved)
-            unique.append(path)
-    return unique
+        if path.exists():
+            unique.setdefault(path.resolve(), path)
+    return list(unique.values())
 def relative_to_project(path: Path, project: Path) -> str:
     try:
         return str(path.resolve().relative_to(project.resolve()))

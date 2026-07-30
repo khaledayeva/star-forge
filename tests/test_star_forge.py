@@ -32,6 +32,7 @@ SPEC.loader.exec_module(star_forge)
 
 from live_collectors import browser_playwright
 from live_collectors import common as live_common
+from starforge import runtime_orchestration
 from starforge import runtime_preview
 from starforge import runtime_records
 from starforge import runtime_review
@@ -620,6 +621,100 @@ def test_source_hash_includes_tracked_files_under_ignored_generated_dirs() -> No
             hash_v2 = star_forge.source_hash(project)
             assert hash_v2 != hash_v1, rel_path
             assert live_common.compute_source_hash(project) == hash_v2
+
+
+def test_git_path_consumers_preserve_special_filenames() -> None:
+    names = (
+        "café.py",
+        "line\nbreak.py",
+        "tab\tname.py",
+        'quote"name.py',
+        "back\\slash.py",
+    )
+    for name in names:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp).resolve()
+            init_project(project)
+            special = project / name
+            special.write_text("print('untracked v1')\n", encoding="utf-8")
+
+            for status in (
+                live_common.git_status(project),
+                runtime_support.git_status(project),
+            ):
+                assert name in {
+                    live_common.git_status_path(entry) for entry in status
+                }, (name, status)
+
+            untracked_v1 = star_forge.source_hash(project)
+            special.write_text("print('untracked v2')\n", encoding="utf-8")
+            untracked_v2 = star_forge.source_hash(project)
+            assert untracked_v2 != untracked_v1, name
+            assert name in {
+                live_common.project_relative(project, path)
+                for path in live_common.snapshot_file_candidates(project)
+            }
+
+            commit_all(project, f"track special path {name!r}")
+            tracked_v1 = star_forge.source_hash(project)
+            special.write_text("print('tracked v2')\n", encoding="utf-8")
+            assert special in runtime_support.git_changed_files(project)
+            assert name in {
+                live_common.git_status_path(entry)
+                for entry in runtime_support.git_status(project)
+            }
+            commit_all(project, f"change special path {name!r}")
+            tracked_v2 = star_forge.source_hash(project)
+            assert tracked_v2 != tracked_v1, name
+            assert live_common.compute_source_hash(project) == tracked_v2
+
+
+def test_git_path_enumeration_failures_do_not_produce_partial_evidence() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        init_project(project)
+        commit_all(project)
+        original_git_path_records = live_common.run_git_path_records
+
+        def fail_source_listing(
+            command: list[str], target: Path,
+        ) -> tuple[int, list[str], str]:
+            if command[:2] == ["ls-files", "-z"]:
+                return 1, [], "simulated path listing failure"
+            return original_git_path_records(command, target)
+
+        with mock.patch.object(
+            live_common, "run_git_path_records", side_effect=fail_source_listing,
+        ):
+            try:
+                star_forge.source_hash(project)
+            except ValueError as exc:
+                assert "cannot enumerate Git paths" in str(exc)
+            else:
+                raise AssertionError("source hash accepted a failed Git path listing")
+
+        def fail_changed_listing(
+            command: list[str], target: Path,
+        ) -> tuple[int, list[str], str]:
+            if command[:3] == ["diff", "--name-only", "-z"]:
+                return 1, [], "simulated changed path failure"
+            return original_git_path_records(command, target)
+
+        with mock.patch.object(
+            live_common, "run_git_path_records", side_effect=fail_changed_listing,
+        ):
+            try:
+                runtime_support.git_changed_files(project)
+            except star_forge.ForgeError as exc:
+                assert "Cannot enumerate changed Git paths" in str(exc)
+            else:
+                raise AssertionError("changed-file scan accepted a failed Git listing")
+
+        with mock.patch.object(live_common, "git_status",
+                               return_value=["?? <git status unavailable>"]):
+            assert runtime_support.git_status(project) == [
+                "?? <git status unavailable>"
+            ]
 
 
 # --------------------------------------------------------------- 4. verify
@@ -2429,14 +2524,10 @@ def test_git_status_failure_is_not_a_clean_commit_or_proof_binding() -> None:
         project = Path(tmp).resolve()
         init_project(project)
         commit_all(project)
-        original_run_git = runtime_support._run_git
-
-        def fail_status(command: str, target: Path) -> tuple[int, str, str]:
-            if command == "status":
-                return 1, "", "simulated git status failure"
-            return original_run_git(command, target)
-
-        with mock.patch.object(runtime_support, "_run_git", side_effect=fail_status):
+        with mock.patch.object(
+            live_common, "git_status",
+            return_value=["?? <git status unavailable>"],
+        ):
             head = star_forge.git_head(project)
             assert head
             assert runtime_support.git_status(project) == [
@@ -2455,14 +2546,10 @@ def test_done_fails_closed_when_git_status_is_unavailable() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         project = Path(tmp).resolve()
         build_completed_project(project)
-        original_run_git = runtime_support._run_git
-
-        def fail_status(command: str, target: Path) -> tuple[int, str, str]:
-            if command == "status":
-                return 1, "", "simulated git status failure"
-            return original_run_git(command, target)
-
-        with mock.patch.object(runtime_support, "_run_git", side_effect=fail_status):
+        with mock.patch.object(
+            live_common, "git_status",
+            return_value=["?? <git status unavailable>"],
+        ):
             assert star_forge.git_head(project)
             code, payload = run_done(project)
 
@@ -2660,52 +2747,130 @@ def test_interruption_before_terminal_publication_preserves_proof_state() -> Non
                 assert proof_path.read_bytes() == prior_proof
 
 
-def test_commit_after_terminal_validation_is_actionable_head_drift() -> None:
+def test_done_rejects_commits_during_atomic_proof_publication() -> None:
+    for empty_commit in (False, True):
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp).resolve()
+            build_completed_project(project)
+            proof_path = project / star_forge.PROOF_FILE
+            original_write_json = runtime_review.write_json
+            raced = False
+
+            def commit_during_publication(path: Path, value: object) -> None:
+                nonlocal raced
+                if path == proof_path and not raced:
+                    if empty_commit:
+                        code, _, error = star_forge.run_git([
+                            "-c", "user.name=Star Forge Test",
+                            "-c", "user.email=starforge@example.com",
+                            "commit", "--allow-empty", "-m",
+                            "empty commit during proof publication",
+                        ], project)
+                        assert code == 0, error
+                    else:
+                        (project / "src" / "hello.py").write_text(
+                            "print('changed during atomic publication')\n",
+                            encoding="utf-8",
+                        )
+                        commit_all(project, "source commit during proof publication")
+                    raced = True
+                original_write_json(path, value)
+
+            with mock.patch.object(
+                runtime_review, "write_json",
+                side_effect=commit_during_publication,
+            ):
+                code, payload = run_done(project)
+
+            assert raced is True
+            assert code == 1, payload
+            assert payload["is_complete"] is False
+            assert any(
+                problem.get("rule") == "git-proof-binding"
+                for problem in payload["problems"]
+            )
+            historical = star_forge.read_json(proof_path)
+            assert runtime_review.load_current_proof(project) is None
+            drift = runtime_review.detect_drift(project, historical)
+            assert drift["detected"] is True
+            assert drift["head_changed"] is True
+            assert drift["source_changed"] is not empty_commit
+            assert runtime_orchestration.canonical_state_payload(project)["proof"] is None
+
+
+def test_interruption_after_proof_publication_leaves_only_stale_history() -> None:
+    for empty_commit in (False, True):
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp).resolve()
+            build_completed_project(project)
+            proof_path = project / star_forge.PROOF_FILE
+            original_write_json = runtime_review.write_json
+
+            def publish_race_then_interrupt(path: Path, value: object) -> None:
+                original_write_json(path, value)
+                if path != proof_path:
+                    return
+                if empty_commit:
+                    code, _, error = star_forge.run_git([
+                        "-c", "user.name=Star Forge Test",
+                        "-c", "user.email=starforge@example.com",
+                        "commit", "--allow-empty", "-m",
+                        "empty commit after atomic publication",
+                    ], project)
+                    assert code == 0, error
+                else:
+                    (project / "src" / "hello.py").write_text(
+                        "print('changed after atomic publication')\n",
+                        encoding="utf-8",
+                    )
+                    commit_all(project, "source commit after atomic publication")
+                raise KeyboardInterrupt("interrupted after atomic publication")
+
+            interrupted = False
+            try:
+                with mock.patch.object(
+                    runtime_review, "write_json",
+                    side_effect=publish_race_then_interrupt,
+                ):
+                    run_done(project)
+            except KeyboardInterrupt:
+                interrupted = True
+
+            assert interrupted is True
+            assert proof_path.exists()
+            assert runtime_review.load_current_proof(project) is None
+
+
+def test_completion_proof_consumers_require_full_current_binding() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         project = Path(tmp).resolve()
         build_completed_project(project)
-        proof_path = project / star_forge.PROOF_FILE
-        original_write_json = runtime_review.write_json
-        raced = False
-
-        def commit_before_publication(path: Path, value: object) -> None:
-            nonlocal raced
-            if path == proof_path and not raced:
-                code, _, error = star_forge.run_git([
-                    "-c", "user.name=Star Forge Test",
-                    "-c", "user.email=starforge@example.com",
-                    "commit", "--allow-empty", "-m",
-                    "post validation head drift",
-                ], project)
-                assert code == 0, error
-                raced = True
-            original_write_json(path, value)
-
-        with mock.patch.object(
-            runtime_review, "write_json",
-            side_effect=commit_before_publication,
-        ):
-            code, payload = run_done(project)
-        assert code == 0, payload
-        assert raced is True
-        prior_proof = proof_path.read_bytes()
-
-        proof = json.loads(prior_proof)
-        drift = runtime_review.detect_drift(project, proof)
-        assert drift["detected"] is True
-        assert drift["head_changed"] is True
-        assert drift["source_changed"] is False
-        assert drift["scope_changed"] is False
-        assert drift["changed_files"] == []
-
         code, payload = run_done(project)
-        assert code == 1, payload
-        assert payload["drift"]["actionable"] is True
-        assert any(
-            problem.get("rule") == "post-proof-change-packet-required"
-            for problem in payload["problems"]
+        assert code == 0, payload
+        proof = star_forge.read_json(project / star_forge.PROOF_FILE)
+        assert runtime_review.proof_is_current(project, proof) is True
+        for field, value in (
+            ("head", "0" * 40),
+            ("source_hash", "0" * 64),
+            ("scope_hash", "wrong-scope"),
+        ):
+            assert runtime_review.proof_is_current(
+                project, dict(proof, **{field: value}),
+            ) is False
+
+        (project / "src" / "hello.py").write_text(
+            "print('dirty but forged current values')\n",
+            encoding="utf-8",
         )
-        assert proof_path.read_bytes() == prior_proof
+        forged = dict(
+            proof,
+            head=star_forge.git_head(project),
+            source_hash=star_forge.source_hash(project),
+            scope_hash=star_forge.scope_hash(project) or "noscope",
+        )
+        assert runtime_review.proof_is_current(project, forged) is False
+        assert runtime_review.load_current_proof(project) is None
+        assert runtime_orchestration.canonical_state_payload(project)["proof"] is None
 
 
 def test_done_requires_change_packet_for_post_proof_drift_without_run() -> None:

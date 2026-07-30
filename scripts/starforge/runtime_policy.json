@@ -312,9 +312,9 @@
       "head": ["rev-parse", "HEAD"],
       "root": ["rev-parse", "--show-toplevel"],
       "init": ["init"],
-      "status": ["status", "--short", "--untracked-files=all", "--", "."],
-      "changed": ["diff", "--name-only", "HEAD"],
-      "untracked": ["ls-files", "--others", "--exclude-standard"]
+      "status": ["status", "--porcelain=v1", "-z", "--no-renames", "--untracked-files=all", "--", "."],
+      "changed": ["diff", "--name-only", "-z", "HEAD", "--"],
+      "untracked": ["ls-files", "-z", "--others", "--exclude-standard"]
     },
     "messages": {
       "json_object": "{path} must contain a JSON object",
