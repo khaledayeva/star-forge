@@ -427,7 +427,7 @@ def plan_change_packet(
     impact_payload = {**dict(impact), "change_id": change_id}
     _write_atomic_text(plan_path, planned)
     _write_atomic_text(packet_root / CHANGE_IMPACT_FILE,
-                       json.dumps(impact_payload, indent=2, sort_keys=True, ensure_ascii=False) + "\n")
+                       json.dumps(impact_payload, indent=2, sort_keys=True, ensure_ascii=True) + "\n")
     return read_change_packet(project, change_id)
 def activate_change_plan(project: Path, change_id: str) -> list[dict[str, Any]]:
     """Make an approved packet's dependency-free task rows ready."""

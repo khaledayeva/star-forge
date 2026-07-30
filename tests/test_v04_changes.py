@@ -7,10 +7,12 @@ import contextlib
 import hashlib
 import io
 import json
+import os
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -19,6 +21,8 @@ if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
 from starforge import changes
+from starforge import runtime_plan
+from starforge import runtime_review
 import star_forge
 
 
@@ -186,6 +190,143 @@ Status: active
             with self.subTest(unsafe=unsafe):
                 with self.assertRaises(changes.ChangePacketError):
                     changes.normalize_changed_files([unsafe])
+
+    def test_raw_git_bytes_round_trip_through_packet_plan_reuse_and_fingerprint(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp)
+            self.write_modern_project(project)
+            plan_path = project / "Plan.md"
+            plan_path.write_text(
+                plan_path.read_text(encoding="utf-8").replace(
+                    "src/api.py, tests/test_api.py",
+                    "src/",
+                ),
+                encoding="utf-8",
+            )
+            raw_path = b"src/nonutf8-\xff-\\|-[x],; -> name.py"
+            decoded_path = os.fsdecode(raw_path)
+            raw_status = os.fsdecode(b"?? " + raw_path + b"\0")
+            with mock.patch.object(
+                star_forge.live_common,
+                "run_git",
+                return_value=(0, raw_status, ""),
+            ):
+                self.assertEqual(
+                    star_forge.live_common.git_status(project),
+                    [decoded_path],
+                )
+
+            packet = changes.create_or_select_change_packet(
+                project,
+                original_completed_source_hash=SOURCE_HASH,
+                changed_files=[decoded_path],
+                template_dir=TEMPLATES,
+            )
+            reused = changes.create_or_select_change_packet(
+                project,
+                original_completed_source_hash=SOURCE_HASH,
+                changed_files=[decoded_path],
+                template_dir=TEMPLATES,
+            )
+            self.assertEqual(reused["change_id"], packet["change_id"])
+            self.assertEqual(packet["scope_delta"], [decoded_path])
+            self.assertEqual(packet["impact"]["scope_delta"], [decoded_path])
+            task = changes.change_plan_tasks(project, packet["change_id"])[0]
+            self.assertEqual(star_forge.task_files(task), [decoded_path])
+
+            packet_root = project / changes.CHANGE_ROOT / packet["change_id"]
+            for artifact in ("change.md", "impact.json", "Plan.md"):
+                self.assertIn(
+                    b"\\udcff",
+                    (packet_root / artifact).read_bytes(),
+                    artifact,
+                )
+
+            changes.approve_change_packet(project, packet["change_id"])
+            active = changes.activate_change_plan(project, packet["change_id"])[0]
+            self.assertEqual(active["status"], "ready")
+            self.assertEqual(star_forge.task_files(active), [decoded_path])
+            runtime_plan.update_plan_task_row(
+                packet_root / "Plan.md",
+                active["id"],
+                {
+                    "status": "complete",
+                    "evidence": json.dumps(
+                        [decoded_path, "proof|with-pipe.json"],
+                        separators=(",", ":"),
+                    ),
+                },
+            )
+            completed = changes.change_plan_tasks(project, packet["change_id"])[0]
+            self.assertEqual(completed["status"], "complete")
+            self.assertEqual(star_forge.task_files(completed), [decoded_path])
+            self.assertEqual(
+                json.loads(completed["evidence"]),
+                [decoded_path, "proof|with-pipe.json"],
+            )
+
+            finding = json.loads(json.dumps({
+                "file": decoded_path,
+                "line": 7,
+                "title": "Raw path finding",
+                "detail": "The path must remain reversible",
+            }))
+            first = runtime_review.finding_fingerprint(finding)
+            second = runtime_review.finding_fingerprint(dict(finding))
+            self.assertEqual(first, second)
+            self.assertTrue(first.startswith("sha256:"))
+
+    def test_json_file_owners_are_exact_while_legacy_globs_remain_patterns(self) -> None:
+        literal_paths = [
+            "src/literal*.py",
+            "src/literal?.py",
+            "src/literal[ab].py",
+            "src/literal].py",
+        ]
+        unrelated_paths = [
+            "src/literal-match.py",
+            "src/literalQ.py",
+            "src/literala.py",
+            "src/literal.py",
+        ]
+        exact_task = {
+            "id": "SF-1",
+            "mode": "delegate",
+            "files": json.dumps(literal_paths, separators=(",", ":")),
+            "acs": "AC-1",
+            "proof": "unit",
+            "verify": "python3 tests/test_api.py",
+        }
+        exact = changes.derive_change_impact(
+            changed_files=[*literal_paths, *unrelated_paths],
+            root_tasks=[exact_task],
+            blueprint_text="- AC-1: Literal paths remain exact.",
+        )
+        owned = next(
+            task for task in exact["affected_tasks"]
+            if task["source_task"] == "SF-1"
+        )
+        unowned = next(
+            task for task in exact["affected_tasks"]
+            if task["source_task"] is None
+        )
+        self.assertEqual(owned["files"], literal_paths)
+        self.assertEqual(unowned["files"], unrelated_paths)
+
+        legacy_task = {
+            **exact_task,
+            "files": "src/literal*.py",
+        }
+        legacy = changes.derive_change_impact(
+            changed_files=["src/literal*.py", "src/literal-match.py"],
+            root_tasks=[legacy_task],
+            blueprint_text="- AC-1: Legacy patterns remain compatible.",
+        )
+        self.assertEqual(
+            legacy["affected_tasks"][0]["files"],
+            ["src/literal*.py", "src/literal-match.py"],
+        )
+        self.assertEqual(legacy["unmatched_files"], [])
 
     def test_approval_is_atomic_state_transition_and_root_sources_are_unchanged(
         self,

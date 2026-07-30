@@ -487,6 +487,61 @@ def test_release_gate_preserves_special_git_paths() -> None:
             assert name in result.stderr, (name, result.stderr)
 
 
+def test_release_gate_fails_without_a_trustworthy_base() -> None:
+    with isolated_temp_directory("star-forge-rc-no-base-") as tmp:
+        fixture = Path(tmp).resolve()
+        init_release_fixture(fixture)
+        result = run(
+            ["sh", "scripts/release-check.sh", "--version-only"],
+            cwd=fixture,
+        )
+        assert result.returncode == 1
+        assert "no trustworthy comparison revision" in result.stderr
+
+
+def test_release_gate_rejects_a_base_at_current_head() -> None:
+    with isolated_temp_directory("star-forge-rc-head-base-") as tmp:
+        fixture = Path(tmp).resolve()
+        init_release_fixture(fixture)
+        result = run(
+            ["git", "update-ref", "refs/remotes/origin/main", "HEAD"],
+            cwd=fixture,
+        )
+        assert result.returncode == 0, result.stderr
+        result = run(
+            ["sh", "scripts/release-check.sh", "--version-only"],
+            cwd=fixture,
+        )
+        assert result.returncode == 1
+        assert "comparison revision resolves to current HEAD" in result.stderr
+
+
+def test_release_gate_allows_only_an_explicit_first_commit_release() -> None:
+    with isolated_temp_directory("star-forge-rc-initial-") as tmp:
+        fixture = Path(tmp).resolve()
+        init_release_fixture(fixture)
+        result = run(
+            ["sh", "scripts/release-check.sh", "--version-only"],
+            cwd=fixture,
+            env={"STAR_FORGE_INITIAL_RELEASE": "1"},
+        )
+        assert result.returncode == 0, result.stderr
+        (fixture / "second.txt").write_text("second\n", encoding="utf-8")
+        for command in (
+            ["git", "add", "second.txt"],
+            ["git", "commit", "-qm", "second"],
+        ):
+            result = run(command, cwd=fixture)
+            assert result.returncode == 0, result.stderr
+        result = run(
+            ["sh", "scripts/release-check.sh", "--version-only"],
+            cwd=fixture,
+            env={"STAR_FORGE_INITIAL_RELEASE": "1"},
+        )
+        assert result.returncode == 1
+        assert "valid only for a repository's first commit" in result.stderr
+
+
 def test_repository_metadata_passes_version_only_release_gate() -> None:
     result = run(
         ["sh", "scripts/release-check.sh", "--version-only"],

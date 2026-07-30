@@ -23,7 +23,7 @@ DELIVERY_FIXTURES = ROOT / "fixtures" / "delivery"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
-from starforge import contracts, lifecycle, runtime_plan
+from starforge import contracts, evidence as evidence_contract, lifecycle, runtime_plan
 
 
 def fixture(name: str) -> dict[str, Any]:
@@ -435,6 +435,120 @@ def test_delivery_fixtures_satisfy_the_exact_approved_result() -> None:
         assert result.repository_commit == evidence["repository_commit"]
         assert set(result.checks) == set(lifecycle.DELIVERY_REQUIREMENTS)
         assert result.to_dict()["schema"] == lifecycle.DELIVERY_GATE_SCHEMA
+
+
+def test_v2_foundation_and_delivery_are_single_gate_truths() -> None:
+    foundation_contract, foundation_v1 = fixture_pair("private-new")
+    foundation_v2 = evidence_contract.adapt_lifecycle_v1(foundation_v1)
+    foundation_gate = lifecycle.evaluate_foundation(
+        foundation_contract,
+        foundation_v2,
+        current_source_hash=foundation_v1["source_hash"],
+    )
+    assert foundation_gate.status == "PASS", foundation_gate.blockers
+
+    delivery_contract, delivery_v1 = delivery_fixture_pair("preview-sites")
+    delivery_v2 = evidence_contract.adapt_lifecycle_v1(delivery_v1)
+    delivery_gate = lifecycle.evaluate_delivery(
+        delivery_contract,
+        delivery_v2,
+        current_source_hash=delivery_v1["source_hash"],
+    )
+    assert delivery_gate.status == "PASS", delivery_gate.blockers
+
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        contract_path = project / ".starforge" / "delivery" / "contract.json"
+        evidence_path = project / ".starforge" / "delivery" / "evidence.json"
+        contract_path.parent.mkdir(parents=True)
+        contract_path.write_text(json.dumps(delivery_contract), encoding="utf-8")
+        evidence_path.write_text(json.dumps(delivery_v2), encoding="utf-8")
+        state = runtime_plan.lifecycle_gate_state(
+            project,
+            kind="delivery",
+            required=True,
+            current_source_hash=delivery_v1["source_hash"],
+            expected_delivery_target="preview",
+        )
+        assert state["status"] == "PASS", state
+        assert state["satisfied"] is True
+
+
+def test_single_v2_expo_envelope_satisfies_delivery_gate() -> None:
+    source_hash = "a" * 64
+    commit = "b" * 40
+    contract = lifecycle.make_delivery_contract(
+        delivery_target="expo",
+        provider="expo-plugin",
+        destination="internal build",
+    )
+    domain = {
+        "contract_sha256": lifecycle.delivery_contract_sha256(contract),
+        "repository_commit": commit,
+        "target": "expo",
+        "checks": {
+            "source_binding": {
+                "state": "satisfied",
+                "source_hash": source_hash,
+                "detail": {"source_hash": source_hash},
+            },
+            "repository_commit": {
+                "state": "satisfied",
+                "source_hash": source_hash,
+                "detail": {"sha": commit, "tree_source_hash": source_hash},
+            },
+            "delivery_identity": {
+                "state": "satisfied",
+                "source_hash": source_hash,
+                "detail": {
+                    "kind": "platform-release",
+                    "id": "expo-build-1",
+                    "artifact_sha256": "c" * 64,
+                    "repository_commit": commit,
+                    "source_hash": source_hash,
+                },
+            },
+            "live_url": {"state": "not-applicable"},
+            "smoke_result": {
+                "state": "satisfied",
+                "source_hash": source_hash,
+                "detail": {
+                    "verdict": "PASS",
+                    "checked_at": "2026-07-30T20:00:00Z",
+                    "scenario": "Expo build installs and launches",
+                    "repository_commit": commit,
+                    "source_hash": source_hash,
+                },
+            },
+        },
+    }
+    envelope = {
+        "schema": evidence_contract.EVIDENCE_SCHEMA,
+        "kind": "delivery",
+        "task": "SF-EXPO-DELIVERY",
+        "capability": "expo-platform-delivery",
+        "provider": "expo-plugin",
+        "provenance": {
+            "route": "expo-platform-delivery",
+            "selected": "expo-plugin",
+            "delivery": domain,
+        },
+        "source_hash": source_hash,
+        "runtime_asset_hash": "d" * 64,
+        "started_at": "2026-07-30T19:59:00Z",
+        "finished_at": "2026-07-30T20:00:00Z",
+        "artifacts": [],
+        "verdict": "PASS",
+        "blockers": [],
+    }
+    gate = lifecycle.evaluate_delivery(
+        contract,
+        envelope,
+        current_source_hash=source_hash,
+    )
+    assert gate.status == "PASS", gate.blockers
+    assert gate.provider == "expo-plugin"
+    assert gate.target == "expo"
 
 
 def test_delivery_requires_source_commit_identity_live_url_and_smoke_result() -> None:

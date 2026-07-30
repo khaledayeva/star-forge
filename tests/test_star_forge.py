@@ -304,11 +304,15 @@ def reviewable_project(project: Path, profile: str = "standard") -> list[dict]:
     return star_forge.parse_tasks(project / "Plan.md")
 
 
-def build_completed_project(project: Path) -> None:
+def build_completed_project(
+    project: Path,
+    *,
+    owned_files: str = "src/hello.py",
+) -> None:
     """Full happy path up to (but not including) `done`: approve, build, verify, complete, review, commit."""
     init_project(project)
     write_blueprint(project)
-    write_plan(project, [f"| SF-1 | Build the greeter module | ready | solo | src/hello.py | - | {REAL_VERIFY} | - |"])
+    write_plan(project, [f"| SF-1 | Build the greeter module | ready | solo | {owned_files} | - | {REAL_VERIFY} | - |"])
     src = project / "src" / "hello.py"
     src.parent.mkdir(parents=True, exist_ok=True)
     src.write_text("print('hello forge')\n", encoding="utf-8")
@@ -2541,13 +2545,82 @@ def test_git_status_failure_is_not_a_clean_commit_or_proof_binding() -> None:
                 assert "Git status unavailable" in str(exc)
             else:
                 raise AssertionError("unavailable Git status was accepted")
-            assert runtime_support.tree_clean_for_commit_binding(project) is False
+            assert runtime_support.stable_clean_commit_binding(project, head) is False
             assert not runtime_preview.deployment_bound_to_current(
                 project, {"commit_sha": head}
             )
             assert not runtime_security.source_binding_is_fresh(
                 project, {"commit_sha": head}
             )
+
+
+def test_commit_binding_consumers_reject_repository_loss_during_probe() -> None:
+    consumers = (
+        lambda project, head: runtime_preview.deployment_bound_to_current(
+            project, {"commit_sha": head}
+        ),
+        lambda project, head: runtime_security.source_binding_is_fresh(
+            project, {"commit_sha": head}
+        ),
+    )
+    for consumer in consumers:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp).resolve()
+            init_project(project)
+            commit_all(project)
+            head = star_forge.git_head(project)
+            original_status = live_common.git_status
+            def remove_repository_after_status(target: Path) -> list[str]:
+                entries = original_status(target)
+                shutil.rmtree(target / ".git")
+                return entries
+            with mock.patch.object(
+                live_common, "git_status",
+                side_effect=remove_repository_after_status,
+            ):
+                assert not consumer(project, head)
+
+
+def test_commit_binding_consumers_reject_source_or_head_change_between_probes() -> None:
+    consumers = (
+        lambda project, head: runtime_preview.deployment_bound_to_current(
+            project, {"commit_sha": head}
+        ),
+        lambda project, head: runtime_security.source_binding_is_fresh(
+            project, {"commit_sha": head}
+        ),
+    )
+    for consumer in consumers:
+        for change_head in (False, True):
+            with tempfile.TemporaryDirectory() as tmp:
+                project = Path(tmp).resolve()
+                init_project(project)
+                source = project / "source.py"
+                source.write_text("before\n", encoding="utf-8")
+                commit_all(project)
+                head = star_forge.git_head(project)
+                original_is_repo = live_common.is_git_repo
+                probes = 0
+                def change_before_second_probe(target: Path) -> bool:
+                    nonlocal probes
+                    probes += 1
+                    if probes == 4:
+                        if change_head:
+                            code, _, error = star_forge.run_git([
+                                "-c", "user.name=Star Forge Test",
+                                "-c", "user.email=starforge@example.com",
+                                "commit", "--allow-empty", "-m", "binding race",
+                            ], target)
+                            assert code == 0, error
+                        else:
+                            source.write_text("after\n", encoding="utf-8")
+                    return original_is_repo(target)
+                with mock.patch.object(
+                    live_common, "is_git_repo",
+                    side_effect=change_before_second_probe,
+                ):
+                    assert not consumer(project, head)
+                assert probes >= 4
 
 
 def test_done_fails_closed_when_git_status_is_unavailable() -> None:
@@ -3108,6 +3181,94 @@ def test_post_done_special_paths_round_trip_through_one_reused_packet() -> None:
         assert reused[0]["scope_delta"] == expected
 
 
+def test_active_change_task_preserves_special_paths_through_fresh_proof() -> None:
+    names = (
+        "src/back\\slash.py",
+        "src/ leading.py",
+        "src/trailing.py ",
+        "src/line\nbreak.py",
+        "src/tab\tname.py",
+        "src/comma,name.py",
+        "src/semi;name.py",
+        "src/pipe|name.py",
+        "src/literal*.py",
+        "src/literal?.py",
+        "src/literal[ab].py",
+        "src/literal].py",
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        build_completed_project(project, owned_files="src/")
+        code, initial_done = run_done(project)
+        assert code == 0, initial_done
+        initial_proof = star_forge.read_json(project / star_forge.PROOF_FILE)
+        for name in names:
+            (project / name).write_text("special path drift\n", encoding="utf-8")
+
+        expected = star_forge.source_dirty_entries(star_forge.git_status(project))
+        assert set(expected) == set(names)
+        code, out, err = run_cli(["run", "--project", str(project), "--no-hooks"])
+        assert code == 0, err or out
+        code, out, err = run_cli([
+            "approve-blueprint", "--project", str(project),
+        ])
+        assert code == 0, err or out
+        code, out, err = run_cli(["run", "--project", str(project), "--no-hooks"])
+        assert code == 0, err or out
+
+        packet = star_forge.project_changes.list_change_packets(project)[0]
+        assert packet["scope_delta"] == expected
+        change_id = packet["change_id"]
+        code, out, err = run_cli([
+            "approve-change", "--project", str(project),
+            "--change", change_id,
+        ])
+        assert code == 0, err or out
+        task = star_forge.project_changes.change_plan_tasks(
+            project, change_id,
+        )[0]
+        assert task["status"] == "ready"
+        assert star_forge.task_files(task) == expected
+
+        record_verify(project, task["id"])
+        complete_args = [
+            "complete-task", "--project", str(project), "--task", task["id"],
+        ]
+        for name in expected:
+            complete_args.extend(["--changed-file", name])
+        code, out, err = run_cli(complete_args)
+        assert code == 0, err or out
+        completed = star_forge.project_changes.change_plan_tasks(
+            project, change_id,
+        )[0]
+        assert completed["status"] == "complete"
+        assert completed["evidence"] != "-"
+        assert star_forge.task_files(completed) == expected
+
+        record_verify(project, task["id"])
+        record_verify(project, "SF-1")
+        commit_all(project, "complete special path amendment")
+        code, out, err = run_cli(["run", "--project", str(project), "--no-hooks"])
+        assert code == 0, err or out
+        state = json.loads(
+            (project / ".starforge" / "state.json").read_text(encoding="utf-8")
+        )
+        assert state["phase"] == "review"
+        assert state["drift"]["covered_by_completed_change_packet"] == change_id
+        assert len(star_forge.project_changes.list_change_packets(project)) == 1
+
+        write_clean_review_wave(project)
+        code, out, err = run_cli([
+            "review", "--project", str(project), "--strict",
+        ])
+        assert code == 0, err or out
+        code, final_done = run_done(project)
+        assert code == 0, final_done
+        final_proof = star_forge.read_json(project / star_forge.PROOF_FILE)
+        assert final_proof["source_hash"] == star_forge.source_hash(project)
+        assert final_proof["source_hash"] != initial_proof["source_hash"]
+
+
 def test_scaffold_amend_preserves_complete_long_drift_file_list() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         project = Path(tmp).resolve()
@@ -3116,6 +3277,7 @@ def test_scaffold_amend_preserves_complete_long_drift_file_list() -> None:
         write_plan(project, [f"| SF-1 | Build the greeter module | complete | solo | src/hello.py | - | {REAL_VERIFY} | src/hello.py |"])
         changed = [
             *[f"src/feature_{idx:02d}/component_{idx:02d}.py" for idx in range(16)],
+            "src/pipe|amend.py",
             "scripts/star_forge.py",
             "skills/forge-review/SKILL.md",
             "tests/test_star_forge.py",

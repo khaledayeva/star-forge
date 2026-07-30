@@ -1,5 +1,4 @@
 """Cohesive Star Forge runtime extracted from the CLI facade."""
-
 from __future__ import annotations
 import argparse
 import json
@@ -10,23 +9,19 @@ from typing import Any, Iterable, Mapping, Sequence
 from live_collectors import browser_safety
 from live_collectors import common as live_common
 from live_collectors import preview as preview_collector
-from . import safe_io
+from . import evidence as evidence_contract, safe_io
 from .policy_data import mapping as policy_mapping, value as _policy_value
-from .runtime_support import BLOCKING_SEVERITIES, SERVER_LEASE, artifact_entry, dirty_paths_missing_from_source_snapshot, file_sha256, git_head, now_utc, redact, relative_to_project, tree_clean_for_commit_binding
+from .runtime_support import BLOCKING_SEVERITIES, SERVER_LEASE, artifact_entry, dirty_paths_missing_from_source_snapshot, file_sha256, git_head, now_utc, redact, relative_to_project, stable_clean_commit_binding
 from .runtime_project import ensure_state_dirs, resolve_project, safe_release_snapshot, try_source_hash
 from .runtime_store import write_run_record
-
 PREVIEW_POLICY = _policy_value("runtime_preview.POLICY")
 MAX_JSON_ARTIFACT_BYTES = 16 * 1024 * 1024
-
 def live_problem(message: str, *, severity: str = "high", rule: str = "live-proof", path: str = "") -> dict[str, Any]:
     return {"severity": severity, "rule": rule, "message": message} | ({"path": path} if path else {})
-
 def flag_live_problem(problems: list[dict[str, Any]], condition: Any, message: str, **attributes: Any) -> bool:
     if condition:
         problems.append(live_problem(message, **attributes))
     return bool(condition)
-
 def append_live_problem_once(problems: list[dict[str, Any]], problem: dict[str, Any] | None) -> None:
     if not problem:
         return
@@ -34,19 +29,15 @@ def append_live_problem_once(problems: list[dict[str, Any]], problem: dict[str, 
         return tuple(str(next((item.get(field) for field in fields if item.get(field)), "")) for fields in PREVIEW_POLICY["problem_identity_fields"])
     if identity(problem) not in {identity(item) for item in problems}:
         problems.append(dict(problem))
-
 def current_live_source_hash(project: Path, problems: list[dict[str, Any]]) -> str | None:
     current, problem = try_source_hash(project)
     if problem:
         append_live_problem_once(problems, problem)
     return None if problem else current
-
 def live_has_blockers(problems: Sequence[dict[str, Any]]) -> bool:
     return any(bool(item.get("blocking")) or str(item.get("severity") or "").lower() in BLOCKING_SEVERITIES for item in problems)
-
 def live_rel(project: Path, path: Path) -> str:
     return relative_to_project(path, project)
-
 def scoped_live_path_parts(project: Path, path: Path, collector: str | None = None) -> tuple[str, ...] | None:
     try:
         parts = path.resolve().relative_to(project.resolve()).parts
@@ -54,15 +45,12 @@ def scoped_live_path_parts(project: Path, path: Path, collector: str | None = No
         return None
     expected_collector = live_common.sanitize_segment(collector, fallback="collector")
     return parts if len(parts) >= 4 and parts[:2] == (".starforge", "live") and (collector is None or parts[3] == expected_collector) else None
-
 def is_task_scoped_live_path(project: Path, path: Path, task: str | None, collector: str | None) -> bool:
     parts = scoped_live_path_parts(project, path, collector)
     return bool(parts and (task is None or parts[2] == live_common.sanitize_segment(task, fallback="task")))
-
 def task_from_scoped_live_path(project: Path, path: Path, collector: str | None) -> str | None:
     parts = scoped_live_path_parts(project, path, collector)
     return parts[2] if parts else None
-
 def validate_artifact_arg(
     project: Path,
     raw_path: str | None,
@@ -116,10 +104,8 @@ def validate_artifact_arg(
         entry = artifact_entry(project, path, kind="screenshot" if require_image else label)
     flag_live_problem(problems, require_image and not entry.get("valid_image"), f"{label} is not a decodable PNG/JPEG image", rule="artifact-image", path=rel)
     return entry, payload
-
 def default_live_manifest_path(project: Path, task: str, collector: str) -> Path:
     return live_common.live_collector_dir(project, task, collector, create=False) / "manifest.json"
-
 def iter_manifest_artifact_records(payload: dict[str, Any]) -> Iterable[dict[str, Any]]:
     artifacts = payload.get("artifacts")
     if isinstance(artifacts, dict):
@@ -129,7 +115,6 @@ def iter_manifest_artifact_records(payload: dict[str, Any]) -> Iterable[dict[str
     else:
         values = ()
     return (item for item in values if isinstance(item, dict))
-
 def manifest_artifact_record_for_path(project: Path, manifest: dict[str, Any] | None, path: Path) -> dict[str, Any] | None:
     if not isinstance(manifest, dict):
         return None
@@ -145,7 +130,6 @@ def manifest_artifact_record_for_path(project: Path, manifest: dict[str, Any] | 
         if artifact.resolve() == target:
             return record
     return None
-
 def manifest_artifact_path_for_kind(project: Path, manifest: dict[str, Any] | None, *kinds: str) -> Path | None:
     if not isinstance(manifest, dict):
         return None
@@ -162,7 +146,6 @@ def manifest_artifact_path_for_kind(project: Path, manifest: dict[str, Any] | No
         except ValueError:
             return None
     return None
-
 def iter_raw_artifact_hashes(manifest: dict[str, Any] | None) -> Iterable[tuple[str, str]]:
     raw_hashes = manifest.get("raw_artifact_hashes") if isinstance(manifest, dict) else None
     if not isinstance(raw_hashes, dict):
@@ -172,7 +155,6 @@ def iter_raw_artifact_hashes(manifest: dict[str, Any] | None) -> Iterable[tuple[
             yield str(value.get("path") or key), str(value.get("sha256") or "")
         else:
             yield str(key), value if isinstance(value, str) else ""
-
 def validate_raw_artifact_hashes(
     project: Path,
     manifest: dict[str, Any],
@@ -196,11 +178,9 @@ def validate_raw_artifact_hashes(
         if flag_live_problem(problems, not path.exists() or not path.is_file(), "raw artifact hash target is missing", rule="artifact-missing", path=rel):
             continue
         flag_live_problem(problems, file_sha256(path) != expected, "raw artifact hash does not match current bytes", rule="artifact-hash", path=rel)
-
 def manifest_raw_hash_for_path(project: Path, manifest: dict[str, Any] | None, path: Path) -> str:
     rel = live_rel(project, path)
     return next((sha256 for raw_path, sha256 in iter_raw_artifact_hashes(manifest) if raw_path == rel), "")
-
 def require_raw_hash_for_artifact(
     project: Path,
     manifest: dict[str, Any] | None,
@@ -238,12 +218,10 @@ def require_raw_hash_for_artifact(
     if actual != expected:
         problems.append(live_problem(f"{label} raw artifact hash does not match current bytes", rule=rule, path=rel))
     return actual
-
 def append_artifact_once(artifacts: list[dict[str, Any]], entry: dict[str, Any] | None) -> None:
     path = str(entry.get("path") or "") if entry else ""
     if entry and (not path or not any(str(item.get("path") or "") == path for item in artifacts)):
         artifacts.append(entry)
-
 def validate_manifest_bound_artifact_arg(
     project: Path,
     raw_path: str | Path | None,
@@ -285,7 +263,6 @@ def validate_manifest_bound_artifact_arg(
                 project, manifest, path, problems, label=label,
                 rule=raw_hash_rule, attested_entry=entry)
     return entry, payload
-
 def validate_manifest_artifact_scopes(
     project: Path,
     manifest: dict[str, Any],
@@ -307,7 +284,36 @@ def validate_manifest_artifact_scopes(
             continue
         artifact_rel = live_rel(project, artifact)
         flag_live_problem(problems, not is_task_scoped_live_path(project, artifact, task, collector), "manifest artifact path must stay under the task-scoped live collector directory", rule="artifact-scope", path=artifact_rel)
-
+def load_normalized_live_evidence(
+    project: Path,
+    manifest_path: Path,
+    manifest: Mapping[str, Any],
+    problems: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    sidecar = manifest_path.parent / "evidence.json"
+    try:
+        envelope = evidence_contract.read_envelope(
+            sidecar,
+            allow_v1=False,
+            project_root=project,
+            verify_artifacts=True,
+        )
+        bound = evidence_contract.envelope_covers_v1(envelope, manifest)
+    except evidence_contract.EvidenceError as exc:
+        problems.append(live_problem(
+            f"normalized evidence is missing or invalid: {exc}",
+            rule="manifest-source" if str(exc).startswith("source_hash ") else "evidence-envelope",
+            path=live_rel(project, sidecar),
+        ))
+        return None
+    flag_live_problem(
+        problems,
+        not bound,
+        "evidence envelope does not cover its exact legacy adapter input",
+        rule="evidence-envelope-binding",
+        path=live_rel(project, sidecar),
+    )
+    return envelope
 def load_and_validate_live_manifest(
     project: Path,
     raw_path: str | Path | None,
@@ -343,52 +349,37 @@ def load_and_validate_live_manifest(
     if not isinstance(payload, dict):
         problems.append(live_problem("manifest must be a JSON object", rule="manifest-shape", path=rel))
         return None, path
-    problems.extend(live_common.validate_manifest_payload(payload))
+    problems.extend({**item, "path": rel} for item in live_common.validate_manifest_payload(payload))
+    envelope = load_normalized_live_evidence(project, path, payload, problems)
+    if envelope is not None:
+        payload["_evidence_envelope"] = envelope
+        flag_live_problem(problems, payload.get("source_hash_after") != envelope.get("source_hash"), "manifest source_hash does not match normalized evidence", rule="manifest-source", path=rel)
     flag_live_problem(problems, collector is not None and payload.get("collector") != live_common.sanitize_segment(collector, fallback="collector"), f"manifest collector must be `{collector}`", rule="manifest-collector", path=rel)
     flag_live_problem(problems, task is not None and payload.get("task") != task, f"manifest task must be `{task}`", rule="manifest-task", path=rel)
     flag_live_problem(problems, payload.get("degraded") is True, "manifest is marked degraded", rule="manifest-degraded", path=rel)
     unavailable = payload.get("unavailable_capabilities")
     flag_live_problem(problems, isinstance(unavailable, list) and unavailable, "manifest records unavailable required capabilities: " + ", ".join(str(item) for item in unavailable or []), rule="manifest-unavailable", path=rel)
-    manifest_problems = payload.get("problems")
-    if isinstance(manifest_problems, list):
-        for item in manifest_problems:
-            if not isinstance(item, dict):
-                problems.append(live_problem("manifest contains a malformed problem entry", rule="manifest-problem", path=rel))
-                continue
-            severity = str(item.get("severity") or "").lower()
-            if item.get("blocking") or severity in BLOCKING_SEVERITIES:
-                msg = str(item.get("message") or "manifest contains a blocking problem")
-                problems.append(live_problem(msg, severity=severity or "high", rule=str(item.get("rule") or "manifest-problem"), path=str(item.get("path") or rel)))
+    for item in envelope.get("blockers") if envelope else ():
+        if not isinstance(item, Mapping):
+            continue
+        severity = str(item.get("severity") or "").lower()
+        if item.get("blocking") or severity in BLOCKING_SEVERITIES:
+            problems.append(live_problem(
+                str(item.get("message") or "evidence contains a blocking problem"),
+                severity=severity or "high",
+                rule=str(item.get("rule") or "evidence-envelope"),
+                path=str(item.get("path") or rel),
+            ))
     current_source = current_live_source_hash(project, problems)
-    if current_source is not None:
-        for field in ("source_hash_before", "source_hash_after"):
-            value = str(payload.get(field) or "")
-            flag_live_problem(problems, value != current_source, f"manifest {field} does not match current source hash", rule="manifest-source", path=rel)
-    flag_live_problem(problems, str(payload.get("runtime_asset_hash") or "") != live_common.compute_runtime_asset_hash(project), "manifest runtime_asset_hash does not match current runtime assets", rule="manifest-runtime", path=rel)
+    if current_source is not None and envelope is not None:
+        flag_live_problem(problems, envelope.get("source_hash") != current_source, "evidence source_hash does not match current source", rule="manifest-source", path=rel)
+    flag_live_problem(problems, envelope is not None and envelope.get("runtime_asset_hash") != live_common.compute_runtime_asset_hash(project), "evidence runtime_asset_hash does not match current runtime assets", rule="manifest-runtime", path=rel)
     flag_live_problem(problems, not isinstance(payload.get("redaction_report"), dict), "manifest redaction_report must be an object", rule="manifest-shape", path=rel)
-    for record in iter_manifest_artifact_records(payload):
-        artifact_path = str(record.get("path") or "")
-        if not artifact_path:
-            problems.append(live_problem("manifest artifact is missing path", rule="artifact-shape", path=rel))
-            continue
-        try:
-            artifact = live_common.safe_project_path(project, artifact_path, must_exist=False)
-        except ValueError as exc:
-            problems.append(live_problem(f"manifest artifact path is unsafe: {exc}", rule="artifact-path", path=artifact_path))
-            continue
-        artifact_rel = live_rel(project, artifact)
-        if require_scoped and not is_task_scoped_live_path(project, artifact, task, collector):
-            problems.append(live_problem("manifest artifact path must stay under the task-scoped live collector directory", rule="artifact-scope", path=artifact_rel))
-            continue
-        flag_live_problem(problems, not artifact.exists(), "manifest artifact is missing", rule="artifact-missing", path=artifact_rel)
-        flag_live_problem(problems, record.get("problem"), f"manifest artifact problem: {record.get('problem')}", rule="artifact-problem", path=artifact_rel)
-        flag_live_problem(problems, record.get("sha256") and artifact.exists() and artifact.is_file() and file_sha256(artifact) != record.get("sha256"), "manifest artifact sha256 does not match current bytes", rule="artifact-hash", path=artifact_rel)
+    validate_manifest_artifact_scopes(project, payload, problems, task=task, collector=collector, require_scoped=require_scoped)
     validate_raw_artifact_hashes(project, payload, problems, task=task, collector=collector, require_scoped=require_scoped)
     return payload, path
-
 def live_manifest_summary(manifest: dict[str, Any] | None) -> dict[str, Any]:
     return summary if isinstance(summary := manifest.get("summary") if isinstance(manifest, dict) else {}, dict) else {}
-
 def result_indicates_failure(payload: Any) -> str | None:
     if not isinstance(payload, dict):
         return "result must be a JSON object"
@@ -409,7 +400,6 @@ def result_indicates_failure(payload: Any) -> str | None:
     if status in PREVIEW_POLICY["result_failure_statuses"]:
         return f"status is {status}"
     return None
-
 def json_has_failed_smoke(payload: Any) -> list[str]:
     fields = PREVIEW_POLICY["smoke_success_fields"]
     if isinstance(payload, dict):
@@ -422,7 +412,6 @@ def json_has_failed_smoke(payload: Any) -> list[str]:
     if isinstance(checks, list):
         messages.extend(f"smoke check {idx + 1} failed" for idx, check in enumerate(checks) if isinstance(check, dict) and any(check.get(key) is False for key in fields))
     return messages
-
 def preview_url_safety_problems(url: str, *, allow_local: bool = False) -> list[dict[str, Any]]:
     return [
         live_problem(str(item.get("message") or "preview URL is unsafe"),
@@ -430,7 +419,6 @@ def preview_url_safety_problems(url: str, *, allow_local: bool = False) -> list[
                      rule=str(item.get("rule") or "preview-url"),
                      path=str(item.get("path") or "")) for item in preview_collector.validate_url_safety(url, allow_local=allow_local) if isinstance(item, dict)
     ]
-
 def preview_connected_ip_problems(url: str, raw_ips: Any, *, allow_local: bool, path: str = "") -> list[dict[str, Any]]:
     if not isinstance(raw_ips, list) or not raw_ips:
         return [live_problem("preview HTTP connected IP evidence must be a non-empty list", rule="preview-url", path=path)]
@@ -448,7 +436,6 @@ def preview_connected_ip_problems(url: str, raw_ips: Any, *, allow_local: bool, 
         if blocked:
             problems.append(live_problem(f"preview HTTP connected to unsafe address {ip}: {blocked}", rule="preview-url", path=path))
     return problems
-
 def strict_preview_http_artifact_problems(
     *,
     url: str,
@@ -503,11 +490,9 @@ def strict_preview_http_artifact_problems(
         elif scheme == "https":
             problems.append(live_problem("HTTPS preview evidence is rejected until verifiable SNI pinning is available from the collector", rule="preview-http", path=path))
     return problems
-
 def preview_url_requires_server_lease(url: str) -> bool:
     parsed, problems = browser_safety.validate_url(url or "")
     return bool(not problems and browser_safety.is_local_origin(parsed))
-
 def preview_manifest_server_lease_path(project: Path, manifest: dict[str, Any] | None) -> Path | None:
     summary = live_manifest_summary(manifest)
     raw = next((summary.get(key) for key in PREVIEW_POLICY["lease_summary_fields"] if isinstance(summary.get(key), str) and summary.get(key).strip()), None)
@@ -517,7 +502,6 @@ def preview_manifest_server_lease_path(project: Path, manifest: dict[str, Any] |
         except ValueError:
             return None
     return manifest_artifact_path_for_kind(project, manifest, *PREVIEW_POLICY["lease_artifact_kinds"])
-
 def validate_preview_server_lease_artifact(
     project: Path,
     *,
@@ -566,7 +550,6 @@ def validate_preview_server_lease_artifact(
     except Exception as exc:
         problems.append(live_problem(f"server lease validation failed: {exc}", rule="server-lease", path=live_rel(project, lease_path)))
         return False
-
 def preview_allow_local_for_url(
     project: Path,
     *,
@@ -589,7 +572,6 @@ def preview_allow_local_for_url(
             problems=problems,
         )
     return lease_cache[url]
-
 def deployment_bound_to_current(project: Path, deployment: Any, *, current_source_hash: str | None = None) -> bool:
     if not isinstance(deployment, dict):
         return False
@@ -599,12 +581,11 @@ def deployment_bound_to_current(project: Path, deployment: Any, *, current_sourc
         if any(str(deployment.get(key) or "") == current_source_hash for key in source_fields):
             return not dirty_paths_missing_from_source_snapshot(project)
     head = git_head(project)
-    if head and tree_clean_for_commit_binding(project) and any(str(deployment.get(key) or "") == head for key in PREVIEW_POLICY["commit_hash_fields"]):
+    if head and stable_clean_commit_binding(project, head) and any(str(deployment.get(key) or "") == head for key in PREVIEW_POLICY["commit_hash_fields"]):
         return True
     if current_source_hash is None and has_source_binding:
         return True
     return False
-
 def write_live_proof_record(
     project: Path,
     *,
@@ -636,7 +617,6 @@ def write_live_proof_record(
     payload["artifact"] = live_rel(project, path)
     print(json.dumps(payload, indent=2))
     return 0 if verdict == "PASS" or not strict else 1
-
 def finish_live_proof_command(
     project: Path, args: argparse.Namespace, kind: str, problems: list[dict[str, Any]],
     manifest: dict[str, Any] | None, manifest_path: Path | None, artifacts: list[dict[str, Any]], summary: str,
@@ -645,7 +625,6 @@ def finish_live_proof_command(
         project, kind=kind, task=args.task, strict=args.strict, inputs=vars(args), problems=problems,
         manifest_path=manifest_path, manifest=manifest, artifacts=artifacts, summary=summary,
     )
-
 def validate_preview_proof_artifacts(
     project: Path,
     *,
@@ -727,7 +706,6 @@ def validate_preview_proof_artifacts(
         for message in json_has_failed_smoke(smoke_payload):
             problems.append(live_problem(message, rule="preview-smoke", path=smoke_entry.get("path", "") if smoke_entry else ""))
     return artifacts
-
 def cmd_preview_proof(args: argparse.Namespace) -> int:
     project = resolve_project(args.project)
     ensure_state_dirs(project)
@@ -747,13 +725,10 @@ def cmd_preview_proof(args: argparse.Namespace) -> int:
         problems=problems,
     )
     return finish_live_proof_command(project, args, "preview-proof", problems, manifest, manifest_resolved, artifacts, "preview proof")
-
 def collector_for_profile(profile: str) -> str | None:
     return PREVIEW_POLICY["profile_collectors"].get(profile)
-
 def dedicated_strict_proof_command_for_profile(profile: str) -> str:
     return PREVIEW_POLICY["strict_proof_commands"].get(profile, "")
-
 def cmd_proof_run(args: argparse.Namespace) -> int:
     project = resolve_project(args.project)
     ensure_state_dirs(project)
@@ -792,5 +767,4 @@ def cmd_proof_run(args: argparse.Namespace) -> int:
             ))
     return finish_live_proof_command(project, args, "proof-run", problems, manifest, manifest_path, artifacts, f"profile={args.profile}")
 NATIVE_IOS_RESULT_SCHEMA = "star-forge.native-ios.result.v1"
-
 __all__ = tuple(name for name in globals() if not name.startswith("__"))

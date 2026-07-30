@@ -430,6 +430,55 @@ def test_common_manifest_fields_and_redaction() -> None:
         assert payload["redaction_report"]["home_paths"] >= 1
 
 
+def test_every_strict_live_domain_requires_a_bound_v2_sidecar() -> None:
+    collectors = ("browser", "preview", "native-ios", "native-macos", "security")
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        init_project(project)
+        for collector in collectors:
+            root = live_dir(project, collector)
+            artifact = write_text(root / "proof.txt", f"{collector}\n")
+            manifest = write_manifest(
+                project,
+                collector,
+                {"proof": artifact},
+                summary={"collector": collector},
+            )
+            sidecar = manifest.parent / "evidence.json"
+            problems: list[dict[str, Any]] = []
+            loaded, _ = runtime_preview.load_and_validate_live_manifest(
+                project,
+                manifest,
+                problems,
+                task="SF-1",
+                collector=collector,
+            )
+            assert loaded and loaded["_evidence_envelope"]["schema"] == "star-forge.evidence-envelope.v2"
+            assert "evidence-envelope" not in problem_rules({"problems": problems})
+
+            sidecar.unlink()
+            missing: list[dict[str, Any]] = []
+            runtime_preview.load_and_validate_live_manifest(
+                project,
+                manifest,
+                missing,
+                task="SF-1",
+                collector=collector,
+            )
+            assert "evidence-envelope" in problem_rules({"problems": missing})
+
+            sidecar.write_text("{malformed", encoding="utf-8")
+            malformed: list[dict[str, Any]] = []
+            runtime_preview.load_and_validate_live_manifest(
+                project,
+                manifest,
+                malformed,
+                task="SF-1",
+                collector=collector,
+            )
+            assert "evidence-envelope" in problem_rules({"problems": malformed})
+
+
 def test_proof_run_strict_rejects_degraded_source_and_runtime_mismatch() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         project = Path(tmp).resolve()

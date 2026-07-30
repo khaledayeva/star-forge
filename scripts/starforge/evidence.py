@@ -1,40 +1,34 @@
 """Versioned, source-bound evidence envelopes for Star Forge."""
-
 from __future__ import annotations
 from .policy_data import mapping as _policy_mapping, value as _policy_value
-
 import datetime as dt
 import json
 import re
 from pathlib import Path, PurePosixPath
 from typing import Any, Mapping
 from . import safe_io
-
 EVIDENCE_POLICY = _policy_value("runtime_evidence.POLICY")
 globals().update(EVIDENCE_POLICY["bindings"])
+FOUNDATION_EVIDENCE_SCHEMA = "star-forge.foundation-evidence.v1"
+DELIVERY_EVIDENCE_SCHEMA = "star-forge.delivery-evidence.v1"
+DOMAIN_EVIDENCE_SCHEMAS = {"foundation": FOUNDATION_EVIDENCE_SCHEMA, "delivery": DELIVERY_EVIDENCE_SCHEMA}
 _PATTERNS = {name: re.compile(pattern, re.IGNORECASE if name in {"secret_value", "sensitive_key"} else 0) for name, pattern in EVIDENCE_POLICY["patterns"].items()}
 _SHA256_RE, _WINDOWS_DRIVE_RE, _SECRET_VALUE_RE, _SENSITIVE_KEY_RE = map(_PATTERNS.__getitem__, ("sha256", "windows_drive", "secret_value", "sensitive_key"))
-
 class EvidenceError(ValueError):
     pass
-
 def _error(name: str, **values: object) -> EvidenceError:
     return EvidenceError(EVIDENCE_POLICY["errors"][name].format(**values))
-
 def _require(condition: object, name: str, **values: object) -> None:
     if not condition:
         raise _error(name, **values)
-
 def _text(value: Any, field: str) -> str:
     _require(isinstance(value, str) and value.strip(), "text_required", field=field)
     _require(value == value.strip() and all(ord(char) >= 32 for char in value),
              "text_unsafe", field=field)
     return value
-
 def _sha256(value: Any, field: str) -> str:
     _require(isinstance(value, str) and _SHA256_RE.fullmatch(value), "sha256", field=field)
     return value
-
 def _timestamp(value: Any, field: str) -> dt.datetime:
     raw = _text(value, field)
     normalized = raw[:-1] + "+00:00" if raw.endswith("Z") else raw
@@ -44,7 +38,6 @@ def _timestamp(value: Any, field: str) -> dt.datetime:
         raise _error("timestamp", field=field) from exc
     _require(parsed.tzinfo is not None and parsed.utcoffset() is not None, "timezone", field=field)
     return parsed
-
 def validate_artifact_path(raw_path: Any, project_root: str | Path | None = None) -> str:
     path = _text(raw_path, "artifact path")
     _require(not (path.startswith(("/", "~")) or "\\" in path or "\0" in path
@@ -61,7 +54,6 @@ def validate_artifact_path(raw_path: Any, project_root: str | Path | None = None
             raise _error("path_resolve", path=path) from exc
         _require(resolved == root or root in resolved.parents, "path_escape", path=path)
     return path
-
 def _secret_locations(value: Any, path: str = "$") -> list[str]:
     if isinstance(value, Mapping):
         return [
@@ -75,7 +67,6 @@ def _secret_locations(value: Any, path: str = "$") -> list[str]:
         return [location for index, child in enumerate(value)
                 for location in _secret_locations(child, f"{path}[{index}]")]
     return [path] if isinstance(value, str) and _SECRET_VALUE_RE.search(value) else []
-
 def _validate_artifact(artifact: Any, index: int, *, project_root: str | Path | None,
                        verify_artifacts: bool) -> None:
     _require(isinstance(artifact, Mapping), "artifact_object", index=index)
@@ -96,7 +87,6 @@ def _validate_artifact(artifact: Any, index: int, *, project_root: str | Path | 
         _require(actual == digest, "artifact_hash", path=path)
         _require("bytes" not in artifact or actual_size == byte_count,
                  "artifact_size", path=path)
-
 def validate_envelope(envelope: Any, *, project_root: str | Path | None = None,
                       verify_artifacts: bool = False) -> None:
     _require(isinstance(envelope, Mapping), "envelope_object")
@@ -134,7 +124,6 @@ def validate_envelope(envelope: Any, *, project_root: str | Path | None = None,
         json.dumps(envelope, allow_nan=False)
     except (TypeError, ValueError) as exc:
         raise _error("json_finite") from exc
-
 def _legacy_artifacts(payload: Mapping[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     raw_hashes = payload.get("raw_artifact_hashes")
     raw_hashes = raw_hashes if isinstance(raw_hashes, Mapping) else {}
@@ -148,7 +137,6 @@ def _legacy_artifacts(payload: Mapping[str, Any]) -> tuple[list[dict[str, Any]],
     records: dict[str, dict[str, Any]] = {}
     blockers: list[dict[str, Any]] = []
     rejected: set[str] = set()
-
     def append(item: Any, raw: Any, from_manifest: bool) -> None:
         if not isinstance(item, Mapping):
             blockers.append(dict(EVIDENCE_POLICY["legacy_malformed_artifact"]))
@@ -174,7 +162,6 @@ def _legacy_artifacts(payload: Mapping[str, Any]) -> tuple[list[dict[str, Any]],
             blockers.append({"message": str(exc), "path": path_text, "blocking": True})
         else:
             records.setdefault(safe_path, record)
-
     for item in items:
         path = item.get("path") if isinstance(item, Mapping) else None
         append(item, raw_hashes.get(path, {}) if isinstance(path, str) else {}, True)
@@ -182,7 +169,6 @@ def _legacy_artifacts(payload: Mapping[str, Any]) -> tuple[list[dict[str, Any]],
         if path not in records and path not in rejected and isinstance(raw, Mapping):
             append({"path": path}, raw, False)
     return list(records.values()), blockers
-
 def adapt_v1_manifest(manifest: Mapping[str, Any], *, capability: str | None = None,
                       provider: str | None = None) -> dict[str, Any]:
     _require(isinstance(manifest, Mapping)
@@ -224,7 +210,89 @@ def adapt_v1_manifest(manifest: Mapping[str, Any], *, capability: str | None = N
         finished_at=created_at, artifacts=artifacts, verdict=verdict, blockers=blockers)
     validate_envelope(envelope)
     return envelope
-
+def envelope_covers_v1(envelope: Mapping[str, Any],
+                       manifest: Mapping[str, Any]) -> bool:
+    expected = adapt_v1_manifest(manifest)
+    fields = ("kind", "task", "source_hash", "runtime_asset_hash", "started_at", "finished_at", "artifacts")
+    provenance = envelope.get("provenance")
+    rank = {"PASS": 0, "DEGRADED": 1, "FAIL": 2}
+    token = lambda item: json.dumps(item, sort_keys=True, separators=(",", ":"))
+    expected_blockers = {token(item) for item in expected["blockers"]}
+    actual_blockers = {token(item) for item in envelope.get("blockers") or []}
+    return (
+        all(envelope.get(field) == expected.get(field) for field in fields)
+        and isinstance(provenance, Mapping)
+        and all(provenance.get(key) == value
+                for key, value in expected["provenance"].items())
+        and rank.get(str(envelope.get("verdict")), -1)
+        >= rank.get(str(expected.get("verdict")), -1)
+        and expected_blockers.issubset(actual_blockers)
+    )
+def adapt_lifecycle_v1(payload: Mapping[str, Any]) -> dict[str, Any]:
+    schema = str(payload.get("schema") or "")
+    kind = next((name for name, value in DOMAIN_EVIDENCE_SCHEMAS.items() if value == schema), "")
+    _require(bool(kind), "legacy_schema", schema=", ".join(DOMAIN_EVIDENCE_SCHEMAS.values()))
+    source_hash = payload.get("source_hash")
+    checks = payload.get("checks")
+    check_items = checks.items() if isinstance(checks, Mapping) else ()
+    check_values = checks.values() if isinstance(checks, Mapping) else ()
+    blockers = [
+        {"message": f"{name} is blocking", "blocking": True}
+        for name, record in check_items
+        if isinstance(record, Mapping) and record.get("state") == "blocking"
+    ]
+    provider = str(payload.get("provider") or "")
+    if kind == "foundation" and not provider:
+        provider = next((
+            str(record.get("detail", {}).get("provider") or "")
+            for record in check_values
+            if isinstance(record, Mapping)
+            and isinstance(record.get("detail"), Mapping)
+            and record.get("detail", {}).get("provider")
+        ), "local-git")
+    generic = {"schema", "captured_at", "source_hash", "runtime_asset_hash", "task", "provider"}
+    envelope = {
+        "schema": EVIDENCE_SCHEMA,
+        "kind": kind,
+        "task": str(payload.get("task") or kind),
+        "capability": f"project-{kind}",
+        "provider": provider or kind,
+        "provenance": {
+            "adapter": schema,
+            kind: {key: value for key, value in payload.items() if key not in generic},
+        },
+        "source_hash": source_hash,
+        "runtime_asset_hash": payload.get("runtime_asset_hash") or source_hash,
+        "started_at": payload.get("captured_at"),
+        "finished_at": payload.get("captured_at"),
+        "artifacts": [],
+        "verdict": "FAIL" if blockers else "PASS",
+        "blockers": blockers,
+    }
+    validate_envelope(envelope)
+    return envelope
+def lifecycle_payload(envelope: Mapping[str, Any], kind: str) -> dict[str, Any]:
+    expected_schema = DOMAIN_EVIDENCE_SCHEMAS.get(kind)
+    if not expected_schema:
+        raise EvidenceError(f"unknown lifecycle evidence kind: {kind}")
+    if envelope.get("schema") == expected_schema:
+        return dict(envelope)
+    validate_envelope(envelope)
+    if envelope.get("kind") != kind:
+        raise EvidenceError(f"evidence kind must be {kind}")
+    if envelope.get("verdict") != "PASS" or envelope.get("blockers"):
+        raise EvidenceError(f"{kind} evidence envelope must have a clear PASS verdict")
+    provenance = envelope.get("provenance")
+    domain = provenance.get(kind) if isinstance(provenance, Mapping) else None
+    if not isinstance(domain, Mapping):
+        raise EvidenceError(f"{kind} evidence provenance must include `{kind}`")
+    return {
+        **dict(domain),
+        "schema": expected_schema,
+        "captured_at": envelope["finished_at"],
+        "source_hash": envelope["source_hash"],
+        **({"provider": envelope["provider"]} if kind == "delivery" else {}),
+    }
 def read_envelope(path: str | Path, *, allow_v1: bool = True,
                   project_root: str | Path | None = None,
                   verify_artifacts: bool = False) -> dict[str, Any]:
@@ -238,10 +306,12 @@ def read_envelope(path: str | Path, *, allow_v1: bool = True,
     if payload.get("schema") == LEGACY_LIVE_MANIFEST_SCHEMA:
         _require(allow_v1, "legacy_disallowed")
         payload = adapt_v1_manifest(payload)
+    elif payload.get("schema") in DOMAIN_EVIDENCE_SCHEMAS.values():
+        _require(allow_v1, "legacy_disallowed")
+        payload = adapt_lifecycle_v1(payload)
     result = dict(payload)
     validate_envelope(result, project_root=project_root, verify_artifacts=verify_artifacts)
     return result
-
 def write_envelope(path: str | Path, envelope: Mapping[str, Any] | None = None, *,
                    project_root: str | Path | None = None,
                    verify_artifacts: bool = False, **fields: Any) -> dict[str, Any]:
@@ -260,7 +330,6 @@ def write_envelope(path: str | Path, envelope: Mapping[str, Any] | None = None, 
     except OSError as exc:
         raise _error("write", path=evidence_path, error=exc) from exc
     return json.loads(serialized)
-
 globals().update({
     alias: globals()[target]
     for alias, target in EVIDENCE_POLICY["aliases"].items()

@@ -6,7 +6,7 @@ import re
 from pathlib import PurePosixPath, PureWindowsPath
 from typing import Any, Mapping, Sequence
 
-from .contracts import PLAN_PROOF_KINDS, task_file_values
+from .contracts import PLAN_PROOF_KINDS, task_file_owners
 from .policy_data import value as _policy_value
 from .review_policy import RISK_FLAG_ORDER, select_review_policy
 
@@ -51,21 +51,21 @@ def _values(raw_value: Any) -> list[str]:
         values = []
     return [value.strip() for value in values if value.strip() and
             value.strip().casefold() not in _POLICY["empty_values"]]
-def _task_paths(task: Mapping[str, Any]) -> list[str]:
-    paths: list[str] = []
-    for value in task_file_values(task.get("files")):
+def _task_paths(task: Mapping[str, Any]) -> list[tuple[str, str]]:
+    paths: list[tuple[str, str]] = []
+    for path, match_kind in task_file_owners(task.get("files")):
         try:
-            normalized = _normalize_scope_path(value)
+            owner_path = path[:-1] if match_kind == "exact" and path.endswith("/") and not path.endswith("//") else path
+            normalized = _normalize_scope_path(owner_path)
         except ChangeDerivationError:
             continue
-        if normalized not in paths:
-            paths.append(normalized)
-    return paths
-def _path_matches_owner(changed_path: str, owner: str) -> bool:
-    if any(char in owner for char in "*?["):
-        return fnmatch.fnmatchcase(changed_path, owner)
-    return (changed_path == owner or changed_path.startswith(owner.rstrip("/") + "/") or
-            owner.startswith(changed_path.rstrip("/") + "/"))
+        paths.append((normalized, match_kind))
+    return list(dict.fromkeys(paths))
+def _path_matches_owner(changed_path: str, owner: tuple[str, str]) -> bool:
+    path, match_kind = owner
+    return (fnmatch.fnmatchcase(changed_path, path) if match_kind == "glob"
+            else changed_path == path or changed_path.startswith(path.rstrip("/") + "/")
+            or path.startswith(changed_path.rstrip("/") + "/"))
 def _is_code_path(path: str) -> bool:
     candidate = PurePosixPath(path)
     return (candidate.suffix.casefold() in _CODE_SUFFIXES or candidate.name.casefold() in _CODE_FILENAMES)

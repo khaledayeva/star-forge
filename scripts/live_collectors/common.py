@@ -496,7 +496,19 @@ def write_live_manifest(
     redacted, report = redact_sensitive_values(payload)
     redacted["redaction_report"] = report
     path = live_collector_dir(project, task, collector) / sanitize_segment(manifest_name, fallback="manifest.json")
-    return write_json(path, redacted, redact=False)[0]
+    path = write_json(path, redacted, redact=False)[0]
+    from starforge import evidence
+    try:
+        envelope = evidence.adapt_v1_manifest(redacted)
+        evidence.write_envelope(
+            path.parent / "evidence.json",
+            envelope,
+            project_root=project,
+            verify_artifacts=True,
+        )
+    except evidence.EvidenceError:
+        pass
+    return path
 def validate_manifest_payload(payload: Any) -> list[dict[str, Any]]:
     if not isinstance(payload, dict):
         return [blocking_problem("manifest must be a JSON object", rule="manifest-shape")]

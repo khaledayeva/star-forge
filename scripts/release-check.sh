@@ -137,27 +137,52 @@ def event_base() -> str:
     except (OSError, json.JSONDecodeError):
         return ""
     pull_request = payload.get("pull_request")
-    if not isinstance(pull_request, dict):
-        return ""
-    base = pull_request.get("base")
-    if not isinstance(base, dict):
-        return ""
-    sha = base.get("sha")
-    return sha if isinstance(sha, str) else ""
+    if isinstance(pull_request, dict):
+        base = pull_request.get("base")
+        if isinstance(base, dict) and isinstance(base.get("sha"), str):
+            return base["sha"]
+    before = payload.get("before")
+    return (
+        before
+        if isinstance(before, str) and before.strip("0")
+        else ""
+    )
 
 
 if git("rev-parse", "--is-inside-work-tree", check=False).returncode != 0:
     raise SystemExit("release check failed: release validation must run inside Git")
 
+explicit_candidates = [
+    ("STAR_FORGE_RELEASE_BASE", os.environ.get("STAR_FORGE_RELEASE_BASE", "")),
+    ("GITHUB_BASE_SHA", os.environ.get("GITHUB_BASE_SHA", "")),
+    ("GitHub event base", event_base()),
+]
+for label, candidate in explicit_candidates:
+    if candidate and not commit_exists(candidate):
+        raise SystemExit(
+            f"release check failed: {label} is not a readable commit"
+        )
 base_candidates = [
-    os.environ.get("STAR_FORGE_RELEASE_BASE", ""),
-    os.environ.get("GITHUB_BASE_SHA", ""),
-    event_base(),
+    *(candidate for _label, candidate in explicit_candidates),
     "refs/remotes/origin/main",
     "refs/remotes/origin/master",
 ]
 base = next((candidate for candidate in base_candidates if commit_exists(candidate)), "")
+head = git("rev-parse", "HEAD").stdout.strip()
+initial_release = os.environ.get("STAR_FORGE_INITIAL_RELEASE", "") == "1"
+if not base:
+    if not initial_release:
+        raise SystemExit(
+            "release check failed: no trustworthy comparison revision is "
+            "available; set STAR_FORGE_RELEASE_BASE to the predecessor commit"
+        )
+    if commit_exists("HEAD^"):
+        raise SystemExit(
+            "release check failed: STAR_FORGE_INITIAL_RELEASE=1 is valid only "
+            "for a repository's first commit"
+        )
 if base:
+    base_is_head = git("rev-parse", base).stdout.strip() == head
     changed = [
         path
         for path in git_paths("diff", "--name-only", "-z", base, "--")
@@ -171,6 +196,10 @@ if base:
         if not path.startswith(".starforge/")
     )
     changed = list(dict.fromkeys(changed))
+    if base_is_head and not changed:
+        raise SystemExit(
+            "release check failed: the comparison revision resolves to current HEAD"
+        )
     if changed:
         prior_manifest = git(
             "show", f"{base}:.codex-plugin/plugin.json", check=False
@@ -193,8 +222,8 @@ if base:
             )
 elif mode != "--version-only":
     print(
-        "release check note: no comparison revision was available; "
-        "validated current manifest version only",
+        "release check note: explicit initial release validated current "
+        "manifest version only",
         file=sys.stderr,
     )
 PY

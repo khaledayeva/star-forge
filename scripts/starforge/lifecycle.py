@@ -1,13 +1,10 @@
 """Pure lifecycle contracts and gates for Star Forge foundation and delivery.
-
 This module describes authorized lifecycle outcomes and validates evidence captured
 by orchestrators or proof adapters. It intentionally performs no Git, GitHub,
 filesystem, subprocess, or network mutation.
 """
-
 from __future__ import annotations
 from .policy_data import value as _policy_value
-
 import datetime as dt
 import hashlib
 import json
@@ -15,6 +12,7 @@ import re
 from dataclasses import asdict, dataclass
 from pathlib import PurePosixPath
 from typing import Any, Mapping, Sequence
+from . import evidence as evidence_contract
 from .validation import boolean_fields, flag as _flag, mapping_sections, rules
 FOUNDATION_CONTRACT_SCHEMA = "star-forge.foundation-contract.v1"
 FOUNDATION_EVIDENCE_SCHEMA = "star-forge.foundation-evidence.v1"
@@ -43,7 +41,6 @@ DELIVERY_IDENTITY_KINDS = frozenset({
     "package",
     "platform-release",
 })
-
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _COMMIT_RE = re.compile(r"^[0-9a-f]{40}(?:[0-9a-f]{24})?$")
 _OWNER_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$")
@@ -67,10 +64,8 @@ _NAMED_TARGET_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{1,63}$")
 _IDENTITY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,255}$")
 _SITES_FIT_RE = re.compile(r"\b(?:simple|static|internal|landing|documentation|docs|portal|dashboard)\b")
 _VERCEL_FIT_RE = re.compile(r"\b(?:next(?:\.js)?|react|full[- ]stack|server[- ]rendered|ssr|ai|production)\b")
-
 class LifecycleContractError(ValueError):
     """A lifecycle contract cannot be represented safely."""
-
 def resolve_phase(
     *,
     legacy: bool,
@@ -115,7 +110,6 @@ def resolve_phase(
         if active:
             return phase
     return "done"
-
 @dataclass(frozen=True)
 class FoundationGate:
     """Deterministic decision about whether feature work may begin."""
@@ -127,7 +121,6 @@ class FoundationGate:
     blockers: tuple[str, ...]
     def to_dict(self) -> dict[str, Any]:
         return _gate_dict(self, FOUNDATION_GATE_SCHEMA)
-
 @dataclass(frozen=True)
 class DeliveryGate:
     """Deterministic decision about strict completion eligibility."""
@@ -143,18 +136,14 @@ class DeliveryGate:
     blockers: tuple[str, ...]
     def to_dict(self) -> dict[str, Any]:
         return _gate_dict(self, DELIVERY_GATE_SCHEMA)
-
 def _gate_dict(gate: Any, schema: str) -> dict[str, Any]:
     payload = asdict(gate)
     payload["checks"], payload["blockers"] = dict(gate.checks), list(gate.blockers)
     return {"schema": schema, **payload}
-
 def _requirement(state: str, reason: str) -> dict[str, str]:
     return {"state": state, "reason": reason}
-
 def _optional_requirement(required: bool, required_reason: str, absent_reason: str) -> dict[str, str]:
     return _requirement("requested" if required else "not-applicable", required_reason if required else absent_reason)
-
 def _requirement_problems(requirements: Mapping[str, Any], names: Sequence[str]) -> list[str]:
     problems: list[str] = []
     missing = [name for name in names if name not in requirements]
@@ -178,7 +167,6 @@ def _requirement_problems(requirements: Mapping[str, Any], names: Sequence[str])
             f"requirement {name} requires a reason",
         )
     return problems
-
 def make_foundation_contract(
     *,
     github_requested: bool,
@@ -246,13 +234,11 @@ def make_foundation_contract(
         },
         "requirements": requirements,
     }
-
 def _safe_relative_path(value: object) -> bool:
     if not isinstance(value, str) or not value or "\\" in value:
         return False
     path = PurePosixPath(value)
     return (not path.is_absolute() and value not in {".", ".."} and all(part not in {"", ".", ".."} for part in path.parts))
-
 def _valid_timestamp(value: object) -> bool:
     if not isinstance(value, str) or not value.strip():
         return False
@@ -262,7 +248,6 @@ def _valid_timestamp(value: object) -> bool:
     except ValueError:
         return False
     return parsed.tzinfo is not None and parsed.utcoffset() is not None
-
 def _secret_problems(value: object, path: str = "evidence") -> list[str]:
     problems: list[str] = []
     if isinstance(value, Mapping):
@@ -282,7 +267,6 @@ def _secret_problems(value: object, path: str = "evidence") -> list[str]:
         if re.match(r"^https?://[^/@\s]+@", value):
             problems.append(f"{path} must not embed credentials in a URL")
     return problems
-
 def validate_foundation_contract(contract: object) -> list[str]:
     """Validate contract structure, states, authority, and mutation boundaries."""
     if not isinstance(contract, Mapping):
@@ -338,7 +322,6 @@ def validate_foundation_contract(contract: object) -> list[str]:
             problems.append("local-only foundation cannot claim repository write authority")
     problems.extend(_secret_problems(contract, "contract"))
     return problems
-
 def foundation_contract_sha256(contract: Mapping[str, Any]) -> str:
     """Hash a valid contract using deterministic JSON encoding."""
     problems = validate_foundation_contract(contract)
@@ -346,7 +329,6 @@ def foundation_contract_sha256(contract: Mapping[str, Any]) -> str:
         raise LifecycleContractError("; ".join(problems))
     serialized = json.dumps(contract, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
     return hashlib.sha256(serialized).hexdigest()
-
 def _evidence_detail(evidence: Mapping[str, Any], name: str) -> tuple[Mapping[str, Any], Mapping[str, Any]]:
     checks = evidence.get("checks")
     if not isinstance(checks, Mapping):
@@ -356,7 +338,6 @@ def _evidence_detail(evidence: Mapping[str, Any], name: str) -> tuple[Mapping[st
         return {}, {}
     detail = record.get("detail")
     return record, detail if isinstance(detail, Mapping) else {}
-
 def _artifact_problem(
     detail: Mapping[str, Any],
     *,
@@ -373,7 +354,6 @@ def _artifact_problem(
     if detail.get("committed") is not True:
         return "artifact must be committed"
     return None
-
 def _github_remote_matches(remote_url: object, owner: str, repository: str) -> bool:
     if not isinstance(remote_url, str) or not remote_url:
         return False
@@ -381,7 +361,6 @@ def _github_remote_matches(remote_url: object, owner: str, repository: str) -> b
         return False
     escaped = re.escape(f"{owner}/{repository}")
     return bool(re.fullmatch(rf"https://github\.com/{escaped}(?:\.git)?", remote_url) or re.fullmatch(rf"git@github\.com:{escaped}(?:\.git)?", remote_url))
-
 def _specific_evidence_problems(
     name: str,
     detail: Mapping[str, Any],
@@ -490,7 +469,6 @@ def _specific_evidence_problems(
         if detail.get("kind") not in {"threat-model", "security-plan"}:
             problems.append("security evidence must be a threat model or security plan")
     return problems
-
 def evaluate_foundation(
     contract: Mapping[str, Any],
     evidence: Mapping[str, Any],
@@ -515,6 +493,12 @@ def evaluate_foundation(
     if not isinstance(evidence, Mapping):
         blockers.append("foundation evidence must be an object")
         evidence = {}
+    else:
+        try:
+            evidence = evidence_contract.lifecycle_payload(evidence, "foundation")
+        except evidence_contract.EvidenceError as exc:
+            blockers.append(f"foundation evidence envelope: {exc}")
+            evidence = {}
     if evidence.get("schema") != FOUNDATION_EVIDENCE_SCHEMA:
         blockers.append(f"evidence schema must be {FOUNDATION_EVIDENCE_SCHEMA}")
     if not _valid_timestamp(evidence.get("captured_at")):
@@ -574,7 +558,6 @@ def evaluate_foundation(
         checks=checks,
         blockers=tuple(blockers),
     )
-
 def validate_foundation_evidence(
     contract: Mapping[str, Any],
     evidence: Mapping[str, Any],
@@ -587,7 +570,6 @@ def validate_foundation_evidence(
         evidence,
         current_source_hash=current_source_hash,
     ).blockers)
-
 def _delivery_identity_kind(target: str) -> str:
     if target == "source-only":
         return "source-handoff"
@@ -598,7 +580,6 @@ def _delivery_identity_kind(target: str) -> str:
     if target == "package":
         return "package"
     return "platform-release"
-
 def _provider_names(value: object) -> tuple[str, ...]:
     if isinstance(value, str):
         values = re.split(r"[,|+]", value)
@@ -607,7 +588,6 @@ def _provider_names(value: object) -> tuple[str, ...]:
     else:
         values = []
     return tuple(dict.fromkeys(item.strip().lower() for item in values if item.strip()))
-
 def _select_delivery_provider(
     target: str,
     project_class: str,
@@ -639,7 +619,6 @@ def _select_delivery_provider(
     if target not in GENERIC_DELIVERY_TARGETS:
         return platform_target or target, ""
     return "not-applicable", ""
-
 def _authority_blocker(target: str, authority: Mapping[str, Any]) -> str:
     checks = (
         (target != "source-only" and not authority.get("external_write_authorized"), "delivery authority"),
@@ -650,7 +629,6 @@ def _authority_blocker(target: str, authority: Mapping[str, Any]) -> str:
     )
     reasons = [reason for unresolved, reason in checks if unresolved]
     return "unresolved " + ", ".join(reasons) if reasons else ""
-
 def make_delivery_contract(
     *,
     delivery_target: str,
@@ -730,7 +708,6 @@ def make_delivery_contract(
         "authority": authority,
         "requirements": requirements,
     }
-
 def validate_delivery_contract(contract: object) -> list[str]:
     """Validate delivery target, route, evidence requirements, and authority."""
     if not isinstance(contract, Mapping):
@@ -796,7 +773,6 @@ def validate_delivery_contract(contract: object) -> list[str]:
                   requirement.get("state") != expected_state, f"{name} requirement does not match " + ("blockers" if name == "delivery_identity" else "the approved result"))
     problems.extend(_secret_problems(contract, "contract"))
     return problems
-
 def delivery_contract_sha256(contract: Mapping[str, Any]) -> str:
     """Hash a valid Delivery Contract using deterministic JSON encoding."""
     problems = validate_delivery_contract(contract)
@@ -804,13 +780,11 @@ def delivery_contract_sha256(contract: Mapping[str, Any]) -> str:
         raise LifecycleContractError("; ".join(problems))
     serialized = json.dumps(contract, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
     return hashlib.sha256(serialized).hexdigest()
-
 def _valid_live_url(value: object, *, production: bool) -> bool:
     if not isinstance(value, str) or not value:
         return False
     pattern = r"https://" if production else r"https?://"
     return bool(re.fullmatch(pattern + r"[^/@\s]+(?::[0-9]+)?(?:/[^\s]*)?", value))
-
 def _delivery_specific_problems(
     name: str,
     detail: Mapping[str, Any],
@@ -845,7 +819,6 @@ def _delivery_specific_problems(
         _flag(problems, detail.get("source_hash") != current_source_hash, "smoke result is not bound to the current source hash")
         _flag(problems, not str(detail.get("scenario") or "").strip(), "delivery smoke result requires a scenario")
     return problems
-
 def evaluate_delivery(
     contract: Mapping[str, Any],
     evidence: Mapping[str, Any],
@@ -882,6 +855,12 @@ def evaluate_delivery(
     if not isinstance(evidence, Mapping):
         blockers.append("delivery evidence must be an object")
         evidence = {}
+    else:
+        try:
+            evidence = evidence_contract.lifecycle_payload(evidence, "delivery")
+        except evidence_contract.EvidenceError as exc:
+            blockers.append(f"delivery evidence envelope: {exc}")
+            evidence = {}
     _flag(blockers, evidence.get("schema") != DELIVERY_EVIDENCE_SCHEMA, f"evidence schema must be {DELIVERY_EVIDENCE_SCHEMA}")
     _flag(blockers, not _valid_timestamp(evidence.get("captured_at")), "evidence captured_at must be an ISO-8601 timestamp with timezone")
     _flag(blockers, not _SHA256_RE.fullmatch(str(current_source_hash or "")), "current source hash must be a lowercase SHA-256 digest")
@@ -933,7 +912,6 @@ def evaluate_delivery(
         checks,
         tuple(blockers),
     )
-
 def validate_delivery_evidence(
     contract: Mapping[str, Any],
     evidence: Mapping[str, Any],

@@ -175,11 +175,7 @@ def _blueprint_lifecycle_field(text: str, name: str) -> tuple[bool, str]:
     return True, "" if unresolved else value
 
 def parse_blueprint_lifecycle_contract(text: str) -> dict[str, Any]:
-    """Describe the intake, design, and delivery facts that drive v0.4 phases.
-    Blueprints without an Intake Decision Record are compatibility projects. They
-    keep the v0.3 phase sequence and receive the documented source-only delivery
-    default without retroactively requiring new lifecycle artifacts.
-    """
+    """Describe v0.4 intake, design, delivery, and legacy lifecycle defaults."""
     intake_text = _markdown_section(text, "Intake Decision Record")
     intake_values: dict[str, str] = {}
     missing_intake: list[str] = []
@@ -274,18 +270,21 @@ def parse_blueprint_plan_contract(text: str) -> dict[str, Any]:
 
 def _comma_values(raw: Any) -> list[str]:
     return [item.strip() for item in str(raw or "").split(",") if item.strip()]
-def task_file_values(raw: Any) -> list[str]:
+def task_file_owners(raw: Any) -> list[tuple[str, str]]:
     text = str(raw or "")
     try:
         values = json.loads(text) if text.startswith("[") else None
     except json.JSONDecodeError:
         values = None
-    return (values if isinstance(values, list) and all(isinstance(value, str) for value in values)
-            else [item.strip() for item in re.split(r"[,;]", text) if item.strip()])
+    if isinstance(values, list) and all(isinstance(value, str) for value in values):
+        return [(value, "exact") for value in values]
+    legacy = (item.strip() for item in re.split(r"[,;]", text))
+    return [(value, "glob" if any(char in value for char in "*?[") else "exact")
+            for value in legacy if value]
 def _maintenance_task_owns_non_docs(task: Mapping[str, Any]) -> bool:
     raw = task.get("files")
     encoded = str(raw or "").startswith("[")
-    for value in task_file_values(raw):
+    for value, _match_kind in task_file_owners(raw):
         if not value or not encoded and value.casefold() in {"-", "n/a", "na", "none"}:
             continue
         path = Path(value)
@@ -506,7 +505,7 @@ def validate_plan_v2_contract(
         ))
     return problems
 
-def _escape_plan_cell(value: Any) -> str:
+def encode_plan_cell(value: Any) -> str:
     return str(value if value is not None else "").replace("|", r"\|")
 
 def serialize_plan_tasks(
@@ -538,13 +537,13 @@ def serialize_plan_tasks(
         "|" + "|".join("-" * max(3, len(column)) for column in columns) + "|",
     ]
     for task in tasks:
-        values: list[str] = []
+        values: list[Any] = []
         for column in columns:
             key = key_for_column[column]
             value = task.get(key)
             if column == "Task" and value is None:
                 value = task.get("task", "")
-            values.append(_escape_plan_cell(value))
+            values.append(encode_plan_cell(value))
         lines.append("| " + " | ".join(values) + " |")
     return "\n".join(lines) + "\n"
 

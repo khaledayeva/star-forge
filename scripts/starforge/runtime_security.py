@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, Mapping
 from live_collectors import common as live_common
 from .policy_data import value as _policy_value
-from .runtime_support import BLOCKING_SEVERITIES, FINDING_SEVERITIES, dirty_paths_missing_from_source_snapshot, file_sha256, git_head, tree_clean_for_commit_binding
+from .runtime_support import BLOCKING_SEVERITIES, FINDING_SEVERITIES, dirty_paths_missing_from_source_snapshot, file_sha256, git_head, stable_clean_commit_binding
 from .runtime_project import ensure_state_dirs, resolve_project
 from .runtime_preview import append_artifact_once, collector_for_profile, current_live_source_hash, flag_live_problem, is_task_scoped_live_path, live_manifest_summary, live_problem, live_rel, load_and_validate_live_manifest, require_raw_hash_for_artifact, task_from_scoped_live_path, validate_artifact_arg, validate_manifest_artifact_scopes, validate_manifest_bound_artifact_arg, validate_raw_artifact_hashes, write_live_proof_record
 
@@ -60,7 +60,7 @@ def source_binding_is_fresh(project: Path, binding: Mapping[str, Any], *, curren
     commit_sha, head = str(binding.get("commit_sha") or ""), git_head(project)
     if not commit_sha or not head or commit_sha != head:
         return current_source_hash is None and has_source_hash
-    return tree_clean_for_commit_binding(project)
+    return stable_clean_commit_binding(project, head)
 
 def finish_security_command(
     project: Path, args: argparse.Namespace, kind: str, task: str | None, problems: list[dict[str, Any]],

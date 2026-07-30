@@ -256,11 +256,17 @@ def scan_paths(paths: Iterable[Path], project: Path) -> list[dict[str, Any]]:
                 if pattern.search(line):
                     findings.append({"severity": severity, "rule": rule, "file": rel, "line": idx, "evidence": line.strip()[:160]})
     return findings
-def tree_clean_for_commit_binding(project: Path) -> bool:
-    try:
-        return not source_dirty_entries(git_status(project))
-    except ValueError:
-        return False
+def stable_clean_commit_binding(project: Path, expected_head: str) -> bool:
+    def probe() -> tuple[str, tuple[str, ...]] | None:
+        try:
+            if not live_common.is_git_repo(project):
+                return None
+            head, dirty = live_common.git_head(project), tuple(source_dirty_entries(live_common.git_status(project)))
+            confirmed = live_common.git_head(project) if live_common.is_git_repo(project) else ""
+        except (OSError, ValueError):
+            return None
+        return (head, dirty) if head and confirmed == head else None
+    return bool(expected_head and probe() == (expected_head, ()) == probe())
 def _release_hashes(project: Path) -> dict[str, str | None]:
     paths = {"blueprint_hash": project / BLUEPRINT_FILE, "plan_hash": project / PLAN_FILE}
     return {name: live_common.file_sha256(path, root=project) if path.exists() else None for name, path in paths.items()}

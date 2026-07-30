@@ -71,10 +71,10 @@ def load_review_findings(project: Path, scope: str) -> tuple[list[dict[str, Any]
         files.append(policy_mapping("review_file", path=rel, role=role, agent_id=payload.get("agent_id"), declared_source_hash=source_attestation, findings=normalized))
     return files, problems
 def finding_fingerprint(finding: dict[str, Any]) -> str:
-    exact = {"file": str(finding.get("file") or "").strip(), "line": finding.get("line")}
+    exact = {"file": str(finding.get("file") or ""), "line": finding.get("line")}
     exact.update({key: re.sub(r"\s+", " ", str(finding.get(key) or "").strip())
                   for key in ("title", "detail")})
-    encoded = json.dumps(exact, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+    encoded = json.dumps(exact, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode()
     return "sha256:" + hashlib.sha256(encoded).hexdigest()
 FINDING_DUPLICATE_STOPWORDS = _policy_value('runtime_review.FINDING_DUPLICATE_STOPWORDS')
 FINDING_MARKERS = _policy_value('runtime_review.FINDING_MARKERS')
