@@ -232,6 +232,121 @@ def envelope_covers_v1(envelope: Mapping[str, Any],
         >= rank.get(str(expected.get("verdict")), -1)
         and expected_blockers.issubset(actual_blockers)
     )
+def _authority_contains(actual: Any, expected: Any) -> bool:
+    return (isinstance(actual, Mapping)
+            and all(key in actual and _authority_contains(actual[key], value)
+                    for key, value in expected.items())
+            if isinstance(expected, Mapping) else actual == expected)
+def live_authority_problems(envelope: Mapping[str, Any],
+                            manifest: Mapping[str, Any]) -> list[str]:
+    collector = str(manifest.get("collector") or "")
+    spec = EVIDENCE_POLICY["authority"].get(collector)
+    if not isinstance(spec, Mapping):
+        return [f"collector {collector or '<missing>'} has no strict evidence authority contract"]
+    summary = manifest.get("summary")
+    summary = summary if isinstance(summary, Mapping) else {}
+    capability = _CAPABILITY_BY_COLLECTOR.get(collector, "")
+    provider, provenance, fallback_rule = str(spec.get("provider") or ""), {}, ""
+    if collector == "browser":
+        provenance = dict(spec["provenance"])
+        fallback_rule = str(spec["fallback_rule"])
+    elif collector == "preview":
+        provider = str(summary.get("provider") or "")
+        provenance = {
+            "collector_mode": spec["collector_mode"],
+            "deployment_provider": provider,
+        }
+    elif collector == "native-ios":
+        route = summary.get("capability_route")
+        route = route if isinstance(route, Mapping) else {}
+        provider = str(spec["provider"])
+        provenance = {
+            "route": spec["route"], "provider": provider,
+            "tool_surface": spec["tool_surface"], "tool": spec["tool"],
+            "providers": [
+                {"id": provider, "kind": "mcp", "status": "used"},
+                {"id": spec["simulator_provider"], "kind": "plugin",
+                 "status": route.get("simulator_browser")},
+            ],
+        }
+        if route.get("id") != spec["route"] or route.get("primary_provider") != provider:
+            provider = ""
+    elif collector == "native-macos":
+        route = summary.get("capability_route")
+        route = route if isinstance(route, Mapping) else {}
+        capabilities = {key: value for key, value in route.items() if key != "id"}
+        build = capabilities.get("build")
+        provider = str(build.get("provider") or "") if isinstance(build, Mapping) else ""
+        if route.get("id") != spec["route"] or provider not in spec["providers"]:
+            provider = ""
+        provenance = {
+            "route": spec["route"], "provider": provider, "capabilities": capabilities,
+            "providers": [
+                {"id": spec["providers"][0], "kind": "plugin",
+                 "status": ("used" if provider == spec["providers"][0] else
+                            "unavailable" if capabilities.get("build_macos_apps") == "unavailable"
+                            else "not-selected")},
+                {"id": spec["computer_use_provider"], "kind": "computer-use",
+                 "status": capabilities.get("computer_use")},
+                {"id": spec["providers"][1], "kind": "shell",
+                 "status": "used" if provider == spec["providers"][1] else "not-selected"},
+            ],
+        }
+    elif collector in {"security", "github"}:
+        preferred = False
+        provider = str(spec["preferred_provider"] if preferred else spec["fallback_provider"])
+        provenance = {
+            "route": {
+                "preferred_provider": spec["preferred_provider"],
+                "selected_provider": provider, "fallback": not preferred,
+                **({"create_fallback": spec["create_fallback"]} if collector == "github" else {}),
+            },
+            "provider": provider,
+        }
+        if collector == "security":
+            provenance.update({
+                "scanner": summary.get("scanner"), "scanner_version": summary.get("scanner_version"),
+                "source_schema": summary.get("source_schema"),
+                "schema_family": summary.get("schema_family") if preferred else "unsupported",
+                "source_binding": summary.get("source_binding"),
+                "normalization": spec["normalization"],
+            })
+        else:
+            provenance.update({
+                "source": summary.get("source"),
+                "repository": {
+                    "full_name": summary.get("repo"), "owner": str(summary.get("repo") or "").partition("/")[0],
+                    "name": str(summary.get("repo") or "").partition("/")[2],
+                    "github_host": summary.get("github_host"),
+                },
+                "pull_request": {
+                    "number": str(summary.get("pr") or ""),
+                    "captured_base_sha": summary.get("captured_base_sha"),
+                    "current_base_sha": summary.get("current_base_sha"),
+                    "captured_head_sha": summary.get("captured_head_sha"),
+                    "current_head_sha": summary.get("current_head_sha"),
+                },
+                "source_binding": {
+                    "source_hash": envelope.get("source_hash"),
+                    "runtime_asset_hash": envelope.get("runtime_asset_hash"),
+                },
+                "foundation": summary.get("foundation"),
+            })
+        if not preferred:
+            fallback_rule = str(spec["fallback_rule"])
+    problems = []
+    if envelope.get("capability") != capability:
+        problems.append(f"capability must be {capability}")
+    if not provider or envelope.get("provider") != provider:
+        problems.append(f"provider must be {provider or 'a valid manifest-selected route'}")
+    if not _authority_contains(envelope.get("provenance"), provenance):
+        problems.append("required route provenance does not match the manifest-selected authority")
+    if fallback_rule:
+        rules = {str(item.get("rule") or "") for item in envelope.get("blockers") or []
+                 if isinstance(item, Mapping)}
+        if fallback_rule not in rules or envelope.get("verdict") == "PASS":
+            problems.append(f"fallback route must record {fallback_rule} and a non-PASS verdict")
+    return problems
 def adapt_lifecycle_v1(payload: Mapping[str, Any]) -> dict[str, Any]:
     schema = str(payload.get("schema") or "")
     kind = next((name for name, value in DOMAIN_EVIDENCE_SCHEMAS.items() if value == schema), "")

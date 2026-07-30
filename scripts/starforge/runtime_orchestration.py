@@ -308,6 +308,8 @@ def lifecycle_next_action(phase: str, state: Mapping[str, Any]) -> str:
         if active_change and active_change.get("approval_state") == "draft":
             change_id = active_change["change_id"]
             return f"Review change packet {change_id} and run `approve-change --change {change_id}` only after explicit approval."
+        if active_change and not state.get("change_approved"):
+            return f"Change packet {active_change['change_id']} has no current immutable approval identity. Recreate or reapprove its derived contract before build."
         return actions["amend_approved"]
     if phase == "done":
         return actions["done_complete" if done and done.get("is_complete") else "done_pending"]
@@ -348,7 +350,7 @@ def canonical_state_payload(
             effective_plan_path = str(Path(active_change["path"]) / active_change["plan_path"])
         except project_changes.ChangePacketError:
             effective_tasks = []
-    change_approved = bool(active_change is None or active_change.get("approval_state") == "approved")
+    change_approved = bool(active_change is None or project_changes.approval_identity_is_current(project, active_change))
     effective_ready = (ready_tasks(effective_tasks) if change_approved else [])
     review_blockers = ([] if source_hash_blocked else review_findings_for_done(project, effective_tasks))
     gates = {

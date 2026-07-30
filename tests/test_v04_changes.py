@@ -116,6 +116,25 @@ Status: active
             template_dir=TEMPLATES,
         )
 
+    def mark_approved_without_identity(
+        self,
+        project: Path,
+        change_id: str,
+        approved_at: str = "2026-07-25T19:00:00+00:00",
+    ) -> dict[str, object]:
+        change_path = (
+            project / ".starforge" / "changes" / change_id / changes.CHANGE_FILE
+        )
+        text = change_path.read_text(encoding="utf-8")
+        change_path.write_text(
+            text.replace("- **State**: draft", "- **State**: approved").replace(
+                "- **Approved at**: -",
+                f"- **Approved at**: {approved_at}",
+            ),
+            encoding="utf-8",
+        )
+        return changes.read_change_packet(project, change_id)
+
     def test_create_packet_has_complete_schema_and_preserves_root_plan(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project = Path(tmp)
@@ -326,7 +345,7 @@ Status: active
         )
         self.assertEqual(legacy["unmatched_files"], [])
 
-    def test_approval_is_atomic_state_transition_and_root_sources_are_unchanged(
+    def test_approve_change_preserves_legacy_approval_but_refuses_activation(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -340,24 +359,70 @@ Status: active
             plan_before = root_plan.read_bytes()
             self.create_packet(project)
 
-            packet = changes.approve_change_packet(
-                project,
-                "CHANGE-1",
-                approved_at="2026-07-25T19:00:00+00:00",
-            )
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                code = star_forge.main(
+                    [
+                        "approve-change",
+                        "--project",
+                        str(project),
+                        "--change",
+                        "CHANGE-1",
+                    ]
+                )
 
+            self.assertEqual(code, 1)
+            self.assertIn("current immutable approval identity", stderr.getvalue())
+            packet = changes.read_change_packet(project, "CHANGE-1")
             self.assertEqual(packet["approval_state"], "approved")
-            self.assertEqual(packet["approved_at"], "2026-07-25T19:00:00+00:00")
             self.assertFalse(packet["approval_identity_bound"])
             self.assertEqual(source.read_bytes(), source_before)
             self.assertEqual(root_plan.read_bytes(), plan_before)
             packet_root = project / ".starforge" / "changes" / "CHANGE-1"
+            self.assertFalse((packet_root / changes.CHANGE_APPROVAL_FILE).exists())
             self.assertEqual(list(packet_root.glob(".change.*.tmp")), [])
-            with self.assertRaises(changes.ChangePacketError):
-                changes.approve_change_packet(project, "CHANGE-1")
+
+    def test_activation_rejects_missing_stale_and_mutated_approval_identities(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp)
+            self.create_packet(project)
+            packet = changes.approve_change_packet(project, "CHANGE-1")
+            self.assertFalse(packet["approval_identity_bound"])
+            with self.assertRaisesRegex(changes.ChangePacketError, "immutable approval identity"):
+                changes.activate_change_plan(project, "CHANGE-1")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp)
+            self.write_modern_project(project)
+            packet = changes.create_or_select_change_packet(
+                project, original_completed_source_hash=SOURCE_HASH,
+                changed_files=["src/api.py"], template_dir=TEMPLATES)
+            changes.approve_change_packet(project, packet["change_id"])
+            contract_path = project / lifecycle.DELIVERY_CONTRACT_PATH
+            contract = json.loads(contract_path.read_text(encoding="utf-8"))
+            contract["route"]["provider"] = "vercel"
+            contract_path.write_text(json.dumps(contract), encoding="utf-8")
+            with self.assertRaisesRegex(changes.ChangePacketError, "immutable approval identity"):
+                changes.activate_change_plan(project, packet["change_id"])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp)
+            self.write_modern_project(project)
+            packet = changes.create_or_select_change_packet(
+                project, original_completed_source_hash=SOURCE_HASH,
+                changed_files=["src/api.py"], template_dir=TEMPLATES)
+            changes.approve_change_packet(project, packet["change_id"])
+            approval = project / packet["path"] / changes.CHANGE_APPROVAL_FILE
+            payload = json.loads(approval.read_text(encoding="utf-8"))
+            payload["identity_sha256"] = "0" * 64
+            approval.write_text(json.dumps(payload), encoding="utf-8")
+            with self.assertRaisesRegex(changes.ChangePacketError, "approval identity"):
+                changes.activate_change_plan(project, packet["change_id"])
 
     def test_approval_rederives_scope_impact_and_packet_plan(self) -> None:
-        for tamper in ("impact", "profile", "plan"):
+        for tamper in ("scope", "impact", "profile", "plan"):
             with self.subTest(tamper=tamper):
                 with tempfile.TemporaryDirectory() as tmp:
                     project = Path(tmp)
@@ -366,7 +431,13 @@ Status: active
                         project, original_completed_source_hash=SOURCE_HASH,
                         changed_files=["src/api.py"], template_dir=TEMPLATES)
                     root = project / packet["path"]
-                    if tamper in {"impact", "profile"}:
+                    if tamper == "scope":
+                        path = root / changes.CHANGE_FILE
+                        path.write_text(
+                            path.read_text(encoding="utf-8").replace(
+                                '"src/api.py"', '"tests/test_api.py"'),
+                            encoding="utf-8")
+                    elif tamper in {"impact", "profile"}:
                         path = root / changes.CHANGE_IMPACT_FILE
                         payload = json.loads(path.read_text(encoding="utf-8"))
                         if tamper == "impact":
@@ -473,11 +544,8 @@ Status: active
                 "CHANGE-3",
                 created_at="2026-07-25T19:00:00Z",
             )
-            changes.approve_change_packet(
-                project,
-                "CHANGE-20",
-                approved_at="2026-07-25T21:00:00Z",
-            )
+            self.mark_approved_without_identity(
+                project, "CHANGE-20", "2026-07-25T21:00:00Z")
 
             self.assertEqual(
                 [item["change_id"] for item in changes.list_change_packets(project)],

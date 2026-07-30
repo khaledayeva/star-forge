@@ -196,6 +196,7 @@ def record_passing_browser_run(project: Path, task: str) -> dict:
         source_hash_after=current_source,
         runtime_asset_hash=star_forge.live_common.compute_runtime_asset_hash(project),
     )
+    browser_playwright.write_evidence_envelope(project, manifest)
     args = argparse.Namespace(
         project=str(project),
         task=task,
@@ -330,6 +331,20 @@ def run_done(project: Path) -> tuple[int, dict]:
     code, out, err = run_cli(["done", "--project", str(project), "--strict"])
     assert out.strip(), err
     return code, json.loads(out)
+
+def build_drift_packet(project: Path) -> dict:
+    build_completed_project(project)
+    code, payload = run_done(project)
+    assert code == 0, payload
+    (project / "src" / "hello.py").write_text(
+        "print('hello forge, identity drift')\n", encoding="utf-8")
+    code, out, err = run_cli(["run", "--project", str(project), "--no-hooks"])
+    assert code == 0, err or out
+    code, out, err = run_cli(["approve-blueprint", "--project", str(project)])
+    assert code == 0, err or out
+    code, out, err = run_cli(["run", "--project", str(project), "--no-hooks"])
+    assert code == 0, err or out
+    return star_forge.project_changes.list_change_packets(project)[0]
 
 
 # ----------------------------------------------------------- 1. plan parsing
@@ -3449,6 +3464,68 @@ def test_post_done_drift_creates_single_draft_change_packet() -> None:
         assert state["change_packet"]["approval_state"] == "approved"
         assert state["plan"]["ready"] == ["CHANGE-1-T1"]
         assert state["spawn_plan"][0]["task"] == "CHANGE-1-T1"
+
+
+def test_run_requires_missing_stale_mutated_or_valid_change_approval_identity() -> None:
+    for variant in ("missing", "stale", "mutated", "valid"):
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp).resolve()
+            packet = build_drift_packet(project)
+            packet_root = project / packet["path"]
+            if variant == "missing":
+                change = packet_root / star_forge.project_changes.CHANGE_FILE
+                text = change.read_text(encoding="utf-8")
+                change.write_text(
+                    text.replace("- **State**: draft", "- **State**: approved")
+                    .replace("- **Approved at**: -",
+                             "- **Approved at**: 2026-07-30T20:00:00Z"),
+                    encoding="utf-8",
+                )
+            else:
+                code, out, err = run_cli([
+                    "approve-change", "--project", str(project),
+                    "--change", packet["change_id"],
+                ])
+                assert code == 0, err or out
+                if variant == "stale":
+                    contract = star_forge.project_lifecycle.make_delivery_contract(
+                        delivery_target="preview", project_class="web-app",
+                        provider="sites")
+                    contract_path = (
+                        project / star_forge.project_lifecycle.DELIVERY_CONTRACT_PATH
+                    )
+                    contract_path.parent.mkdir(parents=True, exist_ok=True)
+                    contract_path.write_text(
+                        json.dumps(contract), encoding="utf-8")
+                elif variant == "mutated":
+                    approval = (
+                        packet_root
+                        / star_forge.project_changes.CHANGE_APPROVAL_FILE
+                    )
+                    payload = json.loads(approval.read_text(encoding="utf-8"))
+                    payload["identity_sha256"] = "0" * 64
+                    approval.write_text(json.dumps(payload), encoding="utf-8")
+
+            code, out, err = run_cli([
+                "run", "--project", str(project), "--no-hooks",
+            ])
+            if variant == "mutated":
+                assert code == 1
+                assert "approval identity" in err
+                continue
+            assert code == 0, err or out
+            state = json.loads(
+                (project / ".starforge" / "state.json").read_text(
+                    encoding="utf-8"))
+            if variant == "valid":
+                assert state["plan"]["ready"] == ["CHANGE-1-T1"]
+                assert state["spawn_plan"][0]["task"] == "CHANGE-1-T1"
+            else:
+                assert state["phase"] == "amend"
+                assert state["plan"]["ready"] == []
+                assert state["spawn_plan"] == []
+                assert state["drift"]["covered_by_completed_change_packet"] is None
+                assert "immutable approval identity" in state["required_next_action"]
 
 
 def test_unchanged_blueprint_reapproval_is_stable_after_done() -> None:

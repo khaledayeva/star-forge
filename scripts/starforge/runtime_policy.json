@@ -22,6 +22,53 @@
         "github": "github-lifecycle"
       }
     },
+    "authority": {
+      "browser": {
+        "provider": "playwright-collector",
+        "fallback_rule": "capability-fallback",
+        "provenance": {
+          "route": {
+            "preferred_provider": "in-app-browser",
+            "selected_provider": "playwright-collector",
+            "fallback": true,
+            "reason": "Playwright collector was explicitly invoked for CI or headless local QA"
+          },
+          "browser_state_policy": {
+            "ambient_profile": false,
+            "authenticated_state": false,
+            "extension_dependent_state": false,
+            "chrome": "reserved-for-authenticated-or-extension-dependent-state"
+          }
+        }
+      },
+      "preview": {
+        "collector_mode": "provider-neutral-read-only-http"
+      },
+      "native-ios": {
+        "provider": "xcodebuildmcp",
+        "route": "ios-verification",
+        "tool_surface": "mcp",
+        "tool": "XcodeBuildMCP",
+        "simulator_provider": "ios-simulator-browser"
+      },
+      "native-macos": {
+        "route": "macos-implementation",
+        "providers": ["build-macos-apps", "macos-project-workflow"],
+        "computer_use_provider": "computer-use"
+      },
+      "security": {
+        "preferred_provider": "codex-security",
+        "fallback_provider": "security-reviewer",
+        "fallback_rule": "security-capability-fallback",
+        "normalization": "star-forge.normalized-security-findings.v1"
+      },
+      "github": {
+        "preferred_provider": "github-connector",
+        "fallback_provider": "github-unavailable",
+        "fallback_rule": "github-capability-fallback",
+        "create_fallback": "gh repo create --private"
+      }
+    },
     "verdict_by_state": {"blocking": "FAIL", "degraded": "DEGRADED", "passing": "PASS"},
     "identity_fields": ["kind", "task", "capability", "provider"],
     "hash_fields": ["source_hash", "runtime_asset_hash"],

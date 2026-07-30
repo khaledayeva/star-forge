@@ -29,7 +29,7 @@ SPEC.loader.exec_module(star_forge)
 from live_collectors import common as live_common
 from live_collectors import browser_playwright
 from live_collectors import preview as live_preview
-from starforge import runtime_preview, runtime_records, runtime_security
+from starforge import evidence, runtime_preview, runtime_records, runtime_security
 
 os.environ["STAR_FORGE_LEARNINGS_HOME"] = tempfile.mkdtemp(prefix="star-forge-live-test-learnings-")
 
@@ -223,21 +223,221 @@ def write_manifest(
     source_hash: str | None = None,
     runtime_hash: str | None = None,
 ) -> Path:
+    summary = authority_summary(collector, summary or {})
     current_source = source_hash if source_hash is not None else star_forge.source_hash(project)
     current_runtime = runtime_hash if runtime_hash is not None else live_common.compute_runtime_asset_hash(project)
-    return live_common.write_live_manifest(
+    manifest = live_common.write_live_manifest(
         project,
         task=task,
         collector=collector,
         command_argv=["test-collector", collector],
         tool_versions={"test": "1"},
         artifacts=artifacts,
-        summary=summary or {},
+        summary=summary,
         degraded=degraded,
         source_hash_before=current_source,
         source_hash_after=current_source,
         runtime_asset_hash=current_runtime,
     )
+    try:
+        write_authority_sidecar(project, manifest)
+    except evidence.EvidenceError:
+        pass
+    return manifest
+
+
+def authority_summary(collector: str, summary: dict[str, Any]) -> dict[str, Any]:
+    defaults: dict[str, Any] = {
+        "preview": {"capability": "preview-verification", "provider": "provider-neutral"},
+        "native-ios": {
+            "capability_route": {
+                "id": "ios-verification",
+                "primary_provider": "xcodebuildmcp",
+                "simulator_browser": "availability-not-reported",
+            },
+        },
+        "native-macos": {
+            "capability_route": {
+                "id": "macos-implementation",
+                "required": [],
+                "build": {"provider": "macos-project-workflow"},
+                "build_macos_apps": "availability-not-reported",
+                "computer_use": "availability-not-reported",
+            },
+        },
+        "security": {
+            "trusted_provenance": False,
+            "preferred_provider_available": False,
+            "provenance_trust_boundary": "unavailable-for-file-imports",
+            "scanner": "security-reviewer",
+            "scanner_version": "test",
+            "source_schema": "star-forge.security-report.v1",
+            "schema_family": "unsupported",
+            "source_binding": {},
+        },
+        "github": {
+            "trusted_provenance": False,
+            "preferred_provider_available": False,
+            "provenance_trust_boundary": "unavailable-for-this-collector",
+            "source": "github-live",
+            "repo": "owner/repo",
+            "pr": "1",
+            "github_host": "github.com",
+            "captured_base_sha": "a" * 40,
+            "current_base_sha": "a" * 40,
+            "captured_head_sha": "b" * 40,
+            "current_head_sha": "b" * 40,
+            "foundation": {},
+        },
+    }.get(collector, {})
+    merged = dict(defaults)
+    merged.update(summary)
+    return merged
+
+
+def write_authority_sidecar(project: Path, manifest_path: Path) -> Path:
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    collector = str(manifest["collector"])
+    summary = manifest["summary"]
+    capability = {
+        "browser": "local-web-qa",
+        "preview": "preview-verification",
+        "native-ios": "native-ios-verification",
+        "native-macos": "native-macos-verification",
+        "security": "security-review",
+        "github": "github-lifecycle",
+    }[collector]
+    fallback_rule = ""
+    if collector == "browser":
+        provider = "playwright-collector"
+        provenance = {
+            "route": {
+                "preferred_provider": "in-app-browser",
+                "selected_provider": provider,
+                "fallback": True,
+                "reason": "Playwright collector was explicitly invoked for CI or headless local QA",
+            },
+            "browser_state_policy": {
+                "ambient_profile": False,
+                "authenticated_state": False,
+                "extension_dependent_state": False,
+                "chrome": "reserved-for-authenticated-or-extension-dependent-state",
+            },
+        }
+        fallback_rule = "capability-fallback"
+    elif collector == "preview":
+        provider = str(summary["provider"])
+        provenance = {
+            "collector_mode": "provider-neutral-read-only-http",
+            "deployment_provider": provider,
+        }
+    elif collector == "native-ios":
+        route = summary["capability_route"]
+        provider = "xcodebuildmcp"
+        provenance = {
+            "route": "ios-verification",
+            "provider": provider,
+            "tool_surface": "mcp",
+            "tool": "XcodeBuildMCP",
+            "providers": [
+                {"id": provider, "kind": "mcp", "status": "used"},
+                {
+                    "id": "ios-simulator-browser",
+                    "kind": "plugin",
+                    "status": route["simulator_browser"],
+                },
+            ],
+        }
+    elif collector == "native-macos":
+        route = summary["capability_route"]
+        capabilities = {key: value for key, value in route.items() if key != "id"}
+        provider = str(capabilities["build"]["provider"])
+        provenance = {
+            "route": "macos-implementation",
+            "provider": provider,
+            "capabilities": capabilities,
+            "providers": [
+                {
+                    "id": "build-macos-apps",
+                    "kind": "plugin",
+                    "status": "used" if provider == "build-macos-apps" else "not-selected",
+                },
+                {
+                    "id": "computer-use",
+                    "kind": "computer-use",
+                    "status": capabilities["computer_use"],
+                },
+                {
+                    "id": "macos-project-workflow",
+                    "kind": "shell",
+                    "status": "used" if provider == "macos-project-workflow" else "not-selected",
+                },
+            ],
+        }
+    elif collector == "security":
+        preferred = False
+        provider = "codex-security" if preferred else "security-reviewer"
+        provenance = {
+            "route": {
+                "preferred_provider": "codex-security",
+                "selected_provider": provider,
+                "fallback": not preferred,
+            },
+            "provider": provider,
+            "scanner": summary["scanner"],
+            "scanner_version": summary["scanner_version"],
+            "source_schema": summary["source_schema"],
+            "schema_family": summary["schema_family"] if preferred else "unsupported",
+            "source_binding": summary["source_binding"],
+            "normalization": "star-forge.normalized-security-findings.v1",
+        }
+        fallback_rule = "" if preferred else "security-capability-fallback"
+    else:
+        preferred = False
+        provider = "github-connector" if preferred else "github-unavailable"
+        repo = str(summary["repo"])
+        provenance = {
+            "route": {
+                "preferred_provider": "github-connector",
+                "selected_provider": provider,
+                "fallback": not preferred,
+                "create_fallback": "gh repo create --private",
+            },
+            "provider": provider,
+            "source": summary["source"],
+            "repository": {
+                "full_name": repo,
+                "owner": repo.partition("/")[0],
+                "name": repo.partition("/")[2],
+                "github_host": summary["github_host"],
+            },
+            "pull_request": {
+                "number": str(summary["pr"]),
+                "captured_base_sha": summary["captured_base_sha"],
+                "current_base_sha": summary["current_base_sha"],
+                "captured_head_sha": summary["captured_head_sha"],
+                "current_head_sha": summary["current_head_sha"],
+            },
+            "source_binding": {
+                "source_hash": manifest["source_hash_after"],
+                "runtime_asset_hash": manifest["runtime_asset_hash"],
+            },
+            "foundation": summary["foundation"],
+        }
+        fallback_rule = "" if preferred else "github-capability-fallback"
+    envelope = evidence.adapt_v1_manifest(
+        manifest,
+        capability=capability,
+        provider=provider,
+    )
+    envelope["provenance"].update(provenance)
+    if fallback_rule:
+        envelope["blockers"].append({"rule": fallback_rule, "blocking": False})
+        if envelope["verdict"] == "PASS":
+            envelope["verdict"] = "DEGRADED"
+    sidecar = manifest_path.parent / live_common.LIVE_EVIDENCE_FILENAME
+    evidence.write_envelope(sidecar, envelope, project_root=project, verify_artifacts=True)
+    return sidecar
 
 
 def valid_preview_http_payload(url: str = "http://93.184.216.34/", *, expected_status: int = 200) -> dict[str, Any]:
@@ -431,7 +631,7 @@ def test_common_manifest_fields_and_redaction() -> None:
 
 
 def test_every_strict_live_domain_requires_a_bound_v2_sidecar() -> None:
-    collectors = ("browser", "preview", "native-ios", "native-macos", "security")
+    collectors = ("browser", "preview", "native-ios", "native-macos", "security", "github")
     with tempfile.TemporaryDirectory() as tmp:
         project = Path(tmp).resolve()
         init_project(project)
@@ -493,6 +693,60 @@ def test_every_strict_live_domain_requires_a_bound_v2_sidecar() -> None:
                 collector=collector,
             )
             assert "evidence-envelope" in problem_rules({"problems": malformed})
+
+
+def test_strict_live_authority_rejects_identity_and_route_provenance_mutations() -> None:
+    collectors = ("browser", "preview", "native-ios", "native-macos", "security", "github")
+    for collector in collectors:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp).resolve()
+            init_project(project)
+            root = live_dir(project, collector)
+            artifact = write_text(root / "proof.txt", f"{collector}\n")
+            manifest = write_manifest(project, collector, {"proof": artifact})
+            sidecar = manifest.parent / live_common.LIVE_EVIDENCE_FILENAME
+            original = json.loads(sidecar.read_text(encoding="utf-8"))
+            mutations = {
+                "capability": lambda payload: payload.update(
+                    {"capability": "forged-capability"}
+                ),
+                "provider": lambda payload: payload.update(
+                    {"provider": "forged-provider"}
+                ),
+                "provenance": lambda payload: (
+                    payload["provenance"].update(
+                        {"collector_mode": "forged-route"}
+                    )
+                    if collector == "preview"
+                    else payload["provenance"].update(
+                        {"route": "forged-route"}
+                    )
+                ),
+            }
+            for label, mutate in mutations.items():
+                payload = json.loads(json.dumps(original))
+                mutate(payload)
+                sidecar.write_text(
+                    json.dumps(payload, indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
+                problems: list[dict[str, Any]] = []
+                loaded, _ = runtime_preview.load_and_validate_live_manifest(
+                    project,
+                    manifest,
+                    problems,
+                    task="SF-1",
+                    collector=collector,
+                )
+                assert loaded, (collector, label, problems)
+                assert "evidence-authority" in problem_rules(
+                    {"problems": problems}
+                ), (collector, label, problems)
+                binding = loaded["_evidence_binding"]
+                assert binding["sha256"] == hashlib.sha256(
+                    sidecar.read_bytes()
+                ).hexdigest()
+                assert binding["bytes"] == len(sidecar.read_bytes())
 
 
 def test_proof_run_strict_rejects_degraded_source_and_runtime_mismatch() -> None:

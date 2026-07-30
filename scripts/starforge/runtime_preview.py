@@ -305,6 +305,10 @@ def load_normalized_live_evidence(
     flag_live_problem(problems, not bound,
         "evidence envelope does not cover its exact legacy adapter input",
         rule="evidence-envelope-binding", path=live_rel(project, sidecar))
+    problems.extend(
+        live_problem(message, rule="evidence-authority", path=live_rel(project, sidecar))
+        for message in evidence_contract.live_authority_problems(envelope, manifest)
+    )
     manifest["_evidence_binding"] = {
         "path": live_rel(project, sidecar), "sha256": digest, "bytes": byte_count,
         "capability": envelope["capability"], "provider": envelope["provider"],

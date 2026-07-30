@@ -1,13 +1,10 @@
 #!/usr/bin/env python3
 """Local Playwright browser artifact supplier for Star Forge.
-
 This collector writes task-scoped browser evidence under
 `.starforge/live/<task-id>/browser/` and hands those files to the existing
 `browser-run --strict` proof surface. Scenario files are declarative JSON only.
 """
-
 from __future__ import annotations
-
 import argparse
 import importlib.metadata
 import json
@@ -18,23 +15,19 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
-
 SCRIPT_DIR = Path(__file__).resolve().parents[1]
 STAR_FORGE_SCRIPT = SCRIPT_DIR / "star_forge.py"
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
-
 from live_collectors import browser_safety, browser_scenario, common as live_common
 from live_collectors.policy_data import policy_bindings, policy_list
 from live_collectors.provider_engine import failed_checks, render_descriptor
 from starforge import evidence
-
 for _module, _names in (
     (browser_safety, policy_list("browser_playwright", "PUBLIC_SAFETY_BINDINGS")),
     (browser_scenario, policy_list("browser_playwright", "PUBLIC_SCENARIO_BINDINGS")),
 ):
     globals().update({name: getattr(_module, name) for name in _names})
-
 globals().update(policy_bindings(
     "browser_playwright", "ACTION_CALLS", "ARTIFACT_FILENAMES", "COLLECTOR_BASE_ARGV",
     "CONSTANTS", "EVIDENCE_BLOCKER", "EVIDENCE_PROVENANCE", "EXECUTION_SUMMARY_TEMPLATE",
@@ -43,13 +36,10 @@ globals().update(policy_bindings(
     "REQUEST_METADATA_TEMPLATE", "REQUEST_SAFETY_TEMPLATE",
 ))
 globals().update(CONSTANTS)
-
 descriptor = render_descriptor
 _UNSET = object()
-
 class BrowserDependencyError(Exception):
     """Raised when Playwright or a required browser is unavailable."""
-
 @dataclass(frozen=True)
 class ArtifactPaths:
     desktop: Path
@@ -57,7 +47,6 @@ class ArtifactPaths:
     interaction: Path
     console: Path
     trace: Path
-
 @dataclass(frozen=True)
 class BrowserExecutionContext:
     project: Path
@@ -70,7 +59,6 @@ class BrowserExecutionContext:
     viewports: tuple[ViewportSpec, ...]
     browser_name: str
     trace: bool
-
 @dataclass
 class BrowserExecutionResult:
     tool_versions: dict[str, Any] = field(default_factory=dict)
@@ -79,27 +67,18 @@ class BrowserExecutionResult:
     unavailable_capabilities: list[str] = field(default_factory=list)
     degraded: bool = False
     redaction_report: dict[str, int] = field(default_factory=dict)
-
 BrowserRunner = Callable[[BrowserExecutionContext], BrowserExecutionResult]
-
 problem = live_common.problem
-
 def is_blocking(item: Mapping[str, Any]) -> bool:
     return bool(item.get("blocking")) or str(item.get("severity", "")).lower() in BLOCKING_SEVERITIES
-
 merge_reports = live_common.merge_reports
-
 def write_json_artifact(path: Path, payload: Any) -> dict[str, int]:
     return live_common.write_json(path, payload)[1]
-
 read_json_file = live_common.read_json
-
 def resolve_project(raw: str) -> Path:
     return live_common.assert_collector_project_safe(Path(raw).expanduser())
-
 def maybe_call(value: Any) -> Any:
     return value() if callable(value) else value
-
 def load_playwright() -> tuple[Any, str]:
     try:
         from playwright import sync_api
@@ -110,7 +89,6 @@ def load_playwright() -> tuple[Any, str]:
     except importlib.metadata.PackageNotFoundError:
         version = "unknown"
     return sync_api, version
-
 def wait_for_url_contains(page: Any, text: str, timeout_ms: int) -> None:
     deadline = time.monotonic() + timeout_ms / 1000
     while time.monotonic() <= deadline:
@@ -118,7 +96,6 @@ def wait_for_url_contains(page: Any, text: str, timeout_ms: int) -> None:
             return
         page.wait_for_timeout(100)
     raise TimeoutError(f"URL did not contain {text!r} within {timeout_ms}ms")
-
 def wait_for_ready(page: Any, ready: Mapping[str, Any]) -> None:
     timeout_ms = int(ready.get("timeout_ms") or DEFAULT_TIMEOUT_MS)
     if "selector" in ready:
@@ -127,7 +104,6 @@ def wait_for_ready(page: Any, ready: Mapping[str, Any]) -> None:
         wait_for_url_contains(page, str(ready["url_contains"]), timeout_ms)
     else:
         page.wait_for_load_state(str(ready.get("load_state") or "domcontentloaded"), timeout=timeout_ms)
-
 def perform_action(page: Any, action: Mapping[str, Any]) -> dict[str, Any]:
     action_type = str(action.get("type"))
     timeout_ms = int(action.get("timeout_ms") or DEFAULT_TIMEOUT_MS)
@@ -148,7 +124,6 @@ def perform_action(page: Any, action: Mapping[str, Any]) -> dict[str, Any]:
     except Exception as exc:
         observation.update({"passed": False, "error": str(exc)})
     return observation
-
 def evaluate_assertion(page: Any, assertion: Mapping[str, Any], timeout_ms: int) -> dict[str, Any]:
     assertion_type = str(assertion.get("type"))
     observation: dict[str, Any] = {"type": assertion_type, "expected": dict(assertion), "passed": False}
@@ -178,7 +153,6 @@ def evaluate_assertion(page: Any, assertion: Mapping[str, Any], timeout_ms: int)
     except Exception as exc:
         observation["error"] = str(exc)
     return observation
-
 def request_metadata(request: Any) -> dict[str, Any]:
     return descriptor(
         REQUEST_METADATA_TEMPLATE,
@@ -187,7 +161,6 @@ def request_metadata(request: Any) -> dict[str, Any]:
         resource_type=str(maybe_call(getattr(request, "resource_type", "")) or ""),
         navigation=bool(maybe_call(getattr(request, "is_navigation_request", False))),
     )
-
 def inspect_network_event(
     event: dict[str, Any],
     observations: list[dict[str, Any]],
@@ -219,7 +192,6 @@ def inspect_network_event(
     )
     result.problems.append(problem(message, rule=rule))
     return False
-
 def _run_playwright_scenario(context: BrowserExecutionContext) -> BrowserExecutionResult:
     sync_api, playwright_version = load_playwright()
     result = BrowserExecutionResult(tool_versions={"playwright": playwright_version})
@@ -235,7 +207,6 @@ def _run_playwright_scenario(context: BrowserExecutionContext) -> BrowserExecuti
     trace_written = False
     websocket_route_installed = False
     webrtc_control: dict[str, Any] = {"mode": WEBRTC_CONTROL_MODE, "init_script": False}
-
     with sync_api.sync_playwright() as playwright:
         browser_type = getattr(playwright, context.browser_name, None)
         if browser_type is None:
@@ -264,7 +235,6 @@ def _run_playwright_scenario(context: BrowserExecutionContext) -> BrowserExecuti
                     result.problems.append(problem("browser context does not support WebRTC disable init scripts", rule="browser-webrtc-safety"))
                 if context.trace and not trace_written:
                     browser_context.tracing.start(screenshots=True, snapshots=True, sources=False)
-
                 def on_route(route: Any, viewport_name: str = viewport.name) -> None:
                     request = getattr(route, "request", None)
                     event = request_metadata(request)
@@ -278,10 +248,8 @@ def _run_playwright_scenario(context: BrowserExecutionContext) -> BrowserExecuti
                         route.continue_()
                         return
                     route.abort("blockedbyclient")
-
                 browser_context.route("**/*", on_route)
                 page = browser_context.new_page()
-
                 def close_websocket_route(route: Any) -> None:
                     close = getattr(route, "close", None)
                     if callable(close):
@@ -290,7 +258,6 @@ def _run_playwright_scenario(context: BrowserExecutionContext) -> BrowserExecuti
                     abort = getattr(route, "abort", None)
                     if callable(abort):
                         abort("blockedbyclient")
-
                 def on_websocket_route(route: Any, viewport_name: str = viewport.name) -> None:
                     event = {
                         "url": str(maybe_call(getattr(route, "url", "")) or ""),
@@ -314,7 +281,6 @@ def _run_playwright_scenario(context: BrowserExecutionContext) -> BrowserExecuti
                             rule="browser-websocket-safety",
                         ))
                     close_websocket_route(route)
-
                 route_web_socket = getattr(page, "route_web_socket", None) or getattr(browser_context, "route_web_socket", None)
                 if callable(route_web_socket):
                     try:
@@ -324,7 +290,6 @@ def _run_playwright_scenario(context: BrowserExecutionContext) -> BrowserExecuti
                         result.problems.append(problem(f"browser WebSocket routing is unavailable: {exc}", rule="browser-websocket-safety"))
                 else:
                     result.problems.append(problem("browser WebSocket routing is unavailable", rule="browser-websocket-safety"))
-
                 def on_console(message: Any, viewport_name: str = viewport.name) -> None:
                     event = {
                         "viewport": viewport_name,
@@ -339,7 +304,6 @@ def _run_playwright_scenario(context: BrowserExecutionContext) -> BrowserExecuti
                             if key in {"url", "lineNumber", "columnNumber"}
                         }
                     console_events.append(event)
-
                 page.on("console", on_console)
                 ready_record = {"viewport": viewport.name, "passed": True, "ready": context.scenario["ready"]}
                 try:
@@ -381,7 +345,6 @@ def _run_playwright_scenario(context: BrowserExecutionContext) -> BrowserExecuti
                 browser_context.close()
         finally:
             browser.close()
-
     redaction_reports.append(write_json_artifact(context.paths.console, {"schema": "star-forge.browser-console.v1", "events": console_events}))
     websocket_routing = WEBSOCKET_ROUTING_MODE if websocket_route_installed else "unavailable"
     blocked_requests = sum(1 for item in request_observations if item.get("allowed") is not True)
@@ -414,7 +377,6 @@ def _run_playwright_scenario(context: BrowserExecutionContext) -> BrowserExecuti
         connected_ips=connected_ips,
     ))
     return result
-
 def validate_console_artifact(path: Path, project: Path, payload: Any = _UNSET) -> list[dict[str, Any]]:
     rel = live_common.project_relative(project, path)
     try:
@@ -433,7 +395,6 @@ def validate_console_artifact(path: Path, project: Path, payload: Any = _UNSET) 
         if phase == "after_ready" and level in {"warning", "error"}:
             problems.append(problem(f"console {level} after readiness: {event.get('text', '')}", rule="console-after-ready", path=rel))
     return problems
-
 def validate_interaction_artifact(path: Path, project: Path, payload: Any = _UNSET) -> list[dict[str, Any]]:
     rel = live_common.project_relative(project, path)
     try:
@@ -458,7 +419,6 @@ def validate_interaction_artifact(path: Path, project: Path, payload: Any = _UNS
             elif item.get("passed") is not True:
                 problems.append(problem(failure_message, rule=rule, path=rel))
     return problems
-
 def validate_request_safety_artifact(path: Path, project: Path, *, allowed_local_origins: Sequence[str] = (), payload: Any = _UNSET) -> list[dict[str, Any]]:
     rel = live_common.project_relative(project, path)
     try:
@@ -468,13 +428,11 @@ def validate_request_safety_artifact(path: Path, project: Path, *, allowed_local
     if not isinstance(payload, Mapping):
         return [problem("interaction evidence must be a JSON object", rule="interaction-evidence", path=rel)]
     return validate_request_safety_payload(payload, allowed_local_origins=allowed_local_origins, path=rel)
-
 def validate_image_artifact(path: Path, project: Path) -> list[dict[str, Any]]:
     rel = live_common.project_relative(project, path)
     record = live_common.artifact_record(project, path, kind="screenshot")
     messages = failed_checks(record, IMAGE_ARTIFACT_CHECKS)
     return [problem(messages[0], rule="screenshot", path=rel)] if messages else []
-
 def validate_output_artifacts(context: BrowserExecutionContext) -> list[dict[str, Any]]:
     problems: list[dict[str, Any]] = []
     for viewport in context.viewports:
@@ -489,10 +447,8 @@ def validate_output_artifacts(context: BrowserExecutionContext) -> list[dict[str
     if context.trace and not context.paths.trace.exists():
         problems.append(problem("trace was requested but trace.zip was not written", rule="trace", path=live_common.project_relative(context.project, context.paths.trace)))
     return problems
-
 def build_artifact_paths(root: Path) -> ArtifactPaths:
     return ArtifactPaths(**{name: root / filename for name, filename in ARTIFACT_FILENAMES.items()})
-
 def build_handoff_argv(
     project: Path,
     task: str,
@@ -526,7 +482,6 @@ def build_handoff_argv(
         argv.append("--degraded")
     argv.append("--strict")
     return argv
-
 def record_browser_run(project: Path, handoff_argv: Sequence[str]) -> dict[str, Any]:
     payload = live_common.run_trusted_command(
         handoff_argv, cwd=project, script_path=STAR_FORGE_SCRIPT
@@ -539,7 +494,6 @@ def record_browser_run(project: Path, handoff_argv: Sequence[str]) -> dict[str, 
     except Exception:
         pass
     return payload
-
 def collector_argv_from_args(args: argparse.Namespace) -> list[str]:
     argv = descriptor(
         COLLECTOR_BASE_ARGV, project=str(args.project), task=str(args.task),
@@ -556,10 +510,8 @@ def collector_argv_from_args(args: argparse.Namespace) -> list[str]:
     if args.record:
         argv.append("--record")
     return argv
-
 def write_evidence_envelope(project: Path, manifest_path: Path) -> tuple[Path, dict[str, Any]]:
     """Adapt the compatibility manifest to source-bound v2 fallback evidence."""
-
     manifest = read_json_file(manifest_path)
     envelope = evidence.adapt_v1_manifest(
         manifest,
@@ -577,7 +529,6 @@ def write_evidence_envelope(project: Path, manifest_path: Path) -> tuple[Path, d
         project_root=project,
         verify_artifacts=True,
     )
-
 def collect(args: argparse.Namespace, *, runner: BrowserRunner | None = None) -> tuple[int, dict[str, Any]]:
     project = resolve_project(args.project)
     task = str(args.task)
@@ -595,7 +546,6 @@ def collect(args: argparse.Namespace, *, runner: BrowserRunner | None = None) ->
     lease_runtime_hash = live_common.compute_runtime_asset_hash(project, exclude_paths=[project / ".starforge" / "runtime" / "server.json"])
     parsed_url, url_problems = validate_url(args.url)
     problems.extend(url_problems)
-
     scenario: dict[str, Any] | None = None
     scenario_label = "scenario"
     try:
@@ -604,7 +554,6 @@ def collect(args: argparse.Namespace, *, runner: BrowserRunner | None = None) ->
         summary["scenario_path"] = live_common.project_relative(project, scenario_path)
     except Exception as exc:
         problems.append(problem(f"scenario validation failed: {exc}", rule="scenario-schema"))
-
     lease_path: Path | None = None
     lease_payload: dict[str, Any] | None = None
     allowed_local_origins: tuple[str, ...] = ()
@@ -634,7 +583,6 @@ def collect(args: argparse.Namespace, *, runner: BrowserRunner | None = None) ->
                     problems.append(dict(item))
             if not initial_safety.get("problems"):
                 problems.append(problem("browser URL is not allowed by the browser network control policy", rule="browser-url"))
-
     try:
         viewports = parse_viewports(args.viewport, paths)
     except ScenarioValidationError as exc:
@@ -643,7 +591,6 @@ def collect(args: argparse.Namespace, *, runner: BrowserRunner | None = None) ->
             ViewportSpec("mobile", 390, 844, paths.mobile),
         )
         problems.append(problem(f"viewport validation failed: {exc}", rule="viewport"))
-
     if args.trace:
         problems.append(problem(
             "Playwright traces can contain DOM content, network metadata, and typed text; review trace.zip before sharing.",
@@ -652,7 +599,6 @@ def collect(args: argparse.Namespace, *, runner: BrowserRunner | None = None) ->
             blocking=False,
             path=live_common.project_relative(project, paths.trace),
         ))
-
     if scenario is not None and not any(is_blocking(item) for item in problems):
         context = BrowserExecutionContext(
             project=project,
@@ -684,11 +630,9 @@ def collect(args: argparse.Namespace, *, runner: BrowserRunner | None = None) ->
         problems.extend(execution.problems)
         if not execution.degraded:
             problems.extend(validate_output_artifacts(context))
-
     source_after = live_common.compute_source_hash(project)
     if source_after != source_before:
         problems.append(problem("source changed during browser collection", rule="source-hash"))
-
     degraded = bool(unavailable)
     handoff_degraded = degraded or any(is_blocking(item) for item in problems)
     manifest_target = root / "manifest.json"
@@ -709,13 +653,11 @@ def collect(args: argparse.Namespace, *, runner: BrowserRunner | None = None) ->
     summary["blocking_problem_count"] = sum(1 for item in problems if is_blocking(item))
     if artifact_reports:
         summary["artifact_redaction_report"] = merge_reports(*artifact_reports)
-
     artifact_map = {
         name: getattr(paths, name) for name in ("desktop", "mobile", "interaction", "console")
     }
     if args.trace:
         artifact_map["trace"] = paths.trace
-
     manifest_path = live_common.write_live_manifest(
         project,
         task=task,
@@ -732,9 +674,7 @@ def collect(args: argparse.Namespace, *, runner: BrowserRunner | None = None) ->
         runtime_asset_hash=runtime_hash,
     )
     envelope_path, envelope = write_evidence_envelope(project, manifest_path)
-
     record_result = record_browser_run(project, handoff_argv) if args.record else None
-
     payload = descriptor(
         OUTPUT_TEMPLATE, task=task, manifest=live_common.project_relative(project, manifest_path),
         evidence=live_common.project_relative(project, envelope_path),
@@ -748,19 +688,16 @@ def collect(args: argparse.Namespace, *, runner: BrowserRunner | None = None) ->
         record_result is not None and int(record_result.get("returncode") or 0) != 0
     ) else 0
     return code, payload
-
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Collect local Playwright browser evidence for Star Forge browser-run")
     for flags, kwargs in PARSER_ARGUMENTS:
         parser.add_argument(*flags, **kwargs)
     return parser
-
 def main(argv: Sequence[str] | None = None, *, runner: BrowserRunner | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(list(argv) if argv is not None else None)
     code, payload = collect(args, runner=runner)
     print(json.dumps(payload, indent=2, sort_keys=True))
     return code
-
 if __name__ == "__main__":
     raise SystemExit(main())

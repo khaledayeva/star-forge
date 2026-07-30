@@ -445,8 +445,10 @@ def _packet_plan_tasks(impact: Mapping[str, Any], change_id: str,
 def _approval_identity_payload(project: Path, packet: Mapping[str, Any],
                                approved_at: str) -> dict[str, str] | None:
     impact = packet.get("impact")
-    if not isinstance(impact, Mapping) or "profile" not in impact:
+    if not isinstance(impact, Mapping):
         return None
+    if "profile" not in impact:
+        raise ChangePacketError("change packet approval requires derived impact and Plan identity")
     from .runtime_project import review_profile
     profile = review_profile(project)
     expected = derive_change_impact_for_project(
@@ -463,6 +465,14 @@ def _approval_identity_payload(project: Path, packet: Mapping[str, Any],
             "change packet approval contract no longer matches scope, impact, and Plan")
     return {"schema": CHANGE_APPROVAL_SCHEMA, "change_id": str(packet["change_id"]),
             "approved_at": approved_at, "identity_sha256": _packet_identity(project, packet)}
+def approval_identity_is_current(project: Path, packet: Mapping[str, Any]) -> bool:
+    if packet.get("approval_state") != "approved" or not packet.get("approval_identity_bound"):
+        return False
+    try:
+        _approval_identity_payload(project, packet, str(packet.get("approved_at") or ""))
+    except ChangePacketError:
+        return False
+    return True
 def plan_change_packet(
     project: Path,
     change_id: str,
@@ -490,8 +500,8 @@ def plan_change_packet(
 def activate_change_plan(project: Path, change_id: str) -> list[dict[str, Any]]:
     """Make an approved packet's dependency-free task rows ready."""
     packet = read_change_packet(project, change_id)
-    if packet["approval_state"] != "approved":
-        raise ChangePacketError("change packet must be approved before activation")
+    if not approval_identity_is_current(project, packet):
+        raise ChangePacketError("change packet requires a current immutable approval identity before activation")
     _reserved_project_task_ids(project)
     plan_path, original = _read_packet_plan(project, change_id)
     parsed = parse_plan_tasks_text(original)

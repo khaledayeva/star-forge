@@ -441,6 +441,7 @@ def record_browser_proof(project: Path) -> None:
         source_hash_after=current,
         runtime_asset_hash=star_forge.live_common.compute_runtime_asset_hash(project),
     )
+    browser_playwright.write_evidence_envelope(project, manifest)
     cli(
         project,
         "browser-run",

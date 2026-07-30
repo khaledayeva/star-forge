@@ -547,7 +547,7 @@ def completed_change_packet_covering_drift(
         project: Path, drift: Mapping[str, Any], proof: Mapping[str, Any] | None,
         *, require_current_proof: bool = False) -> str | None:
     packet = change_packet_for_drift(project, drift, proof)
-    if not packet or packet["approval_state"] != "approved" or not packet.get("approval_identity_bound"):
+    if not packet or not project_changes.approval_identity_is_current(project, packet):
         return None
     try:
         tasks = project_changes.change_plan_tasks(project, packet["change_id"])

@@ -20,7 +20,7 @@ if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
 import star_forge
-from starforge import changes, contracts, evidence, migration
+from starforge import changes, contracts, evidence, migration, runtime_review
 
 
 FIXTURES = ROOT / "fixtures" / "legacy-v03"
@@ -311,6 +311,15 @@ class LegacyChangeTransitionTests(unittest.TestCase):
             )
             self.assertEqual(packet["affected_acs"], ["AC-2"])
             self.assertEqual(approved["approval_state"], "approved")
+            self.assertFalse(approved["approval_identity_bound"])
+            with self.assertRaisesRegex(
+                    changes.ChangePacketError, "immutable approval identity"):
+                changes.activate_change_plan(project, "CHANGE-1")
+            self.assertIsNone(runtime_review.completed_change_packet_covering_drift(
+                project,
+                {"detected": True, "changed_files": ["src/app.py"]},
+                {"source_hash": COMPLETED_SOURCE_HASH},
+            ))
             self.assertEqual(
                 [item["change_id"] for item in history["entries"]],
                 ["AMEND-1", "AMEND-2", "CHANGE-1"],

@@ -1,13 +1,10 @@
 #!/usr/bin/env python3
 """Normalize trusted security scanner reports for Star Forge handoff.
-
 The adapter imports scanner output only. It never runs a scanner, approves work,
 or decides completion. Generated artifacts are handed to the existing
 security-handoff-packet and security-proof commands.
 """
-
 from __future__ import annotations
-
 import argparse
 import hashlib
 import json
@@ -17,13 +14,11 @@ import sys
 from collections import Counter
 from pathlib import Path
 from typing import Any, Mapping, Sequence
-
 SCRIPT_DIR = Path(__file__).resolve().parent
 SCRIPTS_DIR = SCRIPT_DIR.parent
 STAR_FORGE = SCRIPTS_DIR / "star_forge.py"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
-
 from live_collectors import common as live_common
 from live_collectors.policy_data import policy_dict, policy_list, policy_set, policy_tuple
 from live_collectors.provider_engine import (
@@ -33,8 +28,6 @@ from live_collectors.provider_engine import (
     render_descriptor,
 )
 from starforge import evidence
-
-
 globals().update(policy_dict("security_adapter", "CONSTANTS"))
 for _name in ("CODEX_SECURITY_SCHEMAS", "VALID_PROFILES", "PATH_KEYS", "SENSITIVE_TEXT_KEYS"):
     globals()[_name] = policy_set("security_adapter", _name)
@@ -49,36 +42,20 @@ EVIDENCE_KEYS = policy_tuple("security_adapter", "EVIDENCE_KEYS")
 REQUIRED_METADATA = policy_list("security_adapter", "REQUIRED_METADATA")
 SOURCE_BINDING_MESSAGES = policy_tuple("security_adapter", "SOURCE_BINDING_MESSAGES")
 PARSER_OPTIONS = policy_list("security_adapter", "PARSER_OPTIONS")
-
-
 write_json = lambda path, payload: live_common.write_json(path, payload, redact=False)[0]
-
-
 for _name in (
     "read_json", "file_sha256", "merge_reports", "git_head", "git_status_path",
     "source_dirty_entries", "source_snapshot_rel_paths",
     "dirty_paths_missing_from_source_snapshot", "source_tree_clean_at_head",
 ):
     globals()[_name] = getattr(live_common, _name)
-
-
 stable_hash = lambda payload: hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")).hexdigest()
-
-
 add_problem = lambda problems, message, *, rule, path="", severity="high": problems.append(live_common.blocking_problem(message, rule=rule, path=path, severity=severity))
-
-
 normalize_severity = lambda raw: normalize_alias(raw, SEVERITY_NORMALIZATION)
-
-
 normalize_confidence = lambda raw: normalize_alias(raw, CONFIDENCE_NORMALIZATION)[0]
-
-
 def sanitize_path_text(project: Path, raw: str) -> str:
     text = str(raw)
     return live_common.project_relative(project, Path(text)) if text.startswith("/") else text
-
-
 def redact_and_sanitize(value: Any, project: Path, report: dict[str, Any], key_hint: str = "") -> Any:
     key_norm = re.sub(r"[^a-z0-9_]+", "", key_hint.lower())
     if isinstance(value, Mapping):
@@ -89,15 +66,11 @@ def redact_and_sanitize(value: Any, project: Path, report: dict[str, Any], key_h
         return value
     text = sanitize_path_text(project, value) if key_norm in PATH_KEYS else value
     return text.replace(str(project.resolve()), ".") if key_norm in SENSITIVE_TEXT_KEYS else text
-
-
 def redact_payload(payload: Any, project: Path) -> tuple[Any, dict[str, Any]]:
     report = dict(REDACTION_COUNTS)
     cleaned = redact_and_sanitize(payload, project, report)
     cleaned, final = live_common.redact_sensitive_values(cleaned)
     return cleaned, merge_reports(report, final)
-
-
 def detect_schema(payload: Any) -> tuple[str, str, bool]:
     if not isinstance(payload, Mapping):
         return "", "unsupported", False
@@ -115,34 +88,18 @@ def detect_schema(payload: Any) -> tuple[str, str, bool]:
     return (schema or "codex-security.report.v1", "codex-security", True) if codex else (
         schema, "unsupported", False
     )
-
-
 extract_findings = lambda payload: (lambda raw: [item for item in raw if isinstance(item, dict)] if isinstance(raw, list) else [])(first_value(payload, ["findings", "results", "report.findings"]) if isinstance(payload, Mapping) else [])
-
-
 _metadata_value = lambda payload, args, field: getattr(args, field, "") or first_value(payload, CANDIDATES[field])
-
-
 scanner_name = lambda payload, args, schema_family: str(_metadata_value(payload, args, "scanner") or ("codex-security" if schema_family == "codex-security" else "")).strip()
-
-
 scanner_version = lambda payload, args: str(_metadata_value(payload, args, "scanner_version") or "").strip()
-
-
 def ruleset_metadata(payload: Any, args: argparse.Namespace) -> Any:
     override = {"name": args.ruleset, "version": args.ruleset_version}
     return {key: value for key, value in override.items() if value} or _metadata_value(
         payload, args, "ruleset")
-
-
 scan_scope = lambda payload, args: _metadata_value(payload, args, "scan_scope")
-
-
 source_binding = lambda payload, args: {
     field: value for field in ("source_hash", "commit_sha", "base_sha", "head_sha")
     if (value := getattr(args, field) or first_text(payload, CANDIDATES[field]))}
-
-
 def validate_source_binding(project: Path, binding: Mapping[str, Any], problems: list[dict[str, Any]]) -> bool:
     source_hash = str(binding.get("source_hash") or "")
     commit_sha = str(binding.get("commit_sha") or "")
@@ -168,11 +125,7 @@ def validate_source_binding(project: Path, binding: Mapping[str, Any], problems:
         for condition, message in zip(failed, SOURCE_BINDING_MESSAGES) if condition
     )
     return source_matches and not missing_dirty or bool(head and commit_sha == head and clean)
-
-
 declared_input_hash = lambda payload, args: (args.input_hash or first_text(payload, CANDIDATES["input_hash"])).strip().lower()
-
-
 def dependency_manifest_records(project: Path, payload: Any, args: argparse.Namespace, problems: list[dict[str, Any]]) -> list[dict[str, Any]]:
     raw_items: list[Any] = list(args.dependency_manifest or [])
     report_items = first_value(payload, CANDIDATES["dependency_manifests"])
@@ -192,14 +145,10 @@ def dependency_manifest_records(project: Path, payload: Any, args: argparse.Name
             seen.add(rel)
             records.append({"path": rel, "sha256": file_sha256(path), "bytes": path.stat().st_size})
     return records
-
-
 finding_path = lambda raw: str(first_value(value, ["path", "file"]) if isinstance(
     (value := first_value(raw, CANDIDATES["finding_path"])), Mapping) else value or "")
 finding_line = lambda raw: first_value(raw, CANDIDATES["finding_line"])
 dotted_get = lambda payload, dotted: nested_value(payload, *dotted.split("."))
-
-
 def build_evidence(raw: Mapping[str, Any]) -> dict[str, Any]:
     evidence = raw.get("evidence")
     out = dict(evidence) if isinstance(evidence, Mapping) else {"value": evidence} if evidence not in (None, "") else {}
@@ -211,8 +160,6 @@ def build_evidence(raw: Mapping[str, Any]) -> dict[str, Any]:
     if isinstance(location, Mapping):
         out.setdefault("location", dict(location))
     return out
-
-
 def normalized_finding(
     project: Path,
     raw: Mapping[str, Any],
@@ -260,8 +207,6 @@ def normalized_finding(
         if value not in (None, "")
     })
     return normalized
-
-
 def summarize_findings(findings: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     severities = [str(item.get("severity") or "unknown") for item in findings]
     return {
@@ -271,8 +216,6 @@ def summarize_findings(findings: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         "blocking_finding_count": sum(item in live_common.BLOCKING_SEVERITIES for item in severities),
         "unknown_severity_count": sum(item not in KNOWN_SEVERITIES for item in severities),
     }
-
-
 def validate_required_metadata(
     *, problems: list[dict[str, Any]], **values: Any,
 ) -> None:
@@ -283,8 +226,6 @@ def validate_required_metadata(
         if (values[item["field"]] in missing if item["field"] in {"ruleset", "scope"}
             else not values[item["field"]])
     )
-
-
 def build_command_argvs(project_arg: str, task: str, profile: str, kind: str, scanner: str, version: str, root: Path, project: Path) -> dict[str, list[str]]:
     values = {
         "project": project_arg, "task": task, "profile": profile, "kind": kind,
@@ -294,21 +235,13 @@ def build_command_argvs(project_arg: str, task: str, profile: str, kind: str, sc
         "manifest": live_common.project_relative(project, root / "manifest.json"),
     }
     return render_descriptor(COMMAND_TEMPLATES, values)
-
-
 display_command = lambda command: shlex.join(list(map(str, command)))
 build_commands = lambda *args: {name: display_command(command) for name, command in build_command_argvs(*args).items()}
 trusted_record_command = lambda command: live_common.trusted_python_command(command, script_path=STAR_FORGE)
 severity_rank = lambda severity: {"critical": 5, "high": 4, "medium": 3, "low": 2, "info": 1, "unknown": 6}.get(severity, 0)
-
-
 maybe_record = lambda commands, cwd: {name: live_common.run_trusted_command(
     command, cwd=cwd, script_path=STAR_FORGE) for name, command in commands.items()}
-
-
 security_provider = lambda schema_family: str(EVIDENCE_ROUTES["codex-security" if schema_family == "codex-security" else "fallback"]["provider"])
-
-
 def write_evidence_envelope(
     project: Path,
     manifest_path: Path,
@@ -320,7 +253,6 @@ def write_evidence_envelope(
     source_binding_value: Mapping[str, Any],
 ) -> tuple[Path, dict[str, Any]]:
     """Adapt the v1 manifest and record the selected security capability route."""
-
     route = dict(EVIDENCE_ROUTES[
         "codex-security" if schema_family == "codex-security" else "fallback"])
     provider = str(route.pop("provider"))
@@ -342,8 +274,6 @@ def write_evidence_envelope(
     envelope_path = manifest_path.parent / EVIDENCE_FILENAME
     return envelope_path, evidence.write_envelope(
         envelope_path, envelope, project_root=project, verify_artifacts=True)
-
-
 def adapt(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
     project = live_common.assert_collector_project_safe(Path(args.project))
     root = live_common.live_collector_dir(project, args.task, "security")
@@ -412,7 +342,6 @@ def adapt(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
         cleaned, report = redact_payload(value, project)
         redaction_totals = merge_reports(redaction_totals, report)
         return cleaned
-
     normalized_payload = clean(render_descriptor(PAYLOAD_TEMPLATES["normalized_findings"], values))
     findings_path = write_json(root / ARTIFACT_FILES["normalized_findings"], normalized_payload)
     input_hash_payload = render_descriptor(PAYLOAD_TEMPLATES["input_hash"], values)
@@ -440,7 +369,6 @@ def adapt(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
     }
     for index, record in enumerate(dependency_manifests):
         artifacts[f"dependency-manifest-{index + 1}"] = project / record["path"]
-
     values.update({
         "trusted_provenance": trusted_provenance,
         "summary_ruleset": ruleset if ruleset not in (None, "", {}, []) else "",
@@ -509,8 +437,6 @@ def adapt(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
     if record_results:
         result["record_results"] = record_results
     return (1 if record_failed or (args.strict and problems) else 0), result
-
-
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Normalize imported security scanner reports for Star Forge")
     for option in PARSER_OPTIONS:
@@ -518,8 +444,6 @@ def build_parser() -> argparse.ArgumentParser:
         kwargs.update(choices=sorted(VALID_PROFILES)) if kwargs.get("choices") == "profiles" else None
         parser.add_argument(option["name"], **kwargs)
     return parser
-
-
 def main(argv: Sequence[str] | None = None) -> int:
     raw_argv = list(argv) if argv is not None else sys.argv[1:]
     args = build_parser().parse_args(raw_argv)
@@ -527,7 +451,5 @@ def main(argv: Sequence[str] | None = None) -> int:
     code, result = adapt(args)
     print(json.dumps(result, indent=2, sort_keys=True))
     return code
-
-
 if __name__ == "__main__":
     raise SystemExit(main())
