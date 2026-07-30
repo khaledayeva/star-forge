@@ -196,7 +196,7 @@ def try_source_hash(project: Path) -> tuple[str | None, dict[str, Any] | None]:
         return None, problem
     try:
         return source_hash(project), None
-    except (PermissionError, OSError) as exc:
+    except (OSError, live_common.SourceSnapshotError) as exc:
         return None, source_hash_exception_problem(exc)
 def safe_release_snapshot(project: Path) -> tuple[dict[str, Any], dict[str, Any] | None]:
     problem = source_hash_unavailable_problem(project)
@@ -204,7 +204,7 @@ def safe_release_snapshot(project: Path) -> tuple[dict[str, Any], dict[str, Any]
         return release_snapshot_unavailable(project, [problem]), problem
     try:
         return release_snapshot(project), None
-    except (PermissionError, OSError) as exc:
+    except (OSError, live_common.SourceSnapshotError) as exc:
         problem = source_hash_exception_problem(exc)
         return release_snapshot_unavailable(project, [problem]), problem
 def read_source_profile_payload(project: Path) -> dict[str, Any]:

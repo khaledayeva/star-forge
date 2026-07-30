@@ -16,10 +16,11 @@ import stat
 import subprocess
 import urllib.parse
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Mapping, Sequence
 LIVE_ROOT = Path(".starforge") / "live"
 RUNTIME_DIR = Path(".starforge") / "runtime"
+LIVE_EVIDENCE_FILENAME = "evidence.v2.json"
 globals().update(policy_bindings(
     "common", "CONSTANTS", "REQUIRED_MANIFEST_FIELDS", "LIVE_MANIFEST_TEMPLATE", "MANIFEST_CHECKS",
     "FALLBACK_IGNORED_PARTS", "PATH_REDACTION_RULES",
@@ -29,7 +30,6 @@ globals().update(policy_bindings(
 globals().update(CONSTANTS)
 VCS_INTERNAL_PARTS = {".git", ".hg", ".svn"}
 STAR_FORGE_STATE_PARTS = {".starforge", "the-loop"}
-SOURCE_HASH_EXCLUDED_PARTS = VCS_INTERNAL_PARTS | STAR_FORGE_STATE_PARTS
 SECRET_RE = re.compile(REDACTION_PATTERNS["secret"], re.IGNORECASE)
 AUTH_CREDENTIAL_RE = re.compile(REDACTION_PATTERNS["auth"], re.IGNORECASE)
 JWT_LIKE_RE = re.compile(REDACTION_PATTERNS["jwt"])
@@ -46,6 +46,8 @@ class LiveProblem:
     blocking: bool = True
     def to_dict(self) -> dict[str, Any]:
         return problem(**vars(self))
+class SourceSnapshotError(ValueError):
+    """Source or Git state could not be represented safely."""
 def now_utc() -> str:
     return dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 def read_json(path: Path, default: Any = None) -> Any:
@@ -173,15 +175,16 @@ def run_git_path_records(args: Sequence[str], cwd: Path) -> tuple[int, list[str]
     if code != 0:
         return code, [], error
     if output and not output.endswith("\0"):
-        raise ValueError("Git path output is not NUL terminated")
+        raise SourceSnapshotError("Git path output is not NUL terminated")
     records = output[:-1].split("\0") if output else []
     if "" in records:
-        raise ValueError("Git path output contains an empty record")
+        raise SourceSnapshotError("Git path output contains an empty record")
     return code, records, error
 def is_git_repo(project: Path) -> bool:
     return run_git(["rev-parse", "--is-inside-work-tree"], project)[0] == 0
 def path_has_source_hash_excluded_part(rel_path: str | Path) -> bool:
-    return any(part in SOURCE_HASH_EXCLUDED_PARTS for part in Path(rel_path).parts)
+    parts = PurePosixPath(os.fspath(rel_path)).parts
+    return bool(parts) and (parts[0] in STAR_FORGE_STATE_PARTS or any(part in VCS_INTERNAL_PARTS for part in parts))
 def source_hash_dirty_entries(project: Path, entries: Sequence[str]) -> list[str]:
     return [path for path in entries if path and not path_has_source_hash_excluded_part(path)]
 def git_status_path(path: str) -> str:
@@ -196,10 +199,10 @@ def git_status(project: Path) -> list[str]:
         project,
     )
     if code != 0:
-        raise ValueError("Git status unavailable: " + error.strip())
+        raise SourceSnapshotError("Git status unavailable: " + error.strip())
     if any(len(record) < 4 or record[2] != " " or not record[3:]
            for record in records):
-        raise ValueError("Git status output contains a malformed record")
+        raise SourceSnapshotError("Git status output contains a malformed record")
     return [record[3:] for record in records]
 def source_dirty_entries(project: Path) -> list[str]:
     return source_hash_dirty_entries(project, git_status(project))
@@ -229,7 +232,7 @@ def _source_symlink_component(project: Path, path: Path) -> Path | None:
 def _validated_source_candidate(project: Path, path: Path) -> Path | None:
     symlink = _source_symlink_component(project, path)
     if symlink is not None:
-        raise ValueError(
+        raise SourceSnapshotError(
             f"source snapshot refuses symlink: {project_relative(project, symlink)}"
         )
     try:
@@ -244,26 +247,29 @@ def snapshot_file_candidates(project: Path) -> list[Path]:
             project,
         )
         if code != 0:
-            raise ValueError(
+            raise SourceSnapshotError(
                 "source snapshot cannot enumerate Git paths: "
                 f"{error.strip() or f'exit {code}'}")
         files = []
         for rel in paths:
             if not path_has_source_hash_excluded_part(rel):
-                candidate = _validated_source_candidate(project, project / rel)
-                if candidate is not None:
-                    files.append(candidate)
+                path = project / rel
+                _validated_source_candidate(project, path)
+                files.append(path)
     else:
         files = []
+        project_root = project.resolve()
         for root, dirs, names in os.walk(project):
             root_path = Path(root)
             kept_dirs = []
             for name in sorted(dirs):
                 candidate = root_path / name
-                if name in FALLBACK_IGNORED_PARTS:
+                if name in FALLBACK_IGNORED_PARTS and (
+                    name not in STAR_FORGE_STATE_PARTS or _lexical_absolute(root_path) == project_root
+                ):
                     continue
                 if candidate.is_symlink():
-                    raise ValueError(
+                    raise SourceSnapshotError(
                         f"source snapshot refuses symlink: {project_relative(project, candidate)}"
                     )
                 kept_dirs.append(name)
@@ -278,13 +284,45 @@ def files_fingerprint(project: Path, paths: Sequence[Path]) -> str:
     for path in paths:
         symlink = _source_symlink_component(project, path)
         if symlink is not None:
-            raise ValueError(
+            raise SourceSnapshotError(
                 f"source fingerprint refuses symlink: {project_relative(project, symlink)}"
             )
         rel = project_relative(project, path)
         candidate = _validated_source_candidate(project, path)
         content_hash = file_sha256(candidate, root=project) if candidate else ""
-        digest.update(os.fsencode(rel) + b"\0" + content_hash.encode("ascii") + b"\0")
+        executable = b"x" if candidate and candidate.lstat().st_mode & 0o111 else b"-"
+        kind = b"file" if candidate else b"missing-or-nonregular"
+        digest.update(os.fsencode(rel) + b"\0" + kind + b"\0" + executable + b"\0"
+                      + content_hash.encode("ascii") + b"\0")
+    return digest.hexdigest()
+def git_index_fingerprint(project: Path) -> str:
+    code, records, error = run_git_path_records(["ls-files", "--stage", "-z", "--cached"], project)
+    if code != 0:
+        raise SourceSnapshotError(
+            "source snapshot cannot inspect Git index: " + (error.strip() or f"exit {code}"))
+    digest = hashlib.sha256()
+    for record in records:
+        header, separator, rel = record.partition("\t")
+        fields = header.split()
+        if not separator or len(fields) != 3 or fields[2] != "0":
+            raise SourceSnapshotError("Git index contains a malformed or unmerged record")
+        mode, object_id, _stage = fields
+        if not re.fullmatch(r"[0-7]{6}", mode) or not re.fullmatch(r"[0-9a-f]{40}(?:[0-9a-f]{24})?", object_id):
+            raise SourceSnapshotError("Git index contains invalid mode or object identity")
+        if path_has_source_hash_excluded_part(rel) or mode != "160000":
+            continue
+        worktree_hash = ""
+        link_root = project / rel
+        symlink = _source_symlink_component(project, link_root)
+        if symlink is not None:
+            raise SourceSnapshotError(
+                f"source snapshot refuses symlink: {project_relative(project, symlink)}")
+        if link_root.is_dir():
+            code, top, _ = run_git(["rev-parse", "--show-toplevel"], link_root)
+            if code == 0 and Path(top.strip()).resolve() == link_root.resolve():
+                worktree_hash = compute_source_hash(link_root)
+        digest.update(os.fsencode(rel) + b"\0" + mode.encode("ascii") + b"\0"
+                      + object_id.encode("ascii") + b"\0" + worktree_hash.encode("ascii") + b"\0")
     return digest.hexdigest()
 def tree_sha256(path: Path | None) -> str:
     return "" if path is None or not path.is_dir() else files_fingerprint(path, sorted(
@@ -326,7 +364,11 @@ def hash_artifacts(project: Path, artifacts: Mapping[str, str | Path] | Sequence
         if record.get("exists") and record.get("sha256")
     }
 def compute_source_hash(project: Path) -> str:
-    return files_fingerprint(project, snapshot_file_candidates(project))
+    content = files_fingerprint(project, snapshot_file_candidates(project))
+    if not is_git_repo(project):
+        return content
+    index = git_index_fingerprint(project)
+    return hashlib.sha256(f"star-forge.git-source.v2\0{index}\0{content}".encode()).hexdigest()
 def compute_runtime_asset_hash(project: Path, *, exclude_paths: Sequence[str | Path] | None = None) -> str:
     excluded: set[Path] = set()
     for raw in exclude_paths or []:
@@ -381,10 +423,12 @@ def artifact_record(project: Path, path: str | Path, *, kind: str = "artifact", 
 def blocking_problem(message: str, *, rule: str = "live-artifact", path: str = "", severity: str = "high") -> dict[str, Any]:
     return problem(message, rule=rule, path=path, severity=severity)
 def sensitive_key_name(raw: str) -> bool:
-    key_norm = re.sub(r"[^a-z0-9]+", "", str(raw or "").lower())
+    separated = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", str(raw or ""))
+    normalized = re.sub(r"[^a-z0-9]+", "_", separated.lower()).strip("_")
+    parts, key_norm = set(normalized.split("_")), normalized.replace("_", "")
     return key_norm in NORMALIZED_SENSITIVE_KEYS or any(
         marker in key_norm for marker in SENSITIVE_KEY_MARKERS
-    )
+    ) or bool(parts & {"auth", "key"})
 def _redact_params(raw: str) -> tuple[str, int]:
     pairs = urllib.parse.parse_qsl(raw, keep_blank_values=True)
     sensitive = {key for key, _value in pairs if sensitive_key_name(key)}
@@ -501,7 +545,7 @@ def write_live_manifest(
     try:
         envelope = evidence.adapt_v1_manifest(redacted)
         evidence.write_envelope(
-            path.parent / "evidence.json",
+            path.parent / LIVE_EVIDENCE_FILENAME,
             envelope,
             project_root=project,
             verify_artifacts=True,

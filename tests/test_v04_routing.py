@@ -78,7 +78,8 @@ def test_project_flags_proofs_and_delivery_derive_needs_in_catalog_order() -> No
             "ignored_false_flag": False,
         },
         proof_kinds=["browser", "security", "github"],
-        delivery_target="vercel",
+        delivery_target="preview",
+        delivery_provider="vercel",
     )
     assert routing.required_needs(catalog, request) == (
         "ui-pattern-discovery",
@@ -97,7 +98,8 @@ def test_dedicated_capabilities_win_and_aliases_are_discovery_data() -> None:
         project_class="nextjs",
         blueprint_flags=["ui", "payments"],
         proof_kinds=["browser"],
-        delivery_target="vercel",
+        delivery_target="preview",
+        delivery_provider="vercel",
         available_capabilities=[
             "mobbin",
             "build web apps",
@@ -117,6 +119,31 @@ def test_dedicated_capabilities_win_and_aliases_are_discovery_data() -> None:
     assert decisions["vercel-delivery"].selected["id"] == "vercel"
     assert not result.blocked
     assert not result.degraded
+
+
+def test_web_delivery_routes_follow_the_contract_provider_not_target_aliases() -> None:
+    cases = (
+        ("preview", "sites", "sites-delivery", "sites"),
+        ("preview", "vercel", "vercel-delivery", "vercel"),
+        ("production", "sites", "sites-delivery", "sites"),
+        ("production", "vercel", "vercel-delivery", "vercel"),
+    )
+    for target, provider, need, selected in cases:
+        result = routing.resolve_routes(
+            delivery_target=target,
+            delivery_provider=provider,
+            available_capabilities=[provider],
+        )
+        decisions = decisions_by_need(result)
+        assert tuple(decisions) == (need,)
+        assert decisions[need].selected["id"] == selected
+        assert decisions[need].required_by == (f"delivery_provider:{provider}",)
+
+    legacy = routing.resolve_routes(
+        delivery_target="sites",
+        available_capabilities=["sites"],
+    )
+    assert decisions_by_need(legacy)["sites-delivery"].selected["id"] == "sites"
 
 
 def test_missing_preferred_capability_reports_selected_fallback() -> None:
@@ -267,6 +294,22 @@ def test_unavailable_required_capability_is_an_explicit_blocker() -> None:
 
 
 def test_optional_install_suggestions_require_material_dependency_and_user_action() -> None:
+    preferred = routing.resolve_route(
+        "ui-pattern-discovery",
+        available_capabilities=["mobbin"],
+        material=True,
+    )
+    assert preferred.status == "available"
+    assert preferred.install_suggestion is None
+
+    fallback = routing.resolve_route(
+        "ui-pattern-discovery",
+        available_capabilities=["imagegen"],
+        material=True,
+    )
+    assert fallback.status == "degraded"
+    assert fallback.install_suggestion is None
+
     ordinary = routing.resolve_route(
         "existing-design-implementation",
         available_capabilities=[],

@@ -597,6 +597,50 @@ def test_source_hash_includes_clean_build_and_dependency_config_changes() -> Non
             assert star_forge.live_common.compute_source_hash(project) == hash_v2
 
 
+def test_source_hash_binds_executable_mode_in_dirty_and_clean_states() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        init_project(project)
+        tool = project / "tool.sh"
+        tool.write_text("#!/bin/sh\nprintf safe\n", encoding="utf-8")
+        tool.chmod(0o644)
+        commit_all(project, "regular tool")
+        regular_hash = star_forge.source_hash(project)
+        tool.chmod(0o755)
+        executable_dirty_hash = star_forge.source_hash(project)
+        assert executable_dirty_hash != regular_hash
+        commit_all(project, "executable tool")
+        assert star_forge.source_hash(project) != regular_hash
+
+
+def test_source_hash_binds_gitlink_object_identity() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        init_project(project)
+        source = project / "app.py"
+        source.write_text("print('one')\n", encoding="utf-8")
+        commit_all(project, "dependency commit one")
+        first_commit = star_forge.git_head(project)
+        source.write_text("print('two')\n", encoding="utf-8")
+        commit_all(project, "dependency commit two")
+        second_commit = star_forge.git_head(project)
+        first_hash = ""
+        for commit in (first_commit, second_commit):
+            code, _, error = star_forge.run_git(
+                ["update-index", "--add", "--cacheinfo",
+                 f"160000,{commit},vendor/dependency"], project)
+            assert code == 0, error
+            code, _, error = star_forge.run_git(
+                ["-c", "user.name=Star Forge Test",
+                 "-c", "user.email=starforge@example.com",
+                 "commit", "-m", f"gitlink {commit[:8]}"], project)
+            assert code == 0, error
+            current = star_forge.source_hash(project)
+            if commit == first_commit:
+                first_hash = current
+        assert current != first_hash
+
+
 def test_source_hash_includes_tracked_files_under_ignored_generated_dirs() -> None:
     cases = [
         ("build/tracked.js", "console.log('build v1')\n", "console.log('build v2')\n"),
@@ -724,6 +768,59 @@ def test_git_path_enumeration_failures_do_not_produce_partial_evidence() -> None
                 assert "Git status unavailable" in str(exc)
             else:
                 raise AssertionError("unavailable Git status was accepted")
+
+
+def test_nested_state_named_sources_invalidate_review_and_completion_proof() -> None:
+    nested_sources = (
+        "src/.starforge/app.py",
+        "packages/the-loop/index.ts",
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        init_project(project)
+        write_blueprint(project)
+        write_plan(project, [
+            f"| SF-1 | Build nested sources | ready | solo | src/, packages/ | - | {REAL_VERIFY} | - |",
+        ])
+        for name in nested_sources:
+            path = project / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("version one\n", encoding="utf-8")
+
+        record_verify(project, "SF-1")
+        code, payload = complete_task(
+            project, "SF-1", changed=nested_sources[0],
+        )
+        assert code == 0, payload
+        record_verify(project, "SF-1")
+        write_clean_review_wave(project)
+        code, out, err = run_cli([
+            "review", "--project", str(project), "--strict",
+        ])
+        assert code == 0, err or out
+        commit_all(project, "track nested state named sources")
+        code, proof = run_done(project)
+        assert code == 0, proof
+        original_hash = proof["snapshot"]["source_hash"]
+        assert {
+            live_common.project_relative(project, path)
+            for path in live_common.snapshot_file_candidates(project)
+        }.issuperset(nested_sources)
+
+        for name in nested_sources:
+            (project / name).write_text("version two\n", encoding="utf-8")
+
+        dirty = set(star_forge.source_dirty_entries(
+            star_forge.git_status(project),
+        ))
+        assert dirty.issuperset(nested_sources)
+        assert star_forge.source_hash(project) != original_hash
+        tasks = star_forge.parse_tasks(project / "Plan.md")
+        assert [
+            item["rule"]
+            for item in star_forge.review_findings_for_done(project, tasks)
+        ] == ["review-stale"]
+        assert runtime_review.proof_is_current(project, proof) is False
 
 
 # --------------------------------------------------------------- 4. verify
@@ -876,6 +973,46 @@ def test_verify_source_hash_unavailable_profile_fails_closed() -> None:
             assert "not readable" in payload["problems"][0]["message"]
         finally:
             profile_path.chmod(0o644)
+
+
+def test_verify_normalizes_snapshot_refusals_without_a_traceback() -> None:
+    def assert_blocked(project: Path) -> None:
+        code, out, err = run_cli([
+            "verify", "--project", str(project), "--task", "SF-1",
+            "--command", REAL_VERIFY, "--strict",
+        ])
+        assert code == 1, err or out
+        payload = json.loads(out)
+        assert payload["verdict"] == "FAIL"
+        assert payload["returncode"] == 0
+        assert payload["source_snapshot"]["source_hash_unavailable"] is True
+        assert payload["problems"][0]["rule"] == "source-hash-unavailable"
+        assert "Traceback" not in err
+
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        init_project(project)
+        target = project / "target.py"
+        target.write_text("value = 1\n", encoding="utf-8")
+        (project / "linked.py").symlink_to(target.name)
+        assert_blocked(project)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        init_project(project)
+        original_run_git = live_common.run_git
+
+        def malformed_git_paths(
+            args: list[str], cwd: Path,
+        ) -> tuple[int, str, str]:
+            if args[:2] == ["ls-files", "-z"]:
+                return 0, "path-without-nul", ""
+            return original_run_git(args, cwd)
+
+        with mock.patch.object(
+            live_common, "run_git", side_effect=malformed_git_paths,
+        ):
+            assert_blocked(project)
 
 
 def test_verify_noop_refused_for_non_docs_task() -> None:
@@ -1064,7 +1201,66 @@ def test_complete_task_updates_plan_row_status_and_evidence() -> None:
         )
         task = star_forge.parse_tasks(project / "Plan.md")[0]
         assert task["status"] == "complete"
-        assert task["evidence"] == "src/hello.py"
+        assert json.loads(task["evidence"]) == ["src/hello.py"]
+
+
+def test_complete_task_preserves_exact_evidence_and_every_plan_row() -> None:
+    changed_files = (
+        "src/line\nbreak.py",
+        "src/carriage\rreturn.py",
+        os.fsdecode(b"src/nonutf8-\xff.py"),
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        init_project(project)
+        write_blueprint(project)
+        write_plan(project, [
+            f"| SF-1 | Build special paths | ready | solo | src/ | - | {REAL_VERIFY} | - |",
+            f"| SF-2 | Keep the dependent row | ready | solo | tests/ | SF-1 | {REAL_VERIFY} | - |",
+        ])
+        for name in changed_files:
+            if name == os.fsdecode(b"src/nonutf8-\xff.py"):
+                continue
+            path = project / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("exact path evidence\n", encoding="utf-8")
+        dependent = project / "tests" / "dependent.py"
+        dependent.parent.mkdir(parents=True, exist_ok=True)
+        dependent.write_text("print('dependent')\n", encoding="utf-8")
+
+        record_verify(project, "SF-1")
+        args = [
+            "complete-task", "--project", str(project), "--task", "SF-1",
+        ]
+        for name in changed_files:
+            args.extend(["--changed-file", name])
+        code, out, err = run_cli(args)
+        assert code == 0, err or out
+
+        tasks = star_forge.parse_tasks(project / "Plan.md")
+        assert [task["id"] for task in tasks] == ["SF-1", "SF-2"]
+        assert json.loads(tasks[0]["evidence"]) == list(changed_files)
+        assert tasks[1]["status"] == "ready"
+        plan_bytes = (project / "Plan.md").read_bytes()
+        assert b"\r" not in plan_bytes
+        assert b"\xff" not in plan_bytes
+
+        record_verify(project, "SF-2")
+        code, payload = complete_task(
+            project, "SF-2", changed="tests/dependent.py",
+        )
+        assert code == 0, payload
+        record_verify(project, "SF-1")
+        record_verify(project, "SF-2")
+        write_clean_review_wave(project)
+        code, out, err = run_cli([
+            "review", "--project", str(project), "--strict",
+        ])
+        assert code == 0, err or out
+        commit_all(project, "complete exact path evidence")
+        code, proof = run_done(project)
+        assert code == 0, proof
+        assert proof["snapshot"]["source_hash"] == star_forge.source_hash(project)
 
 
 def test_complete_task_visual_requires_passing_browser_run() -> None:
@@ -3187,6 +3383,7 @@ def test_active_change_task_preserves_special_paths_through_fresh_proof() -> Non
         "src/ leading.py",
         "src/trailing.py ",
         "src/line\nbreak.py",
+        "src/carriage\rreturn.py",
         "src/tab\tname.py",
         "src/comma,name.py",
         "src/semi;name.py",
@@ -3195,10 +3392,15 @@ def test_active_change_task_preserves_special_paths_through_fresh_proof() -> Non
         "src/literal?.py",
         "src/literal[ab].py",
         "src/literal].py",
+        "C:\\absolute",
+        "\\\\server\\share",
     )
     with tempfile.TemporaryDirectory() as tmp:
         project = Path(tmp).resolve()
-        build_completed_project(project, owned_files="src/")
+        owned_files = json.dumps([
+            "src/", "C:\\absolute", "\\\\server\\share",
+        ])
+        build_completed_project(project, owned_files=owned_files)
         code, initial_done = run_done(project)
         assert code == 0, initial_done
         initial_proof = star_forge.read_json(project / star_forge.PROOF_FILE)
@@ -3242,7 +3444,7 @@ def test_active_change_task_preserves_special_paths_through_fresh_proof() -> Non
             project, change_id,
         )[0]
         assert completed["status"] == "complete"
-        assert completed["evidence"] != "-"
+        assert json.loads(completed["evidence"]) == expected
         assert star_forge.task_files(completed) == expected
 
         record_verify(project, task["id"])

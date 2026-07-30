@@ -290,7 +290,7 @@ def load_normalized_live_evidence(
     manifest: Mapping[str, Any],
     problems: list[dict[str, Any]],
 ) -> dict[str, Any] | None:
-    sidecar = manifest_path.parent / "evidence.json"
+    sidecar = manifest_path.parent / live_common.LIVE_EVIDENCE_FILENAME
     try:
         envelope = evidence_contract.read_envelope(
             sidecar,

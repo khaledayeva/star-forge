@@ -46,11 +46,6 @@ _COMMIT_RE = re.compile(r"^[0-9a-f]{40}(?:[0-9a-f]{24})?$")
 _OWNER_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$")
 _REPOSITORY_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 _BRANCH_RE = re.compile(r"^(?!/)(?!.*(?:\.\.|//|@\{|\\|\s))(?!.*[/.]$).+$")
-_SENSITIVE_FIELD_RE = re.compile(
-    r"(?:^|_)(?:access_token|api_key|authorization|client_secret|credential|"
-    r"password|private_key|refresh_token|token)(?:$|_)",
-    re.IGNORECASE,
-)
 _SECRET_VALUE_PATTERNS = (
     re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
     re.compile(r"\bgh[opsu]_[A-Za-z0-9_]{20,}\b"),
@@ -254,8 +249,7 @@ def _secret_problems(value: object, path: str = "evidence") -> list[str]:
         for key, nested in value.items():
             key_text = str(key)
             nested_path = f"{path}.{key_text}"
-            normalized_key = re.sub(r"[^a-z0-9]+", "_", key_text.lower()).strip("_")
-            if _SENSITIVE_FIELD_RE.search(normalized_key):
+            if key_text.casefold() not in {"secret_scan", "contains_secret_values"} and evidence_contract.sensitive_key_name(key_text):
                 problems.append(f"{nested_path} must not contain secret material")
             problems.extend(_secret_problems(nested, nested_path))
     elif isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):

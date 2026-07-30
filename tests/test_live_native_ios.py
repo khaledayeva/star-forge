@@ -122,7 +122,7 @@ def manifest_payload(project: Path) -> dict[str, Any]:
 
 def envelope_payload(project: Path) -> dict[str, Any]:
     return evidence.read_envelope(
-        live_dir(project) / "evidence.json",
+        live_dir(project) / live_common.LIVE_EVIDENCE_FILENAME,
         project_root=project,
         verify_artifacts=True,
     )
@@ -521,7 +521,7 @@ def test_happy_path_prints_native_ios_proof_command_and_passes() -> None:
         assert manifest["summary"]["artifact_semantics"]["ui_proof"] == ["ui_snapshot", "screenshot"]
         assert manifest["source_hash_after"] == star_forge.source_hash(project)
         assert "runtime_asset_hash" in manifest
-        assert output["evidence"].endswith("/evidence.json")
+        assert output["evidence"].endswith("/evidence.v2.json")
         envelope = envelope_payload(project)
         assert envelope["schema"] == evidence.EVIDENCE_SCHEMA
         assert envelope["capability"] == native_ios.CAPABILITY

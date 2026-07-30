@@ -161,7 +161,7 @@ def envelope_payload(project: Path) -> dict[str, Any]:
         "SF-1",
         "native-macos",
         create=False,
-    ) / "evidence.json"
+    ) / live_common.LIVE_EVIDENCE_FILENAME
     return evidence.read_envelope(
         path,
         project_root=project,
@@ -387,7 +387,7 @@ def test_happy_path_prints_native_macos_proof_command_and_passes() -> None:
         assert manifest["summary"]["signing_note"] == "not_checked"
         assert manifest["summary"]["packaging_note"] == "not_checked"
         assert len(manifest["summary"]["app_bundle_hash"]) == 64
-        assert output["evidence"].endswith("/evidence.json")
+        assert output["evidence"].endswith("/evidence.v2.json")
         envelope = envelope_payload(project)
         assert envelope["schema"] == evidence.EVIDENCE_SCHEMA
         assert envelope["capability"] == native_macos.CAPABILITY

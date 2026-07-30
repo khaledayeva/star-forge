@@ -343,7 +343,7 @@ def cmd_complete_task(args: argparse.Namespace) -> int:
     if blocking_items(findings):
         print(json.dumps(policy_record("complete_task_refused", task=args.task, verdict="REFUSED", findings=findings, updated=False), indent=2))
         return 1
-    evidence = ", ".join(args.changed_file or [])
+    evidence = json.dumps(args.changed_file or [], ensure_ascii=True, separators=(",", ":"))
     summary = args.summary or f"Task {args.task} completed with verified evidence."
     update_plan_task_row(plan_path, args.task, {"Status": "complete", "Evidence": evidence or summary})
     completion_artifact = project / STATE_SUBDIR / f"complete-task-{slugify(args.task)}.json"

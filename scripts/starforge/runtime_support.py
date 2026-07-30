@@ -276,7 +276,7 @@ def release_snapshot(project: Path) -> dict[str, Any]:
         "release_snapshot",
         created_at=live_common.now_utc(),
         git_head=git_head(project),
-        source_hash=live_common.files_fingerprint(project, source_files),
+        source_hash=live_common.compute_source_hash(project),
         source_files=[relative_to_project(path, project) for path in source_files],
         **_release_hashes(project),
     )

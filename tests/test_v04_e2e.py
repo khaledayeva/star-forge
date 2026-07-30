@@ -561,6 +561,7 @@ def exercise_project(project: Path, scenario: dict[str, Any]) -> dict[str, Any]:
             str(scenario["delivery_target"]),
             str(scenario["platform_target"]),
         ],
+        delivery_provider=scenario.get("delivery_provider"),
         available_capabilities=scenario["available_capabilities"],
     )
     selected = {

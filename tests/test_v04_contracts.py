@@ -12,6 +12,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -298,6 +299,64 @@ class BlueprintLockTests(unittest.TestCase):
                 contracts.write_blueprint_lock(project)
             self.assertFalse((project / "Blueprint.lock.json").exists())
 
+    def test_blueprint_state_uses_one_descriptor_snapshot_per_input(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp)
+            blueprint = project / "Blueprint.md"
+            blueprint.write_text(BLUEPRINT, encoding="utf-8")
+            locked = contracts.write_blueprint_lock(project)
+            original_read = contracts.safe_io.read_snapshot
+            calls: list[str] = []
+
+            def read_then_swap(root: Path, path: Path, **kwargs):
+                result = original_read(root, path, **kwargs)
+                calls.append(Path(path).name)
+                if Path(path).name == "Blueprint.md":
+                    blueprint.write_text(BLUEPRINT + "\nchanged\n", encoding="utf-8")
+                return result
+
+            with mock.patch.object(
+                contracts.safe_io, "read_snapshot", side_effect=read_then_swap,
+            ):
+                state = contracts.blueprint_lock_state(project)
+            self.assertEqual(state["status"], "locked")
+            self.assertEqual(state["current_sha256"], locked["blueprint_sha256"])
+            self.assertEqual(calls.count("Blueprint.md"), 1)
+            self.assertEqual(calls.count("Blueprint.lock.json"), 1)
+
+    def test_blueprint_swap_to_symlink_and_symlinked_lock_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project = root / "project"
+            project.mkdir()
+            blueprint = project / "Blueprint.md"
+            blueprint.write_text(BLUEPRINT, encoding="utf-8")
+            outside = root / "outside.md"
+            outside.write_text("outside secret", encoding="utf-8")
+            original_read = contracts.safe_io.read_snapshot
+
+            def swap_before_open(boundary: Path, path: Path, **kwargs):
+                if Path(path).name == "Blueprint.md":
+                    blueprint.unlink()
+                    blueprint.symlink_to(outside)
+                return original_read(boundary, path, **kwargs)
+
+            with mock.patch.object(
+                contracts.safe_io, "read_snapshot", side_effect=swap_before_open,
+            ):
+                state = contracts.blueprint_lock_state(project)
+            self.assertEqual(state["status"], "missing")
+            self.assertIsNone(state["current_sha256"])
+
+            blueprint.unlink()
+            blueprint.write_text(BLUEPRINT, encoding="utf-8")
+            outside_lock = root / "outside-lock.json"
+            outside_lock.write_text("preserve me\n", encoding="utf-8")
+            (project / "Blueprint.lock.json").symlink_to(outside_lock)
+            with self.assertRaises(contracts.ContractError):
+                contracts.write_blueprint_lock(project)
+            self.assertEqual(outside_lock.read_text(encoding="utf-8"), "preserve me\n")
+
     def test_lock_validation_rejects_ambiguous_or_unversioned_payloads(self) -> None:
         valid = {
             "schema": contracts.BLUEPRINT_LOCK_SCHEMA,
@@ -362,6 +421,14 @@ class PlanV2ContractTests(unittest.TestCase):
             contracts.split_plan_row(r"| SF-2 | C:\tmp\plan.py |"),
             ["SF-2", r"C:\tmp\plan.py"],
         )
+
+    def test_plan_cell_serializer_rejects_physical_line_breaks(self) -> None:
+        for value in ("line\nbreak", "carriage\rreturn"):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(
+                    contracts.ContractError, "physical line breaks",
+                ):
+                    contracts.encode_plan_cell(value)
 
     def test_migration_creates_reviewable_v2_draft_and_preserves_source(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

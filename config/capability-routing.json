@@ -597,7 +597,8 @@
       "id": "sites-delivery",
       "purpose": "Simple or internal hosting",
       "selectors": {
-        "delivery_targets": ["sites"]
+        "delivery_targets": ["sites"],
+        "delivery_providers": ["sites"]
       },
       "options": [
         {
@@ -618,7 +619,8 @@
       "id": "vercel-delivery",
       "purpose": "Production web hosting",
       "selectors": {
-        "delivery_targets": ["vercel"]
+        "delivery_targets": ["vercel"],
+        "delivery_providers": ["vercel"]
       },
       "options": [
         {

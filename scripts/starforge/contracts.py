@@ -1,8 +1,6 @@
 """Versioned project contracts used by the Star Forge lifecycle."""
-
 from __future__ import annotations
 from .policy_data import value as _policy_value
-
 import datetime as dt
 import hashlib
 import json
@@ -12,6 +10,7 @@ import stat
 import tempfile
 from pathlib import Path
 from typing import Any, Mapping, Sequence
+from . import safe_io
 BLUEPRINT_FILE = "Blueprint.md"
 BLUEPRINT_LOCK_FILE = "Blueprint.lock.json"
 BLUEPRINT_LOCK_SCHEMA = "star-forge.blueprint-lock.v1"
@@ -30,10 +29,8 @@ _AC_ID_RE = re.compile(r"AC-[1-9][0-9]*")
 _DOCUMENT_SUFFIXES = frozenset({".md", ".mdx", ".rst", ".txt"})
 _DOCUMENT_FILENAMES = frozenset({"changelog", "license", "readme"})
 _GENERIC_DELIVERY_TARGETS = frozenset({"source-only", "private-repo", "preview", "production", "package"})
-
 class ContractError(ValueError):
     """A project contract could not be read or safely updated."""
-
 def split_plan_row(line: str) -> list[str]:
     """Split a Markdown table row while preserving escaped pipe characters."""
     stripped = line.strip()
@@ -60,11 +57,9 @@ def split_plan_row(line: str) -> list[str]:
         index += 1
     cells.append("".join(cell).strip())
     return cells
-
 def _is_plan_separator(line: str) -> bool:
     cells = split_plan_row(line)
     return bool(cells) and all(re.fullmatch(r":?-{3,}:?", cell.replace(" ", "")) for cell in cells)
-
 def _plan_tables(lines: Sequence[str], ) -> list[tuple[int, list[str], int, int]]:
     tables: list[tuple[int, list[str], int, int]] = []
     for header_index, line in enumerate(lines):
@@ -81,7 +76,6 @@ def _plan_tables(lines: Sequence[str], ) -> list[tuple[int, list[str], int, int]
             end += 1
         tables.append((header_index, headers, header_index + 2, end))
     return tables
-
 def plan_table_version(headers: Sequence[str]) -> str:
     """Classify an exact task-table header as legacy, v2, or compatible."""
     normalized = tuple(header.strip().lower() for header in headers)
@@ -90,7 +84,6 @@ def plan_table_version(headers: Sequence[str]) -> str:
     if normalized == tuple(column.lower() for column in PLAN_V2_COLUMNS):
         return "v2"
     return "compatible"
-
 def parse_plan_tasks_text(text: str) -> list[dict[str, Any]]:
     """Read both eight-column legacy tasks and ten-column Plan v2 tasks."""
     lines = text.splitlines()
@@ -125,7 +118,6 @@ def parse_plan_tasks_text(text: str) -> list[dict[str, Any]]:
                 "plan_version": version,
             })
     return tasks
-
 def _markdown_section(text: str, title: str) -> str:
     """Return one Markdown heading section without consuming peer sections."""
     lines = text.splitlines()
@@ -147,7 +139,6 @@ def _markdown_section(text: str, title: str) -> str:
             end = index
             break
     return "\n".join(lines[start:end])
-
 def _blueprint_field(text: str, name: str) -> str:
     matches = re.finditer(
         rf"^\s*[-*]\s*(?:\*\*)?{re.escape(name)}(?:\*\*)?\s*:\s*(.*?)\s*$",
@@ -160,7 +151,6 @@ def _blueprint_field(text: str, name: str) -> str:
             continue
         return value
     return ""
-
 def _blueprint_lifecycle_field(text: str, name: str) -> tuple[bool, str]:
     """Return whether a lifecycle field exists and its resolved value, if any."""
     match = re.search(
@@ -173,7 +163,6 @@ def _blueprint_lifecycle_field(text: str, name: str) -> tuple[bool, str]:
     value = match.group(1).strip().strip("`").strip()
     unresolved = (not value or bool(re.search(r"<[^>]+>", value)) or value.casefold() in {"-", "tbd", "todo", "unknown", "unresolved"})
     return True, "" if unresolved else value
-
 def parse_blueprint_lifecycle_contract(text: str) -> dict[str, Any]:
     """Describe v0.4 intake, design, delivery, and legacy lifecycle defaults."""
     intake_text = _markdown_section(text, "Intake Decision Record")
@@ -235,7 +224,6 @@ def parse_blueprint_lifecycle_contract(text: str) -> dict[str, Any]:
             "legacy_default": not bool(delivery.strip()),
         },
     }
-
 def parse_blueprint_plan_contract(text: str) -> dict[str, Any]:
     """Extract the Blueprint fields needed for Plan v2 validation."""
     acceptance = _markdown_section(text, "Acceptance Criteria")
@@ -267,7 +255,6 @@ def parse_blueprint_plan_contract(text: str) -> dict[str, Any]:
         "target_platforms": target_platforms.casefold(),
         "github_requested": github_requested,
     }
-
 def _comma_values(raw: Any) -> list[str]:
     return [item.strip() for item in str(raw or "").split(",") if item.strip()]
 def task_file_owners(raw: Any) -> list[tuple[str, str]]:
@@ -291,7 +278,6 @@ def _maintenance_task_owns_non_docs(task: Mapping[str, Any]) -> bool:
         if (path.suffix.casefold() not in _DOCUMENT_SUFFIXES and path.name.casefold() not in _DOCUMENT_FILENAMES):
             return True
     return False
-
 def _plan_problem(
     message: str,
     *,
@@ -305,7 +291,6 @@ def _plan_problem(
         "line": int(task.get("line") or 0) if task else 0,
         "message": message,
     }
-
 def _platform_tokens(contract: Mapping[str, Any]) -> str:
     return " ".join(str(contract.get(field) or "") for field in (
         "project_class",
@@ -313,7 +298,6 @@ def _platform_tokens(contract: Mapping[str, Any]) -> str:
         "delivery_target",
         "platform_target",
     ))
-
 def validate_plan_v2_contract(
     blueprint_text: str,
     tasks: Sequence[Mapping[str, Any]],
@@ -504,10 +488,11 @@ def validate_plan_v2_contract(
             rule="blueprint-proof-contradiction",
         ))
     return problems
-
 def encode_plan_cell(value: Any) -> str:
-    return str(value if value is not None else "").replace("|", r"\|")
-
+    text = str(value if value is not None else "")
+    if "\n" in text or "\r" in text:
+        raise ContractError("Plan cells must not contain physical line breaks")
+    return text.replace("|", r"\|")
 def serialize_plan_tasks(
     tasks: Sequence[Mapping[str, Any]],
     *,
@@ -546,7 +531,6 @@ def serialize_plan_tasks(
             values.append(encode_plan_cell(value))
         lines.append("| " + " | ".join(values) + " |")
     return "\n".join(lines) + "\n"
-
 def migrate_plan_text(text: str) -> tuple[str, dict[str, int]]:
     """Convert every exact legacy task table to v2 without guessing mappings."""
     lines = text.splitlines()
@@ -592,7 +576,6 @@ def migrate_plan_text(text: str) -> tuple[str, dict[str, int]]:
         "legacy_tables_migrated": len(legacy_tables),
         "task_rows_migrated": migrated_rows,
     }
-
 def write_plan_v2_migration(source: Path, output: Path) -> dict[str, Any]:
     """Atomically create a separate, reviewable Plan v2 draft."""
     source = Path(os.path.abspath(source))
@@ -659,10 +642,8 @@ def write_plan_v2_migration(source: Path, output: Path) -> dict[str, Any]:
         "review_required": True,
         **summary,
     }
-
 def _now_utc() -> str:
     return (dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"))
-
 def _regular_file_problem(path: Path, *, required: bool) -> str:
     try:
         mode = path.lstat().st_mode
@@ -677,21 +658,13 @@ def _regular_file_problem(path: Path, *, required: bool) -> str:
     if mode & 0o444 == 0:
         return f"{path.name} is not readable"
     return ""
-
 def blueprint_sha256(path: Path) -> str:
     """Hash the exact Blueprint bytes without normalizing its content."""
-    problem = _regular_file_problem(path, required=True)
-    if problem:
-        raise ContractError(problem)
-    digest = hashlib.sha256()
     try:
-        with path.open("rb") as handle:
-            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                digest.update(chunk)
+        _content, digest, _size = safe_io.read_snapshot(path.parent, path)
     except OSError as exc:
         raise ContractError(f"{path.name} cannot be read: {exc}") from exc
-    return digest.hexdigest()
-
+    return digest
 def blueprint_text_has_legacy_approval(text: str) -> bool:
     """Recognize the mutable v0.3 approval sentinel for compatibility only."""
     normalized = re.sub(r"\*\*|__", "", text)
@@ -709,7 +682,6 @@ def blueprint_text_has_legacy_approval(text: str) -> bool:
     if not match:
         return False
     return bool(re.match(r"^\d{4}-\d{2}-\d{2}\b", match.group(1).strip()))
-
 def _valid_iso8601(value: Any) -> bool:
     if not isinstance(value, str) or not value.strip():
         return False
@@ -719,7 +691,6 @@ def _valid_iso8601(value: Any) -> bool:
     except ValueError:
         return False
     return parsed.tzinfo is not None and parsed.utcoffset() is not None
-
 def validate_blueprint_lock(payload: Any) -> list[str]:
     """Return deterministic validation problems for a v1 lock payload."""
     if not isinstance(payload, Mapping):
@@ -743,46 +714,43 @@ def validate_blueprint_lock(payload: Any) -> list[str]:
     if (isinstance(version, bool) or not isinstance(version, int) or version != BLUEPRINT_CONTRACT_VERSION):
         problems.append(f"contract_version must be {BLUEPRINT_CONTRACT_VERSION}")
     return problems
-
-def _read_lock(path: Path) -> tuple[dict[str, Any] | None, list[str]]:
-    problem = _regular_file_problem(path, required=False)
-    if problem:
-        return None, [problem]
-    if not path.exists():
-        return None, []
+def _contract_snapshot(root: Path, path: Path, *, required: bool) -> tuple[bytes | None, str | None, str]:
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        content, digest, _size = safe_io.read_snapshot(root, path)
+        return content, digest, ""
+    except FileNotFoundError:
+        return None, None, f"{path.name} is missing" if required else ""
+    except OSError:
+        return None, None, f"{path.name} cannot be read safely"
+def _read_lock(root: Path, path: Path) -> tuple[dict[str, Any] | None, list[str]]:
+    content, _digest, problem = _contract_snapshot(root, path, required=False)
+    if problem or content is None:
+        return None, [problem] if problem else []
+    try:
+        payload = json.loads(content.decode("utf-8"))
     except UnicodeDecodeError:
         return None, [f"{BLUEPRINT_LOCK_FILE} is not valid UTF-8"]
     except json.JSONDecodeError:
         return None, [f"{BLUEPRINT_LOCK_FILE} is not valid JSON"]
-    except OSError:
-        return None, [f"{BLUEPRINT_LOCK_FILE} cannot be read"]
     problems = validate_blueprint_lock(payload)
     return (dict(payload) if isinstance(payload, Mapping) else None), problems
-
 def blueprint_lock_state(project: Path) -> dict[str, Any]:
     """Describe v0.4 lock validity and legacy approval without conflating them."""
     root = project.resolve()
     blueprint_path = root / BLUEPRINT_FILE
     lock_path = root / BLUEPRINT_LOCK_FILE
-    blueprint_problem = _regular_file_problem(blueprint_path, required=True)
-    lock, lock_problems = _read_lock(lock_path)
-    current_sha256: str | None = None
+    blueprint_bytes, current_sha256, blueprint_problem = _contract_snapshot(
+        root, blueprint_path, required=True)
+    lock, lock_problems = _read_lock(root, lock_path)
     legacy_approved = False
-    if not blueprint_problem:
+    if blueprint_bytes is not None:
         try:
-            text = blueprint_path.read_text(encoding="utf-8")
-            current_sha256 = blueprint_sha256(blueprint_path)
+            text = blueprint_bytes.decode("utf-8")
             legacy_approved = blueprint_text_has_legacy_approval(text)
         except UnicodeDecodeError:
             blueprint_problem = f"{BLUEPRINT_FILE} is not valid UTF-8"
-        except ContractError as exc:
-            blueprint_problem = str(exc)
-        except OSError:
-            blueprint_problem = f"{BLUEPRINT_FILE} cannot be read"
     problems = ([blueprint_problem] if blueprint_problem else []) + lock_problems
-    lock_exists = lock_path.exists() or bool(lock_problems)
+    lock_exists = lock is not None or bool(lock_problems)
     status: str
     if blueprint_problem:
         status = "invalid" if lock_exists else "missing"
@@ -812,7 +780,6 @@ def blueprint_lock_state(project: Path) -> dict[str, Any]:
         "contract_version": lock.get("contract_version") if lock else None,
         "problems": problems,
     }
-
 def write_blueprint_lock(
     project: Path,
     *,
@@ -822,42 +789,23 @@ def write_blueprint_lock(
     root = project.resolve()
     blueprint_path = root / BLUEPRINT_FILE
     lock_path = root / BLUEPRINT_LOCK_FILE
-    lock_problem = _regular_file_problem(lock_path, required=False)
-    if lock_problem:
-        raise ContractError(lock_problem)
+    _blueprint, blueprint_digest, blueprint_problem = _contract_snapshot(
+        root, blueprint_path, required=True)
+    if blueprint_problem or blueprint_digest is None:
+        raise ContractError(blueprint_problem)
     timestamp = approved_at or _now_utc()
     payload: dict[str, Any] = {
         "schema": BLUEPRINT_LOCK_SCHEMA,
-        "blueprint_sha256": blueprint_sha256(blueprint_path),
+        "blueprint_sha256": blueprint_digest,
         "approved_at": timestamp,
         "contract_version": BLUEPRINT_CONTRACT_VERSION,
     }
     problems = validate_blueprint_lock(payload)
     if problems:
         raise ContractError("; ".join(problems))
-    root.mkdir(parents=True, exist_ok=True)
     serialized = json.dumps(payload, indent=2, sort_keys=True) + "\n"
-    temp_name: str | None = None
     try:
-        with tempfile.NamedTemporaryFile(
-                mode="w",
-                encoding="utf-8",
-                dir=root,
-                prefix=".Blueprint.lock.",
-                suffix=".tmp",
-                delete=False,
-        ) as handle:
-            temp_name = handle.name
-            handle.write(serialized)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temp_name, lock_path)
+        safe_io.atomic_write_text(root, lock_path, serialized)
     except OSError as exc:
         raise ContractError(f"Could not write {BLUEPRINT_LOCK_FILE}: {exc}") from exc
-    finally:
-        if temp_name:
-            try:
-                Path(temp_name).unlink(missing_ok=True)
-            except OSError:
-                pass
     return payload

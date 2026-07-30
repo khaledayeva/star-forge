@@ -299,14 +299,34 @@ def test_source_snapshot_never_reads_tracked_symlink_target_outside_project() ->
                 else:
                     raise AssertionError("tracked source symlink received a trusted snapshot")
 
-            proc = subprocess.run(
+            advisory = subprocess.run(
                 [sys.executable, str(STAR_FORGE_SCRIPT), "run", "--project", str(project)],
                 text=True,
                 capture_output=True,
                 check=False,
             )
-            assert proc.returncode != 0, proc.stdout
-            assert sentinel not in proc.stdout + proc.stderr
+            assert advisory.returncode == 0, advisory.stdout
+            assert sentinel not in advisory.stdout + advisory.stderr
+            assert "Traceback" not in advisory.stderr
+            state = json.loads(
+                (project / ".starforge" / "state.json").read_text(encoding="utf-8")
+            )
+            assert state["phase"] == "blocked"
+            assert state["source_hash_unavailable"] is True
+            assert state["source_hash_problems"][0]["rule"] == "source-hash-unavailable"
+
+            strict = subprocess.run(
+                [
+                    sys.executable, str(STAR_FORGE_SCRIPT), "run",
+                    "--project", str(project), "--strict",
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            assert strict.returncode != 0, strict.stdout
+            assert sentinel not in strict.stdout + strict.stderr
+            assert "Traceback" not in strict.stderr
 
 
 def test_free_text_token_redaction_reaches_normalized_security_artifacts() -> None:

@@ -5,7 +5,7 @@ import json
 import re
 from pathlib import Path, PurePosixPath
 from typing import Any, Mapping, Sequence
-from . import change_derivation, safe_io
+from . import change_derivation, lifecycle, safe_io
 from .contracts import parse_plan_tasks_text, serialize_plan_tasks
 from .policy_data import value as _policy_value
 _POLICY = _policy_value("changes.POLICY")
@@ -180,14 +180,16 @@ def derive_change_impact_for_project(
     except (OSError, UnicodeError) as exc:
         raise ChangePacketError(f"root contracts cannot be read: {exc}") from exc
     delivery_contract: dict[str, Any] = {}
-    delivery_path = root / ".starforge" / "contracts" / "delivery.json"
+    delivery_path = root / lifecycle.DELIVERY_CONTRACT_PATH
     if delivery_path.exists():
         try:
             parsed = json.loads(safe_io.read_text(root, delivery_path))
         except (OSError, UnicodeError, json.JSONDecodeError) as exc:
             raise ChangePacketError(f"delivery contract cannot be read: {exc}") from exc
-        if isinstance(parsed, dict):
-            delivery_contract = parsed
+        contract_problems = lifecycle.validate_delivery_contract(parsed)
+        if contract_problems:
+            raise ChangePacketError("delivery contract is invalid: " + "; ".join(contract_problems))
+        delivery_contract = dict(parsed)
     root_tasks = parse_plan_tasks_text(plan_text)
     blueprint_acs = set(_AC_ID_RE.findall(blueprint_text))
     unmapped = []

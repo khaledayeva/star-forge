@@ -5,6 +5,7 @@
   "routing_project_class": "web",
   "target_platforms": "web",
   "delivery_target": "preview",
+  "delivery_provider": "sites",
   "platform_target": "",
   "github_requested": true,
   "proofs": ["unit", "browser", "preview", "github", "delivery"],
@@ -13,7 +14,8 @@
   "expected_routes": {
     "web-implementation": "build-web-apps",
     "local-web-qa": "in-app-browser",
-    "github-lifecycle": "github-plugin"
+    "github-lifecycle": "github-plugin",
+    "sites-delivery": "sites"
   },
   "source_file": "web/index.html",
   "verify_command": "python3 -m unittest discover -s tests"

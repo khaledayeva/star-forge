@@ -350,6 +350,7 @@ def test_platform_release_routes_and_plan_proofs_are_complete() -> None:
                 scenario["delivery_target"],
                 scenario["platform_target"],
             ],
+            delivery_provider=scenario.get("delivery_provider"),
             available_capabilities=scenario["available_capabilities"],
         )
         assert result.blocked is False, name
@@ -497,6 +498,20 @@ def test_release_gate_fails_without_a_trustworthy_base() -> None:
         )
         assert result.returncode == 1
         assert "no trustworthy comparison revision" in result.stderr
+
+
+def test_ci_fetches_the_event_base_for_fail_closed_release_validation() -> None:
+    workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(
+        encoding="utf-8"
+    )
+    checkout = workflow.split("uses: actions/checkout@v4", 1)[1].split(
+        "- name: Set up Python", 1
+    )[0]
+    assert "fetch-depth: 0" in checkout
+    script = RELEASE_CHECK.read_text(encoding="utf-8")
+    assert 'os.environ.get("GITHUB_EVENT_PATH", "")' in script
+    assert 'before = payload.get("before")' in script
+    assert 'pull_request.get("base")' in script
 
 
 def test_release_gate_rejects_a_base_at_current_head() -> None:

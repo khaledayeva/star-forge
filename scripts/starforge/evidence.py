@@ -2,6 +2,7 @@
 from __future__ import annotations
 from .policy_data import mapping as _policy_mapping, value as _policy_value
 import datetime as dt
+import hashlib
 import json
 import re
 from pathlib import Path, PurePosixPath
@@ -54,13 +55,21 @@ def validate_artifact_path(raw_path: Any, project_root: str | Path | None = None
             raise _error("path_resolve", path=path) from exc
         _require(resolved == root or root in resolved.parents, "path_escape", path=path)
     return path
+def sensitive_key_name(raw: Any) -> bool:
+    separated = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", str(raw or ""))
+    normalized = re.sub(r"[^a-z0-9]+", "_", separated.lower()).strip("_")
+    parts = set(normalized.split("_"))
+    return bool(_SENSITIVE_KEY_RE.search(normalized) or parts & {
+        "auth", "authorization", "cookie", "credential", "key", "passwd",
+        "password", "secret", "session", "token",
+    })
 def _secret_locations(value: Any, path: str = "$") -> list[str]:
     if isinstance(value, Mapping):
         return [
             location for key, child in value.items()
             for child_path in (f"{path}.{key}",)
             for location in (
-                ([child_path] if _SENSITIVE_KEY_RE.search(str(key)) and isinstance(child, str)
+                ([child_path] if sensitive_key_name(key) and isinstance(child, str)
                   and child.strip().casefold() not in _SAFE_PLACEHOLDERS else [])
                 + _secret_locations(child, child_path))]
     if isinstance(value, list):
@@ -201,6 +210,10 @@ def adapt_v1_manifest(manifest: Mapping[str, Any], *, capability: str | None = N
         "legacy_provenance", adapter=LEGACY_LIVE_MANIFEST_SCHEMA, collector=collector,
         command_argv=manifest.get("command_argv", []),
         tool_versions=manifest.get("tool_versions", {}))
+    provenance["manifest_sha256"] = hashlib.sha256(json.dumps(
+        manifest, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+        allow_nan=False,
+    ).encode("utf-8")).hexdigest()
     envelope = _policy_mapping(
         "evidence_envelope", schema=EVIDENCE_SCHEMA, kind=collector,
         task=manifest.get("task"),

@@ -3,7 +3,7 @@
 from __future__ import annotations
 import fnmatch
 import re
-from pathlib import PurePosixPath, PureWindowsPath
+from pathlib import PurePosixPath
 from typing import Any, Mapping, Sequence
 
 from .contracts import PLAN_PROOF_KINDS, task_file_owners
@@ -24,7 +24,6 @@ def _normalize_scope_path(raw_path: str) -> str:
     value = str(raw_path or "")
     candidate = PurePosixPath(value)
     if ("\0" in value or not value or candidate.is_absolute()
-            or PureWindowsPath(value).is_absolute()
             or any(part in {"", ".", ".."} for part in value.split("/"))):
         raise ChangeDerivationError("changed file paths must be normalized project-relative paths")
     return value

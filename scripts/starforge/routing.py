@@ -6,14 +6,12 @@ the host. It never installs a plugin or invokes a routed capability.
 """
 
 from __future__ import annotations
-
 import json
 import re
 from dataclasses import dataclass, field, make_dataclass
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Optional, Sequence, Union
 from .policy_data import mapping as _policy_mapping, value as _policy_value
-
 ValueInput = Optional[Union[str, Iterable[str]]]
 FlagInput = Optional[Union[Mapping[str, object], Iterable[str], str]]
 CapabilityInput = FlagInput
@@ -22,10 +20,8 @@ CATALOG_SCHEMA = ROUTING_POLICY["schema"]
 DEFAULT_CATALOG_PATH = Path(__file__).resolve().parents[2] / ROUTING_POLICY["catalog_path"]
 SELECTOR_KEYS = tuple(ROUTING_POLICY["selector_labels"])
 OPTION_KINDS = ROUTING_POLICY["option_kinds"]
-
 class RoutingError(ValueError):
     """Raised when the routing catalog or request is inconsistent."""
-
 def _error(name: str, **values: object) -> RoutingError:
     return RoutingError(ROUTING_POLICY["errors"][name].format(**values))
 
@@ -89,6 +85,7 @@ def _normalized_values(values: Iterable[object] | object | None) -> tuple[str, .
 
 def make_request(*, project_class: ValueInput = None, blueprint_flags: FlagInput = None,
                  proof_kinds: ValueInput = None, delivery_target: ValueInput = None,
+                 delivery_provider: ValueInput = None,
                  required_needs: ValueInput = None,
                  material_needs: ValueInput = None) -> RouteRequest:
     """Create a normalized route request from Blueprint and Plan inputs."""
@@ -231,12 +228,14 @@ def _route_decision(route: Mapping[str, Any], request: RouteRequest,
         need=route["id"], purpose=route["purpose"], required_by=_matched_selectors(route, request),
         selected=_public_option(selected), status=status, fallback_used=selected_index > 0,
         unavailable=tuple(_public_option(option) for option in unavailable),
-        install_suggestion=_install_suggestion(route, request, unavailable))
+        install_suggestion=(_install_suggestion(route, request, options[:selected_index])
+                            if status == statuses["blocked"] else None))
 
 def resolve_routes(*, catalog: Mapping[str, Any] | None = None,
                    catalog_path: str | Path | None = None, project_class: ValueInput = None,
                    blueprint_flags: FlagInput = None, proof_kinds: ValueInput = None,
                    delivery_target: ValueInput = None, required_needs: ValueInput = None,
+                   delivery_provider: ValueInput = None,
                    material_needs: ValueInput = None,
                    available_capabilities: CapabilityInput = None) -> RoutingResult:
     """Resolve required capabilities without invoking or installing anything."""
@@ -259,7 +258,6 @@ def resolve_routes(*, catalog: Mapping[str, Any] | None = None,
         _route_decision(route, request, available)
         for route in active_catalog["routes"] if route["id"] in route_ids)
     return RoutingResult(schema=CATALOG_SCHEMA, request=request, decisions=decisions)
-
 required_needs_for_request = required_needs
 
 def resolve_route(need: str, *, available_capabilities: CapabilityInput = None,

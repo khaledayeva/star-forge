@@ -16,7 +16,8 @@ SCRIPTS = ROOT / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
-from starforge import evidence
+from live_collectors import common as live_common
+from starforge import evidence, lifecycle
 
 
 FIXTURES = ROOT / "fixtures" / "evidence-v2"
@@ -139,6 +140,15 @@ def test_secret_material_is_rejected_anywhere_in_the_envelope() -> None:
     payload = fixture()
     payload["blockers"] = ["collector leaked " + "sk-" + "abcdefghijklmnopqrstuvwxyz"]
     raises("secret material", evidence.validate_envelope, payload)
+    for key in ("accessToken", "clientSECRET", "privateKey", "authHeader"):
+        payload = fixture()
+        payload["provenance"][key] = "opaque-provider-credential-123456789"
+        raises("secret material", evidence.validate_envelope, payload)
+        assert lifecycle._secret_problems({key: "opaque-provider-credential-123456789"})
+        cleaned, report = live_common.redact_sensitive_values(
+            {key: "opaque-provider-credential-123456789"})
+        assert cleaned[key] == "[REDACTED]"
+        assert report["sensitive_keys"] == 1
 
 
 def test_writer_is_atomic_validated_and_leaves_no_temporary_file() -> None:
@@ -183,6 +193,15 @@ def test_v1_reader_adapts_without_rewriting_the_legacy_manifest() -> None:
     assert adapted["blockers"] == []
     assert adapted["artifacts"][0]["sha256"] == hashlib.sha256(b"abc").hexdigest()
     raises("not allowed", evidence.read_envelope, source, allow_v1=False)
+
+
+def test_v1_envelope_binds_all_legacy_manifest_semantics() -> None:
+    legacy = fixture("live-manifest-v1.json")
+    envelope = evidence.adapt_v1_manifest(
+        legacy, capability="preview-verification", provider="vercel")
+    assert evidence.envelope_covers_v1(envelope, legacy)
+    legacy["summary"] = {"status": 503, "url": "https://example.test"}
+    assert not evidence.envelope_covers_v1(envelope, legacy)
 
 
 def test_v1_degradation_and_blocking_problems_map_to_honest_verdicts() -> None:

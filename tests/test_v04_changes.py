@@ -20,7 +20,7 @@ SCRIPTS = ROOT / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
-from starforge import changes
+from starforge import changes, lifecycle
 from starforge import runtime_plan
 from starforge import runtime_review
 import star_forge
@@ -30,6 +30,8 @@ TEMPLATES = ROOT / "templates"
 SOURCE_HASH = hashlib.sha256(b"completed source").hexdigest()
 SPECIAL_PATHS = (
     "back\\slash.py",
+    "C:\\absolute",
+    "\\\\server\\share",
     'quote"name.py',
     " ",
     "-",
@@ -83,19 +85,15 @@ Status: active
         (project / "Blueprint.md").write_text(blueprint, encoding="utf-8")
         root_plan = project / "Plan.md"
         root_plan.write_text(plan, encoding="utf-8")
-        contract_path = project / ".starforge" / "contracts" / "delivery.json"
+        contract_path = project / lifecycle.DELIVERY_CONTRACT_PATH
         contract_path.parent.mkdir(parents=True)
         contract_path.write_text(
-            json.dumps(
-                {
-                    "schema": "star-forge.delivery-contract.v1",
-                    "target": {
-                        "kind": "preview",
-                        "destination": "team preview",
-                    },
-                    "route": {"provider": "sites"},
-                }
-            ),
+            json.dumps(lifecycle.make_delivery_contract(
+                delivery_target="preview",
+                project_class="web-app",
+                provider="sites",
+                destination="team preview",
+            )),
             encoding="utf-8",
         )
         return root_plan.read_bytes()
@@ -184,7 +182,7 @@ Status: active
                 self.assertIn("- " + json.dumps(path), text)
 
         for unsafe in (
-            "", "\0", "/absolute", "C:\\absolute", "a//b", "./a", "a/./b",
+            "", "\0", "/absolute", "a//b", "./a", "a/./b",
             "a/../b", "a/", ".", "..",
         ):
             with self.subTest(unsafe=unsafe):
@@ -534,6 +532,60 @@ Status: active
             self.assertIn("security", impact["review_roles"])
             self.assertIn("correctness", impact["review_lenses"])
             self.assertNotIn("browser", impact["proof_kinds"])
+
+    def test_canonical_delivery_contract_drives_each_amendment_target(self) -> None:
+        cases = (
+            ("preview", "sites", {"delivery", "preview"}),
+            ("private-repo", "", {"delivery", "github"}),
+            ("package", "", {"delivery", "package"}),
+            ("production", "sites", {"delivery"}),
+            ("ios", "", {"delivery"}),
+        )
+        for target, provider, expected in cases:
+            with self.subTest(target=target):
+                with tempfile.TemporaryDirectory() as tmp:
+                    project = Path(tmp)
+                    self.write_modern_project(project)
+                    contract = lifecycle.make_delivery_contract(
+                        delivery_target=target,
+                        project_class="web-app",
+                        provider=provider,
+                        production_authorized=target == "production",
+                    )
+                    path = project / lifecycle.DELIVERY_CONTRACT_PATH
+                    path.write_text(json.dumps(contract), encoding="utf-8")
+
+                    impact = changes.derive_change_impact_for_project(
+                        project, ["src/api.py"],
+                    )
+
+                    self.assertEqual(
+                        impact["delivery_revalidation"]["target"], target,
+                    )
+                    self.assertTrue(
+                        expected.issubset(impact["proof_kinds"]),
+                        (target, impact["proof_kinds"]),
+                    )
+
+    def test_invalid_canonical_delivery_contract_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp)
+            self.write_modern_project(project)
+            path = project / lifecycle.DELIVERY_CONTRACT_PATH
+            path.write_text(
+                json.dumps({
+                    "schema": lifecycle.DELIVERY_CONTRACT_SCHEMA,
+                    "target": {"kind": "preview"},
+                }),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                changes.ChangePacketError, "delivery contract is invalid",
+            ):
+                changes.derive_change_impact_for_project(
+                    project, ["src/api.py"],
+                )
 
     def test_create_or_select_packet_keeps_root_historical_until_approval(
         self,

@@ -129,7 +129,8 @@
       "project_classes": "project_class",
       "blueprint_flags": "blueprint_flag",
       "proof_kinds": "proof",
-      "delivery_targets": "delivery"
+      "delivery_targets": "delivery",
+      "delivery_providers": "delivery_provider"
     },
     "option_kinds": {"$type": "set", "$items": ["plugin", "mcp", "native", "computer-use", "shell", "blocker"]},
     "request_inputs": {
@@ -137,6 +138,7 @@
       "blueprint_flags": "blueprint_flags",
       "proof_kinds": "proof_kinds",
       "delivery_targets": "delivery_target",
+      "delivery_providers": "delivery_provider",
       "required_needs": "required_needs",
       "material_needs": "material_needs"
     },
@@ -188,7 +190,7 @@
     }
   },
   "mappings.routing_request": {
-    "fields": ["project_classes", "blueprint_flags", "proof_kinds", "delivery_targets", "required_needs", "material_needs"],
+    "fields": ["project_classes", "blueprint_flags", "proof_kinds", "delivery_targets", "delivery_providers", "required_needs", "material_needs"],
     "defaults": {}
   },
   "mappings.route_decision": {

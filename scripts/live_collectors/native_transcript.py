@@ -213,7 +213,7 @@ def finalize_collection(
         common.read_json(manifest_path, {}), capability=config["capability"], provider=provider,
     )
     envelope["provenance"].update(provenance)
-    envelope_path = out_dir / "evidence.json"
+    envelope_path = out_dir / common.LIVE_EVIDENCE_FILENAME
     envelope = evidence.write_envelope(
         envelope_path, envelope, project_root=project, verify_artifacts=True,
     )

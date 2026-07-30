@@ -444,7 +444,8 @@ def test_every_strict_live_domain_requires_a_bound_v2_sidecar() -> None:
                 {"proof": artifact},
                 summary={"collector": collector},
             )
-            sidecar = manifest.parent / "evidence.json"
+            sidecar = manifest.parent / live_common.LIVE_EVIDENCE_FILENAME
+            assert not (manifest.parent / "evidence.json").exists()
             problems: list[dict[str, Any]] = []
             loaded, _ = runtime_preview.load_and_validate_live_manifest(
                 project,
