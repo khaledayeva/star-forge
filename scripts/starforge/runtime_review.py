@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 from starforge import changes as project_changes
 from starforge import contracts as project_contracts
-from .runtime_support import BLOCKING_SEVERITIES, FINAL_SUMMARY, FINDING_SEVERITIES, FINDING_SEVERITY_RANK, INCIDENTS_FILE, KNOWN_REVIEW_ROLES, LEDGER_FILE, PLAN_FILE, PROOF_FILE, REVIEWS_DIR, REVIEW_PROFILE_ROLES, STATE_SUBDIR, SUBAGENT_EVENTS, WAIVES_FILE, ForgeError, append_jsonl, architecture_debt_findings, blocking_items, finding_problem, git_head, git_status, is_git_repo, iter_project_files, jsonl_payloads, now_utc, read_json, read_text, relative_to_project, run_git, scan_paths, slugify, source_dirty_entries, source_hash, write_json, write_text
+from .runtime_support import BLOCKING_SEVERITIES, FINAL_SUMMARY, FINDING_SEVERITIES, FINDING_SEVERITY_RANK, INCIDENTS_FILE, KNOWN_REVIEW_ROLES, LEDGER_FILE, PLAN_FILE, PROOF_FILE, REVIEWS_DIR, REVIEW_PROFILE_ROLES, STATE_SUBDIR, SUBAGENT_EVENTS, WAIVES_FILE, ForgeError, append_jsonl, architecture_debt_findings, blocking_items, finding_problem, git_head, git_status, is_git_repo, iter_project_files, jsonl_payloads, now_utc, read_json, relative_to_project, run_git, scan_paths, slugify, source_dirty_entries, source_hash, write_json, write_text
 from .runtime_project import enforcement_mode, ensure_state_dirs, fast_mvp_profile_lock_state, hooks_liveness, project_profile, read_source_profile, required_review_policy, required_review_roles, resolve_project, review_profile, safe_release_snapshot, source_hash_exception_problem, source_hash_unavailable_problem, source_hash_unavailable_state, try_source_hash
 from .runtime_plan import all_tasks_complete, blueprint_is_approved, blueprint_lifecycle_contract, lifecycle_gate_state, parse_depends, parse_tasks, plan_is_placeholder, plan_parse_problem, scope_hash, task_allows_noop_verification, task_counts, task_is_visual, task_plan, task_requires_real_workers, update_plan_task_row, validate_project_plan_contract, validate_tasks
 from .runtime_records import browser_findings, fresh_passing_verify, has_noop_verify, passing_browser_runs, verify_findings
@@ -569,28 +569,19 @@ def cmd_done(args: argparse.Namespace) -> int:
     gated_snapshot = payload.get("snapshot") or {}
     proof_head = str(gated_snapshot.get("git_head") or "")
     proof_source_hash = str(gated_snapshot.get("source_hash") or "")
-    if payload["is_complete"] and not proof_binding_matches(project, proof_head, proof_source_hash):
-        refuse_proof_binding(payload)
     if payload["is_complete"]:
         proof_path = project / PROOF_FILE
-        try:
-            prior_proof = read_text(proof_path)
-        except FileNotFoundError:
-            prior_proof = None
         proof = policy_record(
             "proof", created_at=now_utc(), head=proof_head, source_hash=proof_source_hash,
             scope_hash=scope_hash(project) or "noscope", verdict=payload["verdict"])
         ensure_state_dirs(project)
-        write_json(proof_path, proof)
         if not proof_binding_matches(project, proof_head, proof_source_hash):
-            if prior_proof is None:
-                write_json(proof_path, dict(proof, verdict=REVIEW_POLICY["done_verdicts"]["blocked"]))
-            else:
-                write_text(proof_path, prior_proof)
             refuse_proof_binding(payload)
-        elif args.write_summary:
-            write_text(project / FINAL_SUMMARY, done_summary_markdown(payload))
-            payload["summary_artifact"] = str(FINAL_SUMMARY)
+        else:
+            write_json(proof_path, proof)
+            if args.write_summary:
+                write_text(project / FINAL_SUMMARY, done_summary_markdown(payload))
+                payload["summary_artifact"] = str(FINAL_SUMMARY)
     print(json.dumps(payload, indent=2))
     return 0 if payload["is_complete"] or not args.strict else 1
 def done_summary_markdown(payload: dict[str, Any]) -> str:

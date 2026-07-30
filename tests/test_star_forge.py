@@ -2574,7 +2574,7 @@ def test_done_rejects_commits_during_final_source_hash_and_preserves_prior_proof
             assert proof["head"] != star_forge.git_head(project)
 
 
-def test_done_handles_commits_at_proof_publication_boundary() -> None:
+def test_done_rejects_commits_during_proof_setup_without_publication() -> None:
     for empty_commit, keep_prior in ((False, True), (True, False)):
         with tempfile.TemporaryDirectory() as tmp:
             project = Path(tmp).resolve()
@@ -2626,28 +2626,69 @@ def test_done_handles_commits_at_proof_publication_boundary() -> None:
             if prior_proof is not None:
                 assert proof_path.read_bytes() == prior_proof
             else:
-                proof = star_forge.read_json(proof_path)
-                assert proof["verdict"] == runtime_review.REVIEW_POLICY[
-                    "done_verdicts"
-                ]["blocked"]
-                assert not proof["verdict"].startswith("COMPLETE")
+                assert not proof_path.exists()
 
 
-def test_allow_empty_commit_after_completion_is_actionable_head_drift() -> None:
+def test_interruption_before_terminal_publication_preserves_proof_state() -> None:
+    for keep_prior in (False, True):
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp).resolve()
+            build_completed_project(project)
+            proof_path = project / star_forge.PROOF_FILE
+            prior_proof = None
+            if keep_prior:
+                code, payload = run_done(project)
+                assert code == 0, payload
+                prior_proof = proof_path.read_bytes()
+
+            interrupted = False
+            try:
+                with mock.patch.object(
+                    runtime_review, "proof_binding_matches",
+                    side_effect=KeyboardInterrupt(
+                        "interrupted before terminal proof publication"
+                    ),
+                ):
+                    run_done(project)
+            except KeyboardInterrupt:
+                interrupted = True
+
+            assert interrupted is True
+            if prior_proof is None:
+                assert not proof_path.exists()
+            else:
+                assert proof_path.read_bytes() == prior_proof
+
+
+def test_commit_after_terminal_validation_is_actionable_head_drift() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         project = Path(tmp).resolve()
         build_completed_project(project)
-        code, payload = run_done(project)
-        assert code == 0, payload
         proof_path = project / star_forge.PROOF_FILE
-        prior_proof = proof_path.read_bytes()
+        original_write_json = runtime_review.write_json
+        raced = False
 
-        code, _, error = star_forge.run_git([
-            "-c", "user.name=Star Forge Test",
-            "-c", "user.email=starforge@example.com",
-            "commit", "--allow-empty", "-m", "post completion head drift",
-        ], project)
-        assert code == 0, error
+        def commit_before_publication(path: Path, value: object) -> None:
+            nonlocal raced
+            if path == proof_path and not raced:
+                code, _, error = star_forge.run_git([
+                    "-c", "user.name=Star Forge Test",
+                    "-c", "user.email=starforge@example.com",
+                    "commit", "--allow-empty", "-m",
+                    "post validation head drift",
+                ], project)
+                assert code == 0, error
+                raced = True
+            original_write_json(path, value)
+
+        with mock.patch.object(
+            runtime_review, "write_json",
+            side_effect=commit_before_publication,
+        ):
+            code, payload = run_done(project)
+        assert code == 0, payload
+        assert raced is True
+        prior_proof = proof_path.read_bytes()
 
         proof = json.loads(prior_proof)
         drift = runtime_review.detect_drift(project, proof)
