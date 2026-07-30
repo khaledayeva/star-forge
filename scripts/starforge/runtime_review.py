@@ -420,12 +420,17 @@ def done_payload(project: Path) -> dict[str, Any]:
         gate_findings.extend(review_findings_for_done(project, tasks))
         problems.extend(finding_problem(finding) for finding in gate_findings if finding["severity"] in BLOCKING_SEVERITIES)
     repository_available, repository_head = is_git_repo(project), git_head(project)
-    status_entries = git_status(project)
+    try:
+        status_entries = git_status(project)
+        status_error = ""
+    except ValueError as exc:
+        status_entries, status_error = [], str(exc)
     repository_confirmed, confirmed_head = is_git_repo(project), git_head(project)
     repository_problem = (
         ("git-repository-required", "Local Git repository is required for strict completion.") if not repository_available or not repository_confirmed
         else ("git-head-required", "A readable Git HEAD is required for strict completion.") if not repository_head or not confirmed_head
-        else ("git-head-changed", "Git HEAD changed during strict completion.") if repository_head != confirmed_head else None)
+        else ("git-head-changed", "Git HEAD changed during strict completion.") if repository_head != confirmed_head
+        else ("git-status-unavailable", status_error) if status_error else None)
     if repository_problem:
         problems.append({"severity": "high", "rule": repository_problem[0], "message": repository_problem[1]})
     dirty = source_dirty_entries(status_entries)
@@ -437,7 +442,7 @@ def done_payload(project: Path) -> dict[str, Any]:
     else:
         try:
             drift = detect_drift(project, proof)
-        except (PermissionError, OSError) as exc:
+        except (PermissionError, OSError, ValueError) as exc:
             hash_problem = source_hash_exception_problem(exc)
             problems.append(finding_problem(hash_problem))
             drift = source_hash_unavailable_state(profile_lock, problems=[hash_problem])
@@ -559,11 +564,13 @@ def proof_binding_state(project: Path) -> tuple[bool, str | None, list[str], str
     repository = is_git_repo(project)
     return repository, git_head(project) if repository else None, source_dirty_entries(git_status(project)), scope_hash(project) or "noscope"
 def proof_binding_matches(project: Path, head: str, source: str, scope: str) -> bool:
-    before = proof_binding_state(project)
-    current_source, problem = try_source_hash(project)
-    after = proof_binding_state(project)
-    return bool(head and source and scope and before == (True, head, [], scope) == after
-                and not problem and current_source == source)
+    try:
+        before = proof_binding_state(project)
+        current_source, problem = try_source_hash(project)
+        after = proof_binding_state(project)
+    except ValueError:
+        return False
+    return bool(head and source and scope and before == (True, head, [], scope) == after and not problem and current_source == source)
 def proof_is_current(project: Path, proof: Mapping[str, Any]) -> bool:
     return bool(proof.get("schema") == "star-forge.proof.v1"
                 and str(proof.get("verdict") or "").startswith("COMPLETE")

@@ -3,7 +3,7 @@
 from __future__ import annotations
 from .policy_data import value as _policy_value
 import re
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Mapping, Sequence
 from starforge import changes as project_changes
 from starforge import contracts as project_contracts
@@ -64,7 +64,10 @@ def parse_depends(raw: str) -> list[str]:
     return _split_items(raw, "dependency")
 
 def task_files(task: dict[str, Any]) -> list[str]:
-    return _split_items(task.get("files"), "file")
+    raw = task.get("files")
+    values = project_contracts.task_file_values(raw)
+    return (values if str(raw or "").startswith("[") or
+            not (len(values) == 1 and values[0].strip() in PLAN_POLICY["file_empty"]) else [])
 
 def task_requires_real_workers(task: dict[str, Any]) -> bool:
     return str(task.get("mode") or PLAN_POLICY["default_mode"]).lower() == PLAN_POLICY["default_mode"]
@@ -166,10 +169,9 @@ def task_proof_kinds(task: Mapping[str, Any]) -> set[str]:
     return {item.strip().casefold() for item in str(task.get("proof") or "").split(",") if item.strip() and item.strip() != "-"}
 
 def task_file_is_infrastructure(raw_path: str) -> bool:
-    normalized = str(raw_path or "").strip().replace("\\", "/").strip("/")
-    if not normalized:
+    if not raw_path:
         return False
-    path = Path(normalized)
+    path = PurePosixPath(raw_path)
     parts = {part.casefold() for part in path.parts}
     name = path.name.casefold()
     visual = PLAN_POLICY["visual"]
@@ -183,12 +185,12 @@ def task_files_are_infrastructure(task: Mapping[str, Any]) -> bool:
     files = task_files(dict(task))
     return bool(files) and all(task_file_is_infrastructure(path) for path in files)
 
-def _task_source_paths(task: Mapping[str, Any]) -> list[Path]:
-    return [Path(raw.replace("\\", "/")) for raw in task_files(dict(task)) if not task_file_is_infrastructure(raw)]
+def _task_source_paths(task: Mapping[str, Any]) -> list[PurePosixPath]:
+    return [PurePosixPath(raw) for raw in task_files(dict(task)) if not task_file_is_infrastructure(raw)]
 
 def task_owns_visual_source(task: Mapping[str, Any]) -> bool:
     swift_suffixes = PLAN_POLICY["visual"]["swift_view_suffixes"]
-    def is_visual(path: Path) -> bool:
+    def is_visual(path: PurePosixPath) -> bool:
         suffix = path.suffix.casefold()
         parts = {part.casefold() for part in path.parts[:-1]}
         return bool(suffix in VISUAL_SOURCE_SUFFIXES

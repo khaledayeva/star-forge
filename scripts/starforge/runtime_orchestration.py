@@ -16,7 +16,7 @@ from starforge import quality as project_quality
 from starforge import review_policy as adaptive_review_policy
 from starforge import safe_io
 from .policy_data import mapping as policy_mapping, project as project_record, record as policy_record, value as _policy_value
-from .runtime_support import AGENT_NAME_PREFIX, BLOCKING_SEVERITIES, BLUEPRINT_FILE, CANONICAL_STATE, HOOK_EVENTS, HOOK_TRUST_NOTICE_FILE, INCIDENTS_FILE, LEDGER_FILE, PLAN_FILE, PROJECT_MANIFEST, REVIEW_ROLE_LENSES, SF_VERSION, SOURCE_PROFILE_FILE, ForgeError, append_jsonl, blocking_items, ensure_git_repo, ensure_gitignore_entries, file_sha256, git_status, git_status_path, is_git_repo, jsonl_payloads, now_utc, plugin_root, read_json, read_text, relative_to_project, slugify, snapshot_file_candidates, template_text, write_json, write_json_stable, write_text
+from .runtime_support import AGENT_NAME_PREFIX, BLOCKING_SEVERITIES, BLUEPRINT_FILE, CANONICAL_STATE, HOOK_EVENTS, HOOK_TRUST_NOTICE_FILE, INCIDENTS_FILE, LEDGER_FILE, PLAN_FILE, PROJECT_MANIFEST, REVIEW_ROLE_LENSES, SF_VERSION, SOURCE_PROFILE_FILE, ForgeError, append_jsonl, blocking_items, ensure_git_repo, ensure_gitignore_entries, file_sha256, git_status, is_git_repo, jsonl_payloads, now_utc, plugin_root, read_json, read_text, relative_to_project, slugify, snapshot_file_candidates, template_text, write_json, write_json_stable, write_text
 from .runtime_project import enforcement_mode, ensure_project_manifest, ensure_state_dirs, fast_mvp_profile_lock_state, fast_mvp_profile_selected_before_gates, find_star_forge_project_root, hooks_liveness, normalize_project_profile, profile_downgrade_lock_reasons, project_profile, required_review_policy, resolve_project, review_profile, root_needs_product_isolation, setup_ledger_records_fast_mvp_before_gates, source_hash_exception_problem, source_hash_unavailable_problem, source_hash_unavailable_state, source_profile_path, try_source_hash
 from .runtime_plan import all_tasks_complete, append_plan_task, blueprint_has_valid_lock, blueprint_is_approved, blueprint_lifecycle_contract, blueprint_lock_state, command_is_noop, lifecycle_gate_state, parse_tasks, plan_contract_mode, plan_is_placeholder, plan_parse_problem, ready_tasks, scope_hash, task_allows_noop_verification, task_counts, task_files, task_requires_real_workers, task_verify_command, update_plan_task_row, validate_project_plan_contract, validate_tasks
 from .runtime_review import annotate_drift_coverage, change_packet_for_drift, change_scope_files, completed_amendment_covering_drift, completed_change_packet_covering_drift, detect_drift, done_payload, load_current_proof, load_merged_review, load_proof, review_findings_for_done, reviews_scope_dir
@@ -428,8 +428,8 @@ def scaffold_amend(project: Path, drift: dict[str, Any]) -> str | None:
     existing = [task["id"] for task in tasks if task["id"].startswith("AMEND-")]
     n = len(existing) + 1
     task_id = f"AMEND-{n}"
-    changed = [git_status_path(item) if item[:1] in {" ", "M", "A", "D", "R", "?"} else item for item in (drift.get("changed_files") or [])]
-    files = ", ".join(dict.fromkeys(item for item in changed if item)) or "-"
+    changed = list(dict.fromkeys(item for item in (drift.get("changed_files") or []) if item))
+    files = json.dumps(changed, separators=(",", ":")) if changed else "-"
     # Inherit a real Verify command from an existing non-docs task so the amendment
     # is completable: verify is now bound to this cell, so a prose placeholder would
     # be uncompleteable. The coordinator may edit it to a more specific command.

@@ -274,12 +274,19 @@ def parse_blueprint_plan_contract(text: str) -> dict[str, Any]:
 
 def _comma_values(raw: Any) -> list[str]:
     return [item.strip() for item in str(raw or "").split(",") if item.strip()]
-
+def task_file_values(raw: Any) -> list[str]:
+    text = str(raw or "")
+    try:
+        values = json.loads(text) if text.startswith("[") else None
+    except json.JSONDecodeError:
+        values = None
+    return (values if isinstance(values, list) and all(isinstance(value, str) for value in values)
+            else [item.strip() for item in re.split(r"[,;]", text) if item.strip()])
 def _maintenance_task_owns_non_docs(task: Mapping[str, Any]) -> bool:
-    raw = str(task.get("files") or "")
-    for item in re.split(r"[,;]", raw):
-        value = item.strip()
-        if not value or value.casefold() in {"-", "n/a", "na", "none"}:
+    raw = task.get("files")
+    encoded = str(raw or "").startswith("[")
+    for value in task_file_values(raw):
+        if not value or not encoded and value.casefold() in {"-", "n/a", "na", "none"}:
             continue
         path = Path(value)
         if (path.suffix.casefold() not in _DOCUMENT_SUFFIXES and path.name.casefold() not in _DOCUMENT_FILENAMES):

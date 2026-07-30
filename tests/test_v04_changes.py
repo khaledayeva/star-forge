@@ -24,6 +24,23 @@ import star_forge
 
 TEMPLATES = ROOT / "templates"
 SOURCE_HASH = hashlib.sha256(b"completed source").hexdigest()
+SPECIAL_PATHS = (
+    "back\\slash.py",
+    'quote"name.py',
+    " ",
+    "-",
+    " leading.py",
+    "trailing.py ",
+    "left -> right.py",
+    "line\nbreak.py",
+    "tab\tname.py",
+    "café.py",
+    "comma,name.py",
+    "semi;name.py",
+    "pipe|name.py",
+    "M  status-like.py",
+    "?? status-like.py",
+)
 
 
 class ChangePacketTests(unittest.TestCase):
@@ -127,6 +144,48 @@ Status: active
                 "root Plan",
                 (packet_root / "Plan.md").read_text(encoding="utf-8"),
             )
+            change_path = packet_root / "change.md"
+            legacy_text = change_path.read_text(encoding="utf-8")
+            for path in ("src/app.py", "tests/test_app.py"):
+                legacy_text = legacy_text.replace(
+                    "- " + json.dumps(path), "- " + path
+                )
+            change_path.write_text(legacy_text, encoding="utf-8")
+            self.assertEqual(
+                changes.read_change_packet(project, "CHANGE-1")["scope_delta"],
+                ["src/app.py", "tests/test_app.py"],
+            )
+
+    def test_special_scope_paths_round_trip_and_unsafe_forms_are_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp)
+            packet = changes.create_change_packet(
+                project,
+                change_id="CHANGE-1",
+                original_completed_source_hash=SOURCE_HASH,
+                scope_delta=SPECIAL_PATHS,
+                affected_acs=["AC-49"],
+                delivery_impact="source-only",
+                template_dir=TEMPLATES,
+            )
+            self.assertEqual(packet["scope_delta"], list(SPECIAL_PATHS))
+            self.assertEqual(
+                changes.read_change_packet(project, "CHANGE-1")["scope_delta"],
+                list(SPECIAL_PATHS),
+            )
+            text = (
+                project / ".starforge" / "changes" / "CHANGE-1" / "change.md"
+            ).read_text(encoding="utf-8")
+            for path in SPECIAL_PATHS:
+                self.assertIn("- " + json.dumps(path), text)
+
+        for unsafe in (
+            "", "\0", "/absolute", "C:\\absolute", "a//b", "./a", "a/./b",
+            "a/../b", "a/", ".", "..",
+        ):
+            with self.subTest(unsafe=unsafe):
+                with self.assertRaises(changes.ChangePacketError):
+                    changes.normalize_changed_files([unsafe])
 
     def test_approval_is_atomic_state_transition_and_root_sources_are_unchanged(
         self,
@@ -312,7 +371,7 @@ Status: active
 
             impact = changes.derive_change_impact_for_project(
                 project,
-                ["M  src/api.py"],
+                ["src/api.py"],
                 profile="fast-mvp",
             )
 
@@ -345,7 +404,7 @@ Status: active
             first = changes.create_or_select_change_packet(
                 project,
                 original_completed_source_hash=SOURCE_HASH,
-                changed_files=["M  src/api.py"],
+                changed_files=["src/api.py"],
                 created_at="2026-07-25T20:00:00Z",
                 template_dir=TEMPLATES,
             )

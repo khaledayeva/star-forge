@@ -710,11 +710,16 @@ def test_git_path_enumeration_failures_do_not_produce_partial_evidence() -> None
             else:
                 raise AssertionError("changed-file scan accepted a failed Git listing")
 
-        with mock.patch.object(live_common, "git_status",
-                               return_value=["?? <git status unavailable>"]):
-            assert runtime_support.git_status(project) == [
-                "?? <git status unavailable>"
-            ]
+        with mock.patch.object(
+            live_common, "git_status",
+            side_effect=ValueError("Git status unavailable: simulated"),
+        ):
+            try:
+                runtime_support.git_status(project)
+            except ValueError as exc:
+                assert "Git status unavailable" in str(exc)
+            else:
+                raise AssertionError("unavailable Git status was accepted")
 
 
 # --------------------------------------------------------------- 4. verify
@@ -2526,13 +2531,16 @@ def test_git_status_failure_is_not_a_clean_commit_or_proof_binding() -> None:
         commit_all(project)
         with mock.patch.object(
             live_common, "git_status",
-            return_value=["?? <git status unavailable>"],
+            side_effect=ValueError("Git status unavailable: simulated"),
         ):
             head = star_forge.git_head(project)
             assert head
-            assert runtime_support.git_status(project) == [
-                "?? <git status unavailable>"
-            ]
+            try:
+                runtime_support.git_status(project)
+            except ValueError as exc:
+                assert "Git status unavailable" in str(exc)
+            else:
+                raise AssertionError("unavailable Git status was accepted")
             assert runtime_support.tree_clean_for_commit_binding(project) is False
             assert not runtime_preview.deployment_bound_to_current(
                 project, {"commit_sha": head}
@@ -2548,7 +2556,7 @@ def test_done_fails_closed_when_git_status_is_unavailable() -> None:
         build_completed_project(project)
         with mock.patch.object(
             live_common, "git_status",
-            return_value=["?? <git status unavailable>"],
+            side_effect=ValueError("Git status unavailable: simulated"),
         ):
             assert star_forge.git_head(project)
             code, payload = run_done(project)
@@ -2556,7 +2564,7 @@ def test_done_fails_closed_when_git_status_is_unavailable() -> None:
         assert code == 1, payload
         assert payload["is_complete"] is False
         assert any(
-            "<git status unavailable>" in str(problem)
+            "Git status unavailable" in str(problem)
             for problem in payload["problems"]
         )
 
@@ -3044,6 +3052,62 @@ def test_post_done_drift_creates_single_draft_change_packet() -> None:
         assert state["spawn_plan"][0]["task"] == "CHANGE-1-T1"
 
 
+def test_post_done_special_paths_round_trip_through_one_reused_packet() -> None:
+    names = (
+        "back\\slash.py",
+        'quote"name.py',
+        " ",
+        "-",
+        " leading.py",
+        "trailing.py ",
+        "left -> right.py",
+        "line\nbreak.py",
+        "tab\tname.py",
+        "café.py",
+        "comma,name.py",
+        "semi;name.py",
+        "pipe|name.py",
+        "M  status-like.py",
+        "?? status-like.py",
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        build_completed_project(project)
+        code, payload = run_done(project)
+        assert code == 0, payload
+        for name in names:
+            (project / name).write_text("special path drift\n", encoding="utf-8")
+
+        expected = star_forge.source_dirty_entries(star_forge.git_status(project))
+        assert set(expected) == set(names)
+        code, out, err = run_cli(["run", "--project", str(project), "--no-hooks"])
+        assert code == 0, err or out
+        code, out, err = run_cli(["approve-blueprint", "--project", str(project)])
+        assert code == 0, err or out
+        code, out, err = run_cli(["run", "--project", str(project), "--no-hooks"])
+        assert code == 0, err or out
+
+        packets = star_forge.project_changes.list_change_packets(project)
+        assert len(packets) == 1
+        packet = packets[0]
+        assert packet["scope_delta"] == expected
+        assert star_forge.project_changes.read_change_packet(
+            project, packet["change_id"]
+        )["scope_delta"] == expected
+        tasks = star_forge.project_changes.change_plan_tasks(
+            project, packet["change_id"]
+        )
+        assert len(tasks) == 1
+        assert star_forge.task_files(tasks[0]) == expected
+        assert str(tasks[0]["files"]).startswith("[")
+
+        code, out, err = run_cli(["run", "--project", str(project), "--no-hooks"])
+        assert code == 0, err or out
+        reused = star_forge.project_changes.list_change_packets(project)
+        assert [item["change_id"] for item in reused] == [packet["change_id"]]
+        assert reused[0]["scope_delta"] == expected
+
+
 def test_scaffold_amend_preserves_complete_long_drift_file_list() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         project = Path(tmp).resolve()
@@ -3056,7 +3120,7 @@ def test_scaffold_amend_preserves_complete_long_drift_file_list() -> None:
             "skills/forge-review/SKILL.md",
             "tests/test_star_forge.py",
         ]
-        amend_id = star_forge.scaffold_amend(project, {"changed_files": [f"M  {path}" for path in changed]})
+        amend_id = star_forge.scaffold_amend(project, {"changed_files": changed})
         assert amend_id == "AMEND-1"
         amend = next(task for task in star_forge.parse_tasks(project / "Plan.md") if task["id"] == "AMEND-1")
         assert len(amend["files"]) > 120

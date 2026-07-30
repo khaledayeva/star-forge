@@ -90,23 +90,18 @@ def _bullet_values(section: str) -> list[str]:
     for line in section.splitlines():
         match = re.match(r"^\s*-\s+(.+?)\s*$", line)
         if match:
-            values.append(match.group(1).strip())
+            value = match.group(1).strip()
+            try:
+                decoded = json.loads(value)
+            except json.JSONDecodeError:
+                decoded = value
+            values.append(decoded if isinstance(decoded, str) else value)
     return values
 def _clean_scope_delta(scope_delta: Sequence[str]) -> list[str]:
-    if isinstance(scope_delta, (str, bytes)) or not isinstance(scope_delta, Sequence):
-        raise ChangePacketError("scope_delta must be a non-empty sequence of strings")
-    cleaned: list[str] = []
-    for item in scope_delta:
-        if not isinstance(item, str) or not item.strip():
-            raise ChangePacketError("scope_delta entries must be non-empty strings")
-        value = item.strip()
-        if "\n" in value or "\r" in value:
-            raise ChangePacketError("scope_delta entries must be single-line strings")
-        if value not in cleaned:
-            cleaned.append(value)
-    if not cleaned:
-        raise ChangePacketError("scope_delta must not be empty")
-    return cleaned
+    try:
+        return change_derivation.normalize_changed_files(scope_delta)
+    except change_derivation.ChangeDerivationError as exc:
+        raise ChangePacketError(str(exc)) from exc
 def _clean_affected_acs(affected_acs: Sequence[str]) -> list[str]:
     if isinstance(affected_acs, (str, bytes)) or not isinstance(affected_acs, Sequence):
         raise ChangePacketError("affected_acs must be a non-empty sequence")
@@ -147,7 +142,7 @@ def _render(template: str, values: Mapping[str, str]) -> str:
         raise ChangePacketError("template has unresolved placeholders: " + ", ".join(unresolved))
     return rendered.rstrip() + "\n"
 def normalize_changed_files(changed_files: Sequence[str]) -> list[str]:
-    """Normalize Git status paths into a stable, de-duplicated scope."""
+    """Validate exact Git paths into a stable, de-duplicated scope."""
     try:
         return change_derivation.normalize_changed_files(changed_files)
     except change_derivation.ChangeDerivationError as exc:
@@ -351,7 +346,7 @@ def create_change_packet(
         "CHANGE_ID": change_id,
         "CREATED_AT": timestamp,
         "ORIGINAL_COMPLETED_SOURCE_HASH": source_hash,
-        "SCOPE_DELTA": "\n".join(f"- {value}" for value in scope),
+        "SCOPE_DELTA": "\n".join(f"- {json.dumps(value)}" for value in scope),
         "AFFECTED_ACS": "\n".join(f"- {value}" for value in acs),
         "DELIVERY_IMPACT": impact,
     }
@@ -401,7 +396,7 @@ def _packet_plan_tasks(impact: Mapping[str, Any], change_id: str) -> list[dict[s
             "id": f"{change_id}-T{index}",
             "description": str(affected.get("description") or _POLICY["task_defaults"]["description"]),
             "mode": str(affected.get("mode") or _POLICY["task_defaults"]["mode"]),
-            "files": ", ".join(str(value) for value in affected.get("files") or []),
+            "files": json.dumps(list(affected.get("files") or []), separators=(",", ":")),
             "acs": ", ".join(str(value) for value in affected.get("acs") or []),
             "proof": ", ".join(str(value) for value in affected.get("proof_kinds") or []),
             "verify": str(affected.get("verify") or _POLICY["task_defaults"]["verify"]),

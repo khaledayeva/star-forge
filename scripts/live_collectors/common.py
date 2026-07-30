@@ -183,42 +183,36 @@ def is_git_repo(project: Path) -> bool:
 def path_has_source_hash_excluded_part(rel_path: str | Path) -> bool:
     return any(part in SOURCE_HASH_EXCLUDED_PARTS for part in Path(rel_path).parts)
 def source_hash_dirty_entries(project: Path, entries: Sequence[str]) -> list[str]:
-    return [
-        line for line in entries
-        if (path := git_status_path(line)) and not path_has_source_hash_excluded_part(path)
-    ]
-def git_status_path(line: str) -> str:
-    return line[3:] if len(line) > 3 else line.strip()
+    return [path for path in entries if path and not path_has_source_hash_excluded_part(path)]
+def git_status_path(path: str) -> str:
+    return path
 def git_head(project: Path) -> str:
     code, out, _ = run_git(["rev-parse", "HEAD"], project)
     return out.strip() if code == 0 else ""
 def git_status(project: Path) -> list[str]:
-    try:
-        code, records, _ = run_git_path_records(
-            ["status", "--porcelain=v1", "-z", "--no-renames",
-             "--untracked-files=all", "--", "."],
-            project,
-        )
-        if code != 0 or any(
-            len(record) < 4 or record[2] != " " or not record[3:]
-            for record in records
-        ):
-            raise ValueError("Git status output contains a malformed record")
-        return [record[:2] + " " + record[3:] for record in records]
-    except ValueError:
-        return ["?? <git status unavailable>"]
+    code, records, error = run_git_path_records(
+        ["status", "--porcelain=v1", "-z", "--no-renames",
+         "--untracked-files=all", "--", "."],
+        project,
+    )
+    if code != 0:
+        raise ValueError("Git status unavailable: " + error.strip())
+    if any(len(record) < 4 or record[2] != " " or not record[3:]
+           for record in records):
+        raise ValueError("Git status output contains a malformed record")
+    return [record[3:] for record in records]
 def source_dirty_entries(project: Path) -> list[str]:
     return source_hash_dirty_entries(project, git_status(project))
 def source_tree_clean_at_head(project: Path) -> bool:
-    return bool(git_head(project)) and not source_dirty_entries(project)
+    try:
+        return bool(git_head(project)) and not source_dirty_entries(project)
+    except ValueError:
+        return False
 def source_snapshot_rel_paths(project: Path) -> set[str]:
     return {project_relative(project, path) for path in snapshot_file_candidates(project)}
 def dirty_paths_missing_from_source_snapshot(project: Path) -> list[str]:
     snapshot_paths = source_snapshot_rel_paths(project)
-    return [
-        line for line in source_dirty_entries(project)
-        if (path := git_status_path(line)) and path not in snapshot_paths
-    ]
+    return [path for path in source_dirty_entries(project) if path not in snapshot_paths]
 def _source_symlink_component(project: Path, path: Path) -> Path | None:
     project_root = project.resolve()
     candidate = _lexical_absolute(path)

@@ -257,7 +257,10 @@ def scan_paths(paths: Iterable[Path], project: Path) -> list[dict[str, Any]]:
                     findings.append({"severity": severity, "rule": rule, "file": rel, "line": idx, "evidence": line.strip()[:160]})
     return findings
 def tree_clean_for_commit_binding(project: Path) -> bool:
-    return not source_dirty_entries(git_status(project))
+    try:
+        return not source_dirty_entries(git_status(project))
+    except ValueError:
+        return False
 def _release_hashes(project: Path) -> dict[str, str | None]:
     paths = {"blueprint_hash": project / BLUEPRINT_FILE, "plan_hash": project / PLAN_FILE}
     return {name: live_common.file_sha256(path, root=project) if path.exists() else None for name, path in paths.items()}

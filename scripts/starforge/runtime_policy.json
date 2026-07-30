@@ -959,7 +959,6 @@
   "change_derivation.POLICY": {
     "doc_suffixes": [".md", ".mdx", ".rst", ".txt"],
     "empty_values": ["-", "none", "n/a", "na"],
-    "git_statuses": ["M", "A", "D", "R", "C", "U", "??"],
     "modes": {
       "docs": "docs",
       "code": "delegate",

@@ -3,10 +3,10 @@
 from __future__ import annotations
 import fnmatch
 import re
-from pathlib import PurePosixPath
+from pathlib import PurePosixPath, PureWindowsPath
 from typing import Any, Mapping, Sequence
 
-from .contracts import PLAN_PROOF_KINDS
+from .contracts import PLAN_PROOF_KINDS, task_file_values
 from .policy_data import value as _policy_value
 from .review_policy import RISK_FLAG_ORDER, select_review_policy
 
@@ -21,23 +21,15 @@ _DELIVERY_PROOFS_BY_TARGET = _policy_value('change_derivation._DELIVERY_PROOFS_B
 class ChangeDerivationError(ValueError):
     """The changed scope cannot produce a safe implementation plan."""
 def _normalize_scope_path(raw_path: str) -> str:
-    raw_value = str(raw_path or "").rstrip()
-    status = raw_value[:2]
-    if len(raw_value) >= 4 and raw_value[2] == " " and status.strip() in _POLICY["git_statuses"]:
-        value = raw_value[3:].strip()
-    else:
-        value = raw_value.strip()
-    value = value.strip('"')
-    if " -> " in value:
-        value = value.split(" -> ", 1)[1].strip().strip('"')
-    value = value.replace("\\", "/")
+    value = str(raw_path or "")
     candidate = PurePosixPath(value)
-    if not value or candidate.is_absolute() or any(part in {"", ".", ".."} for part in candidate.parts):
+    if ("\0" in value or not value or candidate.is_absolute()
+            or PureWindowsPath(value).is_absolute()
+            or any(part in {"", ".", ".."} for part in value.split("/"))):
         raise ChangeDerivationError("changed file paths must be normalized project-relative paths")
-    return candidate.as_posix()
-
+    return value
 def normalize_changed_files(changed_files: Sequence[str]) -> list[str]:
-    """Normalize Git status paths into a stable, de-duplicated scope."""
+    """Validate exact Git paths into a stable, de-duplicated scope."""
     if isinstance(changed_files, (str, bytes)) or not isinstance(changed_files, Sequence):
         raise ChangeDerivationError("changed_files must be a non-empty sequence")
     normalized: list[str] = []
@@ -61,7 +53,7 @@ def _values(raw_value: Any) -> list[str]:
             value.strip().casefold() not in _POLICY["empty_values"]]
 def _task_paths(task: Mapping[str, Any]) -> list[str]:
     paths: list[str] = []
-    for value in _values(task.get("files")):
+    for value in task_file_values(task.get("files")):
         try:
             normalized = _normalize_scope_path(value)
         except ChangeDerivationError:

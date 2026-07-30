@@ -255,7 +255,7 @@ class LegacyPlanMigrationTests(unittest.TestCase):
                 changes.create_or_select_change_packet(
                     project,
                     original_completed_source_hash=COMPLETED_SOURCE_HASH,
-                    changed_files=["M  src/app.py"],
+                    changed_files=["src/app.py"],
                     template_dir=TEMPLATES,
                 )
 
