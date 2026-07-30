@@ -19,7 +19,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
-
 SCRIPT_DIR = Path(__file__).resolve().parents[1]
 STAR_FORGE_SCRIPT = SCRIPT_DIR / "star_forge.py"
 if str(SCRIPT_DIR) not in sys.path:
@@ -45,14 +44,11 @@ globals().update(policy_bindings(
 ))
 globals().update(CONSTANTS)
 
-
 descriptor = render_descriptor
 _UNSET = object()
 
-
 class BrowserDependencyError(Exception):
     """Raised when Playwright or a required browser is unavailable."""
-
 
 @dataclass(frozen=True)
 class ArtifactPaths:
@@ -61,7 +57,6 @@ class ArtifactPaths:
     interaction: Path
     console: Path
     trace: Path
-
 
 @dataclass(frozen=True)
 class BrowserExecutionContext:
@@ -76,7 +71,6 @@ class BrowserExecutionContext:
     browser_name: str
     trace: bool
 
-
 @dataclass
 class BrowserExecutionResult:
     tool_versions: dict[str, Any] = field(default_factory=dict)
@@ -86,34 +80,25 @@ class BrowserExecutionResult:
     degraded: bool = False
     redaction_report: dict[str, int] = field(default_factory=dict)
 
-
 BrowserRunner = Callable[[BrowserExecutionContext], BrowserExecutionResult]
 
-
 problem = live_common.problem
-
 
 def is_blocking(item: Mapping[str, Any]) -> bool:
     return bool(item.get("blocking")) or str(item.get("severity", "")).lower() in BLOCKING_SEVERITIES
 
-
 merge_reports = live_common.merge_reports
-
 
 def write_json_artifact(path: Path, payload: Any) -> dict[str, int]:
     return live_common.write_json(path, payload)[1]
 
-
 read_json_file = live_common.read_json
-
 
 def resolve_project(raw: str) -> Path:
     return live_common.assert_collector_project_safe(Path(raw).expanduser())
 
-
 def maybe_call(value: Any) -> Any:
     return value() if callable(value) else value
-
 
 def load_playwright() -> tuple[Any, str]:
     try:
@@ -126,7 +111,6 @@ def load_playwright() -> tuple[Any, str]:
         version = "unknown"
     return sync_api, version
 
-
 def wait_for_url_contains(page: Any, text: str, timeout_ms: int) -> None:
     deadline = time.monotonic() + timeout_ms / 1000
     while time.monotonic() <= deadline:
@@ -134,7 +118,6 @@ def wait_for_url_contains(page: Any, text: str, timeout_ms: int) -> None:
             return
         page.wait_for_timeout(100)
     raise TimeoutError(f"URL did not contain {text!r} within {timeout_ms}ms")
-
 
 def wait_for_ready(page: Any, ready: Mapping[str, Any]) -> None:
     timeout_ms = int(ready.get("timeout_ms") or DEFAULT_TIMEOUT_MS)
@@ -144,7 +127,6 @@ def wait_for_ready(page: Any, ready: Mapping[str, Any]) -> None:
         wait_for_url_contains(page, str(ready["url_contains"]), timeout_ms)
     else:
         page.wait_for_load_state(str(ready.get("load_state") or "domcontentloaded"), timeout=timeout_ms)
-
 
 def perform_action(page: Any, action: Mapping[str, Any]) -> dict[str, Any]:
     action_type = str(action.get("type"))
@@ -166,7 +148,6 @@ def perform_action(page: Any, action: Mapping[str, Any]) -> dict[str, Any]:
     except Exception as exc:
         observation.update({"passed": False, "error": str(exc)})
     return observation
-
 
 def evaluate_assertion(page: Any, assertion: Mapping[str, Any], timeout_ms: int) -> dict[str, Any]:
     assertion_type = str(assertion.get("type"))
@@ -198,7 +179,6 @@ def evaluate_assertion(page: Any, assertion: Mapping[str, Any], timeout_ms: int)
         observation["error"] = str(exc)
     return observation
 
-
 def request_metadata(request: Any) -> dict[str, Any]:
     return descriptor(
         REQUEST_METADATA_TEMPLATE,
@@ -207,7 +187,6 @@ def request_metadata(request: Any) -> dict[str, Any]:
         resource_type=str(maybe_call(getattr(request, "resource_type", "")) or ""),
         navigation=bool(maybe_call(getattr(request, "is_navigation_request", False))),
     )
-
 
 def inspect_network_event(
     event: dict[str, Any],
@@ -240,7 +219,6 @@ def inspect_network_event(
     )
     result.problems.append(problem(message, rule=rule))
     return False
-
 
 def _run_playwright_scenario(context: BrowserExecutionContext) -> BrowserExecutionResult:
     sync_api, playwright_version = load_playwright()
@@ -437,7 +415,6 @@ def _run_playwright_scenario(context: BrowserExecutionContext) -> BrowserExecuti
     ))
     return result
 
-
 def validate_console_artifact(path: Path, project: Path, payload: Any = _UNSET) -> list[dict[str, Any]]:
     rel = live_common.project_relative(project, path)
     try:
@@ -456,7 +433,6 @@ def validate_console_artifact(path: Path, project: Path, payload: Any = _UNSET) 
         if phase == "after_ready" and level in {"warning", "error"}:
             problems.append(problem(f"console {level} after readiness: {event.get('text', '')}", rule="console-after-ready", path=rel))
     return problems
-
 
 def validate_interaction_artifact(path: Path, project: Path, payload: Any = _UNSET) -> list[dict[str, Any]]:
     rel = live_common.project_relative(project, path)
@@ -483,7 +459,6 @@ def validate_interaction_artifact(path: Path, project: Path, payload: Any = _UNS
                 problems.append(problem(failure_message, rule=rule, path=rel))
     return problems
 
-
 def validate_request_safety_artifact(path: Path, project: Path, *, allowed_local_origins: Sequence[str] = (), payload: Any = _UNSET) -> list[dict[str, Any]]:
     rel = live_common.project_relative(project, path)
     try:
@@ -494,13 +469,11 @@ def validate_request_safety_artifact(path: Path, project: Path, *, allowed_local
         return [problem("interaction evidence must be a JSON object", rule="interaction-evidence", path=rel)]
     return validate_request_safety_payload(payload, allowed_local_origins=allowed_local_origins, path=rel)
 
-
 def validate_image_artifact(path: Path, project: Path) -> list[dict[str, Any]]:
     rel = live_common.project_relative(project, path)
     record = live_common.artifact_record(project, path, kind="screenshot")
     messages = failed_checks(record, IMAGE_ARTIFACT_CHECKS)
     return [problem(messages[0], rule="screenshot", path=rel)] if messages else []
-
 
 def validate_output_artifacts(context: BrowserExecutionContext) -> list[dict[str, Any]]:
     problems: list[dict[str, Any]] = []
@@ -517,10 +490,8 @@ def validate_output_artifacts(context: BrowserExecutionContext) -> list[dict[str
         problems.append(problem("trace was requested but trace.zip was not written", rule="trace", path=live_common.project_relative(context.project, context.paths.trace)))
     return problems
 
-
 def build_artifact_paths(root: Path) -> ArtifactPaths:
     return ArtifactPaths(**{name: root / filename for name, filename in ARTIFACT_FILENAMES.items()})
-
 
 def build_handoff_argv(
     project: Path,
@@ -556,7 +527,6 @@ def build_handoff_argv(
     argv.append("--strict")
     return argv
 
-
 def record_browser_run(project: Path, handoff_argv: Sequence[str]) -> dict[str, Any]:
     payload = live_common.run_trusted_command(
         handoff_argv, cwd=project, script_path=STAR_FORGE_SCRIPT
@@ -569,7 +539,6 @@ def record_browser_run(project: Path, handoff_argv: Sequence[str]) -> dict[str, 
     except Exception:
         pass
     return payload
-
 
 def collector_argv_from_args(args: argparse.Namespace) -> list[str]:
     argv = descriptor(
@@ -587,7 +556,6 @@ def collector_argv_from_args(args: argparse.Namespace) -> list[str]:
     if args.record:
         argv.append("--record")
     return argv
-
 
 def write_evidence_envelope(project: Path, manifest_path: Path) -> tuple[Path, dict[str, Any]]:
     """Adapt the compatibility manifest to source-bound v2 fallback evidence."""
@@ -609,7 +577,6 @@ def write_evidence_envelope(project: Path, manifest_path: Path) -> tuple[Path, d
         project_root=project,
         verify_artifacts=True,
     )
-
 
 def collect(args: argparse.Namespace, *, runner: BrowserRunner | None = None) -> tuple[int, dict[str, Any]]:
     project = resolve_project(args.project)
@@ -782,13 +749,11 @@ def collect(args: argparse.Namespace, *, runner: BrowserRunner | None = None) ->
     ) else 0
     return code, payload
 
-
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Collect local Playwright browser evidence for Star Forge browser-run")
     for flags, kwargs in PARSER_ARGUMENTS:
         parser.add_argument(*flags, **kwargs)
     return parser
-
 
 def main(argv: Sequence[str] | None = None, *, runner: BrowserRunner | None = None) -> int:
     parser = build_parser()
@@ -796,7 +761,6 @@ def main(argv: Sequence[str] | None = None, *, runner: BrowserRunner | None = No
     code, payload = collect(args, runner=runner)
     print(json.dumps(payload, indent=2, sort_keys=True))
     return code
-
 
 if __name__ == "__main__":
     raise SystemExit(main())

@@ -17,7 +17,7 @@ if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
 from live_collectors import common as live_common
-from starforge import evidence, lifecycle
+from starforge import evidence, lifecycle, runtime_support
 
 
 FIXTURES = ROOT / "fixtures" / "evidence-v2"
@@ -140,7 +140,10 @@ def test_secret_material_is_rejected_anywhere_in_the_envelope() -> None:
     payload = fixture()
     payload["blockers"] = ["collector leaked " + "sk-" + "abcdefghijklmnopqrstuvwxyz"]
     raises("secret material", evidence.validate_envelope, payload)
-    for key in ("accessToken", "clientSECRET", "privateKey", "authHeader"):
+    for key in (
+        "accessToken", "clientSECRET", "privateKey", "authHeader",
+        "aCcEsStOkEn", "clientSeCrEt", "ApiKeY",
+    ):
         payload = fixture()
         payload["provenance"][key] = "opaque-provider-credential-123456789"
         raises("secret material", evidence.validate_envelope, payload)
@@ -149,6 +152,15 @@ def test_secret_material_is_rejected_anywhere_in_the_envelope() -> None:
             {key: "opaque-provider-credential-123456789"})
         assert cleaned[key] == "[REDACTED]"
         assert report["sensitive_keys"] == 1
+        assert runtime_support.redact(
+            {key: "opaque-provider-credential-123456789"})[key] == "[REDACTED]"
+    metadata = {"credentials_required": False, "credentials_available": True}
+    payload = fixture()
+    payload["provenance"].update(metadata)
+    evidence.validate_envelope(payload)
+    assert lifecycle._secret_problems(metadata) == []
+    assert live_common.redact_sensitive_values(metadata)[0] == metadata
+    assert runtime_support.redact(metadata) == metadata
 
 
 def test_writer_is_atomic_validated_and_leaves_no_temporary_file() -> None:
@@ -227,6 +239,22 @@ def test_v1_degradation_and_blocking_problems_map_to_honest_verdicts() -> None:
     legacy["problems"][0]["blocking"] = False
     adapted = evidence.adapt_v1_manifest(legacy)
     assert adapted["verdict"] == "DEGRADED"
+
+
+def test_legacy_lifecycle_reader_fails_closed_on_malformed_checks() -> None:
+    valid = json.loads((ROOT / "fixtures/foundation/local-only-evidence.json").read_text())
+    with tempfile.TemporaryDirectory() as tmp:
+        target = Path(tmp) / "foundation.json"
+        target.write_text(json.dumps(valid), encoding="utf-8")
+        assert evidence.read_envelope(target)["verdict"] == "PASS"
+        for checks in ({}, {"source_scaffold": "satisfied"},
+                       {"source_scaffold": {"state": "garbage"}}):
+            broken = copy.deepcopy(valid)
+            broken["checks"] = checks
+            target.write_text(json.dumps(broken), encoding="utf-8")
+            adapted = evidence.read_envelope(target)
+            assert adapted["verdict"] == "FAIL"
+            assert adapted["blockers"]
 
 
 def test_v1_adapter_rejects_unsafe_paths_and_secret_bearing_provenance() -> None:

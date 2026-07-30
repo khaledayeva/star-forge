@@ -388,11 +388,27 @@ def done_verdict(blocking: Sequence[Any], advisory_reasons: Sequence[str], waive
     verdicts = REVIEW_POLICY["done_verdicts"]
     verdict = verdicts["blocked"] if blocking else f"{verdicts['complete']} (advisory: {'; '.join(advisory_reasons)})" if advisory_reasons else verdicts["complete"]
     return verdict + (f" [{waive_count} waived finding(s)]" if verdict.startswith(verdicts["complete"]) and waive_count else "")
+def preserve_done_binding(project: Path, snapshot: Mapping[str, Any], scope: str,
+                          problems: list[dict[str, Any]]) -> bool:
+    current = proof_binding_matches(
+        project, str(snapshot.get("git_head") or ""),
+        str(snapshot.get("source_hash") or ""), scope)
+    if not current and not any(item.get("rule") == "git-proof-binding" for item in problems):
+        problems.append({"severity": "high", "rule": "git-proof-binding",
+                         "message": "Git state changed while strict completion gates were evaluated."})
+    return current
 def done_payload(project: Path) -> dict[str, Any]:
     problems: list[dict[str, Any]] = []
     tasks: list[dict[str, Any]] = []
     profile_lock = fast_mvp_profile_lock_state(project)
     hash_problem = source_hash_unavailable_problem(project)
+    snapshot, snapshot_problem = safe_release_snapshot(project)
+    scope = scope_hash(project) or "noscope"
+    binding_current = bool(
+        not hash_problem and not snapshot_problem
+        and preserve_done_binding(project, snapshot, scope, problems))
+    if snapshot_problem and not hash_problem:
+        problems.append(finding_problem(snapshot_problem))
     lifecycle_contract = blueprint_lifecycle_contract(project)
     if not blueprint_is_approved(project):
         problems.append({"severity": "critical", "message": REVIEW_POLICY["done_messages"]["blueprint"]})
@@ -415,10 +431,12 @@ def done_payload(project: Path) -> dict[str, Any]:
             problems.append({"severity": "critical", "message": str(exc)})
     if hash_problem:
         problems.append(finding_problem(hash_problem))
-    else:
-        gate_findings = [finding for finder in (verify_findings, browser_findings) for finding in finder(project, tasks)]
-        gate_findings.extend(review_findings_for_done(project, tasks))
-        problems.extend(finding_problem(finding) for finding in gate_findings if finding["severity"] in BLOCKING_SEVERITIES)
+    elif not snapshot_problem:
+        for finder in (verify_findings, browser_findings):
+            gate_findings = finder(project, tasks)
+            problems.extend(finding_problem(finding) for finding in gate_findings if finding["severity"] in BLOCKING_SEVERITIES)
+            if binding_current:
+                binding_current = preserve_done_binding(project, snapshot, scope, problems)
     repository_available, repository_head = is_git_repo(project), git_head(project)
     try:
         status_entries = git_status(project)
@@ -452,20 +470,23 @@ def done_payload(project: Path) -> dict[str, Any]:
         if drift.get("actionable"):
             problems.append({"severity": "high", "rule": "post-proof-change-packet-required",
                              "message": "Repository drift after a final proof requires a completed, approved, source-fresh change packet before done can pass."})
-    snapshot, snapshot_problem = safe_release_snapshot(project)
-    if snapshot_problem and not hash_problem:
-        problems.append(finding_problem(snapshot_problem))
     if not repository_problem and snapshot.get("git_head") != repository_head:
         problems.append({"severity": "high", "rule": "git-head-changed", "message": "Git HEAD changed during strict completion."})
-    current_source_hash, lifecycle_hash_problem = try_source_hash(project)
-    foundation_gate, delivery_gate, lifecycle_problems = done_lifecycle_gates(project, lifecycle_contract, current_source_hash)
+    foundation_gate, delivery_gate, lifecycle_problems = done_lifecycle_gates(
+        project, lifecycle_contract, str(snapshot.get("source_hash") or "") or None)
     problems.extend(lifecycle_problems)
-    if lifecycle_hash_problem and not hash_problem:
-        problems.append(finding_problem(lifecycle_hash_problem))
-    blocking = blocking_items(problems)
+    if binding_current:
+        binding_current = preserve_done_binding(project, snapshot, scope, problems)
+    if not hash_problem and not snapshot_problem:
+        review_findings = review_findings_for_done(project, tasks)
+        problems.extend(finding_problem(finding) for finding in review_findings if finding["severity"] in BLOCKING_SEVERITIES)
+        if binding_current:
+            binding_current = preserve_done_binding(project, snapshot, scope, problems)
     enforcement = enforcement_mode(project)
-    scope = scope_hash(project) or "noscope"
-    merged = None if hash_problem else (merge_review(project, scope) if load_merged_review(project, scope) is not None else None)
+    merged = None if hash_problem or not binding_current else (merge_review(project, scope) if load_merged_review(project, scope) is not None else None)
+    if binding_current:
+        binding_current = preserve_done_binding(project, snapshot, scope, problems)
+    blocking = blocking_items(problems)
     witness, advisory_reasons, waive_count = done_witness(project, tasks, merged, enforcement)
     verdict = done_verdict(blocking, advisory_reasons, waive_count)
     return project_record(
@@ -482,7 +503,8 @@ def detect_drift(project: Path, proof: dict[str, Any] | None) -> dict[str, Any]:
     head_changed = proof.get("head") != current_head
     source_changed = proof.get("source_hash") != current_source
     scope_changed = (proof.get("scope_hash") or "noscope") != current_scope
-    changed = (source_dirty_entries(git_status(project)) or _diff_since(project, proof.get("head"))) if source_changed or head_changed else []
+    changed = list(dict.fromkeys([*source_dirty_entries(_diff_since(project, proof.get("head"))),
+                                  *source_dirty_entries(git_status(project))])) if source_changed or head_changed else []
     return policy_mapping("drift", detected=bool(head_changed or source_changed or scope_changed or not proof_is_current(project, proof)), head_changed=head_changed, source_changed=source_changed, scope_changed=scope_changed, changed_files=changed)
 def completed_task_matches_source(project: Path, task_id: str, current: str, *, attest_task: bool = False) -> bool:
     payload = load_optional_json(project / STATE_SUBDIR / f"complete-task-{slugify(task_id)}.json")
@@ -495,7 +517,7 @@ def completed_amendment_covering_drift(project: Path, tasks: Sequence[dict[str, 
 def change_scope_files(drift: Mapping[str, Any]) -> list[str]:
     paths = project_changes.normalize_changed_files(drift.get("changed_files") or [])
     return [path for path in paths if path and not path.startswith(".starforge/")
-            and not path.endswith(project_contracts.BLUEPRINT_LOCK_FILE)]
+            and path != project_contracts.BLUEPRINT_LOCK_FILE]
 def change_packet_for_drift(project: Path, drift: Mapping[str, Any],
                             proof: Mapping[str, Any] | None) -> dict[str, Any] | None:
     if not drift.get("detected") or not proof:
@@ -525,7 +547,7 @@ def completed_change_packet_covering_drift(
         project: Path, drift: Mapping[str, Any], proof: Mapping[str, Any] | None,
         *, require_current_proof: bool = False) -> str | None:
     packet = change_packet_for_drift(project, drift, proof)
-    if not packet or packet["approval_state"] != "approved":
+    if not packet or packet["approval_state"] != "approved" or not packet.get("approval_identity_bound"):
         return None
     try:
         tasks = project_changes.change_plan_tasks(project, packet["change_id"])

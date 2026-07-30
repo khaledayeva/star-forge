@@ -146,6 +146,18 @@ def test_web_delivery_routes_follow_the_contract_provider_not_target_aliases() -
     assert decisions_by_need(legacy)["sites-delivery"].selected["id"] == "sites"
 
 
+def test_conflicting_delivery_selectors_fail_closed() -> None:
+    for target, provider in (("sites", "vercel"), ("vercel", "sites")):
+        try:
+            routing.resolve_routes(
+                delivery_target=target, delivery_provider=provider,
+                available_capabilities=["sites", "vercel"])
+        except routing.RoutingError as exc:
+            assert "resolve to one provider" in str(exc)
+        else:
+            raise AssertionError("conflicting delivery selectors were accepted")
+
+
 def test_missing_preferred_capability_reports_selected_fallback() -> None:
     result = routing.resolve_routes(
         project_class="web",

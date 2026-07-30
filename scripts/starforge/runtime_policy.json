@@ -185,6 +185,7 @@
       "unsafe_shell": "route {route_id} option {option_id} cannot be an automatic unsafe shell fallback",
       "unknown_needs": "unknown required needs: {needs}",
       "catalog_conflict": "pass catalog or catalog_path, not both",
+      "delivery_conflict": "Sites and Vercel delivery selectors must resolve to one provider",
       "material_conflict": "material needs must also be required: {needs}",
       "option_unavailable": "route {route_id} has no available option or explicit blocker"
     }
@@ -592,6 +593,7 @@
         "blocked": "blocked_evidence"
       },
       "problems": {
+        "duplicate_id": ["high", "duplicate task ID `{task_id}`; task IDs must be unique"],
         "invalid_status": ["high", "invalid status `{status}`"],
         "invalid_mode": ["medium", "invalid mode `{mode}`; use solo, delegate, or docs"],
         "missing_verify": ["high", "missing verify command; name a real verification command or set mode=docs"],
@@ -619,6 +621,7 @@
     "errors": {
       "missing_plan": "{path} does not exist",
       "unparsed_task_table": "Plan.md contains a task-like table that did not parse to any tasks. The header row must use exact `Task` and `Status` columns followed by a `|---|` separator row.",
+      "task_ambiguous": "Task {task} is ambiguous across project Plans: {plans}",
       "task_not_found": "Task {task} not found in {path}"
     },
     "lifecycle": {
@@ -3021,7 +3024,7 @@
     "defaults": {"detected": false, "changed_files": []}
   },
   "mappings.live_proof_record": {
-    "fields": ["kind", "created_at", "project", "task", "strict", "inputs", "verdict", "source_snapshot", "runtime_asset_hash", "manifest", "collector", "artifacts", "problems", "summary"],
+    "fields": ["kind", "created_at", "project", "task", "strict", "inputs", "verdict", "source_snapshot", "runtime_asset_hash", "manifest", "collector", "evidence_envelope", "artifacts", "problems", "summary"],
     "defaults": {}
   },
   "mappings.learning_source_project": {

@@ -34,7 +34,6 @@ from live_collectors.policy_data import policy_dict, policy_list
 from live_collectors.provider_engine import render_descriptor
 from starforge import evidence
 
-
 COLLECTOR = "preview"
 CAPABILITY = "preview-verification"
 EVIDENCE_FILENAME = "evidence.v2.json"
@@ -44,15 +43,12 @@ DEFAULT_USER_AGENT = SETTINGS["default_user_agent"]
 LOCAL_HOSTNAMES = set(SETTINGS["local_hostnames"])
 TEMPLATES = policy_dict("preview", "PAYLOAD_TEMPLATES")
 
-
 git_head = common.git_head
 git_status_path = common.git_status_path
 source_tree_clean_at_head = common.source_tree_clean_at_head
 dirty_paths_missing_from_source_snapshot = common.dirty_paths_missing_from_source_snapshot
 
-
 evidence_provider = partial(common.sanitize_segment, fallback="provider-neutral")
-
 
 def write_evidence_envelope(
     project: Path,
@@ -75,12 +71,9 @@ def write_evidence_envelope(
     )
     return envelope_path, written
 
-
 problem = partial(common.problem, include_empty_path=True)
 
-
 sensitive_name = common.sensitive_key_name
-
 
 def sensitive_value(value: str) -> bool:
     lowered = value.lower()
@@ -88,17 +81,14 @@ def sensitive_value(value: str) -> bool:
         ("bearer ", "basic ")
     ) or "authorization:" in lowered
 
-
 def safe_url_for_artifact(url: str) -> str:
     parsed = urllib.parse.urlparse(url or "")
     if not parsed.scheme:
         return "[invalid-url]"
     cleaned, _ = common.redact_sensitive_values(url)
-    return str(cleaned).replace("[REDACTED_SECRET]", "[REDACTED]")
-
+    return str(cleaned).replace("[REDACTED_SECRET]", "[REDACTED]").replace("%5BREDACTED_SECRET%5D", "[REDACTED]")
 
 parse_ip = browser_safety.parse_ip
-
 
 def is_blocked_ip(ip: ipaddress._BaseAddress, *, explicit_local_allowed: bool) -> str | None:
     if ip.is_loopback:
@@ -111,13 +101,11 @@ def is_blocked_ip(ip: ipaddress._BaseAddress, *, explicit_local_allowed: bool) -
     ), None)
     return reason or ("non-global IP targets are not allowed" if not ip.is_global else None)
 
-
 def _preview_lease_problems(items: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     return [
         {**item, "rule": "preview-localhost"} if item.get("rule") == "server-lease"
         else dict(item) for item in items
     ]
-
 
 def validate_server_lease(project: Path, raw_lease: str, url: str, *, source_hash: str, runtime_hash: str) -> tuple[bool, list[dict[str, Any]]]:
     if not raw_lease:
@@ -134,7 +122,6 @@ def validate_server_lease(project: Path, raw_lease: str, url: str, *, source_has
     except Exception as exc:
         return False, [problem(f"server lease is invalid: {exc}", rule="preview-localhost", path=str(raw_lease))]
     return payload is not None and not problems, problems
-
 
 def validate_url_safety_with_ips(url: str, *, allow_local: bool) -> tuple[list[dict[str, Any]], set[str]]:
     problems: list[dict[str, Any]] = []
@@ -168,10 +155,8 @@ def validate_url_safety_with_ips(url: str, *, allow_local: bool) -> tuple[list[d
             problems.append(problem(f"preview URL resolved to unsafe address {ip}: {blocked}", rule="preview-url"))
     return problems, {str(ip) for ip in ips}
 
-
 def validate_url_safety(url: str, *, allow_local: bool) -> list[dict[str, Any]]:
     return validate_url_safety_with_ips(url, allow_local=allow_local)[0]
-
 
 def host_header_for_url(parsed: urllib.parse.ParseResult) -> str:
     host = parsed.hostname or ""
@@ -179,7 +164,6 @@ def host_header_for_url(parsed: urllib.parse.ParseResult) -> str:
         host = f"[{host}]"
     default_port = 443 if parsed.scheme == "https" else 80
     return f"{host}:{parsed.port}" if parsed.port and parsed.port != default_port else host
-
 
 def pinned_http_get(
     url: str, headers: Mapping[str, str], validated_ips: set[str],
@@ -215,7 +199,6 @@ def pinned_http_get(
     finally:
         conn.close()
 
-
 def parse_headers(raw_headers: Sequence[str]) -> tuple[dict[str, str], list[dict[str, Any]]]:
     headers = {"User-Agent": DEFAULT_USER_AGENT}
     problems: list[dict[str, Any]] = []
@@ -230,13 +213,11 @@ def parse_headers(raw_headers: Sequence[str]) -> tuple[dict[str, str], list[dict
         headers[name] = value
     return headers, problems
 
-
 def _header_parts(raw: str) -> tuple[str, str, str]:
     name, sep, value = raw.partition(":")
     if not sep:
         name, sep, value = raw.partition("=")
     return name.strip(), sep, value.strip()
-
 
 def sanitize_headers(headers: Mapping[str, str]) -> tuple[dict[str, str], dict[str, int]]:
     ordered = sorted(headers.items(), key=lambda item: item[0].lower())
@@ -251,7 +232,6 @@ def sanitize_headers(headers: Mapping[str, str]) -> tuple[dict[str, str], dict[s
     redactions = pre_redactions + int(report.get("secret_values") or 0) + int(report.get("sensitive_keys") or 0)
     return safe, {"header_values": redactions}
 
-
 def safe_header_arg(raw: str) -> str:
     name, sep, value = _header_parts(raw)
     if not sep:
@@ -259,7 +239,6 @@ def safe_header_arg(raw: str) -> str:
     if sensitive_name(name) or sensitive_value(value):
         return f"{name}=[REDACTED]"
     return raw
-
 
 def safe_command_argv(raw_argv: Sequence[str]) -> list[str]:
     safe = list(raw_argv)
@@ -275,7 +254,6 @@ def safe_command_argv(raw_argv: Sequence[str]) -> list[str]:
             safe[index] = "--header=" + safe_header_arg(item.split("=", 1)[1])
     return safe
 
-
 def skipped_http_payload(
     args: argparse.Namespace, headers: Mapping[str, str],
     problems: Sequence[Mapping[str, Any]],
@@ -289,7 +267,6 @@ def skipped_http_payload(
         render_descriptor(TEMPLATES["skipped_http"], values),
         render_descriptor(TEMPLATES["headers"], values), "",
     )
-
 
 def fetch_http(
     args: argparse.Namespace, headers: Mapping[str, str], allow_local: bool,
@@ -365,7 +342,6 @@ def fetch_http(
     headers_payload = render_descriptor(TEMPLATES["headers"], values)
     return http_payload, headers_payload, body_text, problems
 
-
 def run_smoke_checks(
     args: argparse.Namespace, body: str, headers_payload: Mapping[str, Any],
     http_payload: Mapping[str, Any],
@@ -417,7 +393,6 @@ def run_smoke_checks(
         "smoke_passed": all(item["passed"] for item in results), "checks": results,
     })
     return payload, problems
-
 
 def build_deployment_payload(
     args: argparse.Namespace,
@@ -472,7 +447,6 @@ def build_deployment_payload(
             problems.append(problem("local build artifact alone cannot prove the remote preview", rule="preview-source-binding"))
     return payload, problems
 
-
 def proof_command_for_project(
     args: argparse.Namespace, project: Path, project_arg: str,
     artifacts: Mapping[str, Path],
@@ -488,7 +462,6 @@ def proof_command_for_project(
         for token in policy_list("preview", "COMMAND_TEMPLATE")
     ]
 
-
 def run_record_command(command: Sequence[str]) -> int:
     result = common.run_trusted_command(command, cwd=PLUGIN_ROOT, script_path=STAR_FORGE)
     if result["stdout"]:
@@ -496,7 +469,6 @@ def run_record_command(command: Sequence[str]) -> int:
     if result["stderr"]:
         print(result["stderr"], end="", file=sys.stderr)
     return int(result["returncode"])
-
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Collect provider-neutral preview URL evidence")
@@ -507,7 +479,6 @@ def build_parser() -> argparse.ArgumentParser:
             kwargs["type"] = types[kwargs["type"]]
         parser.add_argument(option["name"], **kwargs)
     return parser
-
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(list(argv) if argv is not None else None)
@@ -646,7 +617,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     output["proof_command_shell"] = shlex.join(command)
     print(json.dumps(output, indent=2, sort_keys=True))
     return run_record_command(record_command) if args.record else 1 if degraded else 0
-
 
 if __name__ == "__main__":
     raise SystemExit(main())

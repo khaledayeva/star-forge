@@ -246,6 +246,9 @@ def resolve_routes(*, catalog: Mapping[str, Any] | None = None,
     inputs = locals()
     request = make_request(**{
         name: inputs[name] for name in ROUTING_POLICY["request_inputs"].values()})
+    providers, legacy = set(request.delivery_providers), set(request.delivery_targets) & {"sites", "vercel"}
+    _require(len(providers) <= 1 and len(legacy) <= 1
+             and not (providers and legacy and providers != legacy), "delivery_conflict")
     route_ids = set(required_needs_for_request(active_catalog, request))
     unknown_material = set(request.material_needs) - route_ids
     if unknown_material:

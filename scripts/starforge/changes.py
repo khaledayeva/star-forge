@@ -1,6 +1,7 @@
 """Isolated v0.4 change packets and read-only amendment history."""
 from __future__ import annotations
 import datetime as dt
+import hashlib
 import json
 import re
 from pathlib import Path, PurePosixPath
@@ -15,8 +16,10 @@ CHANGE_PLAN_FILE = "Plan.md"
 CHANGE_EVIDENCE_DIR = "evidence"
 CHANGE_REVIEW_DIR = "review"
 CHANGE_IMPACT_FILE = "impact.json"
+CHANGE_APPROVAL_FILE = "approval.json"
 CHANGE_SCHEMA = "star-forge.change-packet.v1"
 CHANGE_IMPACT_SCHEMA = change_derivation.CHANGE_IMPACT_SCHEMA
+CHANGE_APPROVAL_SCHEMA = "star-forge.change-approval.v1"
 CHANGE_APPROVAL_STATES = frozenset(_POLICY["approval_states"])
 CHANGE_TEMPLATE_FILE = "Change.md"
 CHANGE_PLAN_TEMPLATE_FILE = "ChangePlan.md"
@@ -147,31 +150,18 @@ def normalize_changed_files(changed_files: Sequence[str]) -> list[str]:
         return change_derivation.normalize_changed_files(changed_files)
     except change_derivation.ChangeDerivationError as exc:
         raise ChangePacketError(str(exc)) from exc
-def derive_change_impact(
-    *,
-    changed_files: Sequence[str],
-    root_tasks: Sequence[Mapping[str, Any]],
-    blueprint_text: str = "",
-    delivery_contract: Mapping[str, Any] | None = None,
-    profile: str = "standard",
-) -> dict[str, Any]:
+def derive_change_impact(*, changed_files: Sequence[str], root_tasks: Sequence[Mapping[str, Any]],
+                         blueprint_text: str = "", delivery_contract: Mapping[str, Any] | None = None,
+                         profile: str = "standard") -> dict[str, Any]:
     """Derive packet tasks, risk policy, and proof from the actual changed scope."""
     try:
         return change_derivation.derive_change_impact(
-            changed_files=changed_files,
-            root_tasks=root_tasks,
-            blueprint_text=blueprint_text,
-            delivery_contract=delivery_contract,
-            profile=profile,
-        )
+            changed_files=changed_files, root_tasks=root_tasks, blueprint_text=blueprint_text,
+            delivery_contract=delivery_contract, profile=profile)
     except change_derivation.ChangeDerivationError as exc:
         raise ChangePacketError(str(exc)) from exc
-def derive_change_impact_for_project(
-    project: Path,
-    changed_files: Sequence[str],
-    *,
-    profile: str = "standard",
-) -> dict[str, Any]:
+def derive_change_impact_for_project(project: Path, changed_files: Sequence[str], *,
+                                     profile: str = "standard") -> dict[str, Any]:
     """Load the root contracts and derive one change impact without mutation."""
     root = project.resolve()
     try:
@@ -202,12 +192,8 @@ def derive_change_impact_for_project(
     if unmapped:
         raise ChangePacketError(_POLICY["messages"]["unmapped_plan"] + ", ".join(unmapped))
     return derive_change_impact(
-        changed_files=changed_files,
-        root_tasks=root_tasks,
-        blueprint_text=blueprint_text,
-        delivery_contract=delivery_contract,
-        profile=profile,
-    )
+        changed_files=changed_files, root_tasks=root_tasks, blueprint_text=blueprint_text,
+        delivery_contract=delivery_contract, profile=profile)
 def validate_change_packet(payload: Any) -> list[str]:
     """Return deterministic schema problems for a parsed change packet."""
     if not isinstance(payload, Mapping):
@@ -315,18 +301,12 @@ def read_change_packet(project: Path, change_id: str) -> dict[str, Any]:
         if impact.get("change_id") != change_id:
             raise ChangePacketError(f"{CHANGE_IMPACT_FILE} does not match packet {change_id}")
         record["impact"] = impact
+    identity = _read_approval_identity(project, record)
+    record["approval_identity_bound"] = identity is not None
     return record
-def create_change_packet(
-    project: Path,
-    *,
-    change_id: str,
-    original_completed_source_hash: str,
-    scope_delta: Sequence[str],
-    affected_acs: Sequence[str],
-    delivery_impact: str,
-    created_at: str | None = None,
-    template_dir: Path | None = None,
-) -> dict[str, Any]:
+def create_change_packet(project: Path, *, change_id: str, original_completed_source_hash: str,
+                         scope_delta: Sequence[str], affected_acs: Sequence[str], delivery_impact: str,
+                         created_at: str | None = None, template_dir: Path | None = None) -> dict[str, Any]:
     """Atomically create one draft packet without changing root project sources."""
     root = project.resolve()
     packet = _packet_root(root, change_id)
@@ -375,6 +355,39 @@ def _read_packet_plan(project: Path, change_id: str) -> tuple[Path, str]:
         return path, safe_io.read_text(project.resolve(), path)
     except (OSError, UnicodeError) as exc:
         raise ChangePacketError(f"packet Plan.md cannot be read: {exc}") from exc
+_IDENTITY_CHANGE_FIELDS = ("schema", "change_id", "created_at", "original_completed_source_hash",
+                           "scope_delta", "affected_acs", "delivery_impact")
+_IDENTITY_TASK_FIELDS = ("id", "description", "mode", "files", "depends", "acs", "proof", "verify")
+def _task_identity(task: Mapping[str, Any]) -> dict[str, str]:
+    return {field: str(task.get(field) or "") for field in _IDENTITY_TASK_FIELDS}
+def _packet_identity(project: Path, packet: Mapping[str, Any]) -> str:
+    impact = packet.get("impact")
+    if not isinstance(impact, Mapping):
+        return ""
+    tasks = parse_plan_tasks_text(_read_packet_plan(project, str(packet["change_id"]))[1])
+    value = {"change": {field: packet[field] for field in _IDENTITY_CHANGE_FIELDS},
+             "impact": dict(impact), "tasks": [_task_identity(task) for task in tasks]}
+    encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+                         allow_nan=False).encode()
+    return hashlib.sha256(encoded).hexdigest()
+def _read_approval_identity(project: Path, packet: Mapping[str, Any]) -> dict[str, Any] | None:
+    path = _packet_root(project, str(packet["change_id"])) / CHANGE_APPROVAL_FILE
+    if not (path.exists() or path.is_symlink()):
+        return None
+    try:
+        payload = json.loads(safe_io.read_text(project.resolve(), path))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ChangePacketError(f"{CHANGE_APPROVAL_FILE} cannot be read: {exc}") from exc
+    valid = (isinstance(payload, dict) and payload.get("schema") == CHANGE_APPROVAL_SCHEMA
+             and payload.get("change_id") == packet["change_id"]
+             and isinstance(payload.get("approved_at"), str)
+             and _valid_iso8601(payload["approved_at"])
+             and _SHA256_RE.fullmatch(str(payload.get("identity_sha256") or "")))
+    if not valid or payload["identity_sha256"] != _packet_identity(project, packet):
+        raise ChangePacketError("change packet approval identity does not match scope, impact, and Plan")
+    if packet["approval_state"] == "approved" and payload["approved_at"] != packet["approved_at"]:
+        raise ChangePacketError("change packet approval timestamp does not match approval identity")
+    return payload
 def _replace_plan_table(text: str, tasks: Sequence[Mapping[str, Any]]) -> str:
     lines = text.splitlines()
     header = "| " + " | ".join(_POLICY["plan_columns"]) + " |"
@@ -388,14 +401,36 @@ def _replace_plan_table(text: str, tasks: Sequence[Mapping[str, Any]]) -> str:
     replacement = serialize_plan_tasks(tasks, version="v2").rstrip().splitlines()
     lines[start:end] = replacement
     return "\n".join(lines).rstrip() + "\n"
-def _packet_plan_tasks(impact: Mapping[str, Any], change_id: str) -> list[dict[str, str]]:
+def _reserved_project_task_ids(project: Path, *, exclude_change_id: str = "") -> set[str]:
+    locations: dict[str, list[str]] = {}
+    root_plan = project.resolve() / "Plan.md"
+    groups = [("Plan.md", parse_plan_tasks_text(safe_io.read_text(project.resolve(), root_plan)))] if root_plan.exists() else []
+    for packet in list_change_packets(project):
+        if packet["change_id"] != exclude_change_id:
+            groups.append((str(Path(packet["path"]) / packet["plan_path"]), change_plan_tasks(project, packet["change_id"])))
+    for label, tasks in groups:
+        for task in tasks:
+            locations.setdefault(str(task["id"]), []).append(f"{label}:{task.get('line')}")
+    duplicates = {task_id: paths for task_id, paths in locations.items() if len(paths) > 1}
+    if duplicates:
+        detail = "; ".join(f"{task_id} at {', '.join(paths)}" for task_id, paths in sorted(duplicates.items()))
+        raise ChangePacketError("ambiguous task IDs across project Plans: " + detail)
+    return set(locations)
+def _packet_plan_tasks(impact: Mapping[str, Any], change_id: str,
+                       reserved_ids: set[str]) -> list[dict[str, str]]:
     tasks: list[dict[str, str]] = []
-    for index, affected in enumerate(impact.get("affected_tasks") or [], start=1):
+    task_number = 1
+    for affected in impact.get("affected_tasks") or []:
         if not isinstance(affected, Mapping):
             continue
+        while f"{change_id}-T{task_number}" in reserved_ids:
+            task_number += 1
+        task_id = f"{change_id}-T{task_number}"
+        reserved_ids.add(task_id)
+        task_number += 1
         values = {
             **_POLICY["task_defaults"],
-            "id": f"{change_id}-T{index}",
+            "id": task_id,
             "description": str(affected.get("description") or _POLICY["task_defaults"]["description"]),
             "mode": str(affected.get("mode") or _POLICY["task_defaults"]["mode"]),
             "files": json.dumps(list(affected.get("files") or []), separators=(",", ":")),
@@ -407,6 +442,27 @@ def _packet_plan_tasks(impact: Mapping[str, Any], change_id: str) -> list[dict[s
     if not tasks:
         raise ChangePacketError("derived change impact has no affected tasks")
     return tasks
+def _approval_identity_payload(project: Path, packet: Mapping[str, Any],
+                               approved_at: str) -> dict[str, str] | None:
+    impact = packet.get("impact")
+    if not isinstance(impact, Mapping) or "profile" not in impact:
+        return None
+    from .runtime_project import review_profile
+    profile = review_profile(project)
+    expected = derive_change_impact_for_project(
+        project, packet["scope_delta"], profile=profile)
+    expected_impact = {**expected, "change_id": packet["change_id"]}
+    expected_tasks = _packet_plan_tasks(
+        expected, str(packet["change_id"]),
+        _reserved_project_task_ids(project, exclude_change_id=str(packet["change_id"])))
+    actual_tasks = parse_plan_tasks_text(
+        _read_packet_plan(project, str(packet["change_id"]))[1])
+    if dict(impact) != expected_impact or [_task_identity(task) for task in actual_tasks] != [
+            _task_identity(task) for task in expected_tasks]:
+        raise ChangePacketError(
+            "change packet approval contract no longer matches scope, impact, and Plan")
+    return {"schema": CHANGE_APPROVAL_SCHEMA, "change_id": str(packet["change_id"]),
+            "approved_at": approved_at, "identity_sha256": _packet_identity(project, packet)}
 def plan_change_packet(
     project: Path,
     change_id: str,
@@ -424,7 +480,7 @@ def plan_change_packet(
         raise ChangePacketError("derived impact ACs do not match change.md")
     packet_root = _packet_root(project, change_id)
     plan_path, original = _read_packet_plan(project, change_id)
-    tasks = _packet_plan_tasks(impact, change_id)
+    tasks = _packet_plan_tasks(impact, change_id, _reserved_project_task_ids(project, exclude_change_id=change_id))
     planned = _replace_plan_table(original, tasks)
     impact_payload = {**dict(impact), "change_id": change_id}
     _write_atomic_text(plan_path, planned)
@@ -436,6 +492,7 @@ def activate_change_plan(project: Path, change_id: str) -> list[dict[str, Any]]:
     packet = read_change_packet(project, change_id)
     if packet["approval_state"] != "approved":
         raise ChangePacketError("change packet must be approved before activation")
+    _reserved_project_task_ids(project)
     plan_path, original = _read_packet_plan(project, change_id)
     parsed = parse_plan_tasks_text(original)
     if not parsed:
@@ -464,15 +521,9 @@ def next_change_id(project: Path) -> str:
         if match:
             highest = max(highest, int(match.group(1)))
     return f"CHANGE-{highest + 1}"
-def create_or_select_change_packet(
-    project: Path,
-    *,
-    original_completed_source_hash: str,
-    changed_files: Sequence[str],
-    profile: str = "standard",
-    created_at: str | None = None,
-    template_dir: Path | None = None,
-) -> dict[str, Any]:
+def create_or_select_change_packet(project: Path, *, original_completed_source_hash: str,
+                                   changed_files: Sequence[str], profile: str = "standard",
+                                   created_at: str | None = None, template_dir: Path | None = None) -> dict[str, Any]:
     """Select the exact open scope or create and derive one isolated draft."""
     scope = normalize_changed_files(changed_files)
     existing: list[dict[str, Any]] = []
@@ -502,22 +553,20 @@ def create_or_select_change_packet(
         template_dir=template_dir,
     )
     return plan_change_packet(project, packet["change_id"], impact)
-def approve_change_packet(
-    project: Path,
-    change_id: str,
-    *,
-    approved_at: str | None = None,
-) -> dict[str, Any]:
+def approve_change_packet(project: Path, change_id: str, *,
+                          approved_at: str | None = None) -> dict[str, Any]:
     """Atomically move one draft packet to its approved state."""
     current = read_change_packet(project, change_id)
     if current["approval_state"] == "approved":
         raise ChangePacketError(f"change packet is already approved: {change_id}")
+    _reserved_project_task_ids(project)
     blockers = list((current.get("impact") or {}).get("approval_blockers") or [])
     if blockers:
         raise ChangePacketError("change packet cannot be approved: " + "; ".join(str(item) for item in blockers))
     timestamp = approved_at or _now_utc()
     if not _valid_iso8601(timestamp):
         raise ChangePacketError("approved_at must be an ISO-8601 timestamp with a timezone")
+    identity = _approval_identity_payload(project, current, timestamp)
     packet = _packet_root(project, change_id)
     path = packet / CHANGE_FILE
     original = safe_io.read_text(project.resolve(), path)
@@ -534,6 +583,9 @@ def approve_change_packet(
     if parsed["approval_state"] != "approved":
         raise ChangePacketError("change.md could not be moved to approved state")
     try:
+        if identity:
+            _write_atomic_text(packet / CHANGE_APPROVAL_FILE,
+                               json.dumps(identity, indent=2, sort_keys=True) + "\n")
         _write_atomic_text(path, updated)
     except OSError as exc:
         raise ChangePacketError(f"could not approve change packet {change_id}: {exc}") from exc

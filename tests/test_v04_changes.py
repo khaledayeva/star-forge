@@ -348,12 +348,68 @@ Status: active
 
             self.assertEqual(packet["approval_state"], "approved")
             self.assertEqual(packet["approved_at"], "2026-07-25T19:00:00+00:00")
+            self.assertFalse(packet["approval_identity_bound"])
             self.assertEqual(source.read_bytes(), source_before)
             self.assertEqual(root_plan.read_bytes(), plan_before)
             packet_root = project / ".starforge" / "changes" / "CHANGE-1"
             self.assertEqual(list(packet_root.glob(".change.*.tmp")), [])
             with self.assertRaises(changes.ChangePacketError):
                 changes.approve_change_packet(project, "CHANGE-1")
+
+    def test_approval_rederives_scope_impact_and_packet_plan(self) -> None:
+        for tamper in ("impact", "profile", "plan"):
+            with self.subTest(tamper=tamper):
+                with tempfile.TemporaryDirectory() as tmp:
+                    project = Path(tmp)
+                    self.write_modern_project(project)
+                    packet = changes.create_or_select_change_packet(
+                        project, original_completed_source_hash=SOURCE_HASH,
+                        changed_files=["src/api.py"], template_dir=TEMPLATES)
+                    root = project / packet["path"]
+                    if tamper in {"impact", "profile"}:
+                        path = root / changes.CHANGE_IMPACT_FILE
+                        payload = json.loads(path.read_text(encoding="utf-8"))
+                        if tamper == "impact":
+                            payload["review_roles"] = []
+                        else:
+                            payload["profile"] = "fast-mvp"
+                        path.write_text(json.dumps(payload), encoding="utf-8")
+                    else:
+                        path = root / changes.CHANGE_PLAN_FILE
+                        path.write_text(
+                            path.read_text(encoding="utf-8").replace(
+                                "src/api.py", "README.md"), encoding="utf-8")
+                    with self.assertRaisesRegex(
+                            changes.ChangePacketError, "scope, impact, and Plan"):
+                        changes.approve_change_packet(project, packet["change_id"])
+
+    def test_approval_identity_survives_status_evidence_and_rejects_contract_tamper(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp)
+            self.write_modern_project(project)
+            packet = changes.create_or_select_change_packet(
+                project, original_completed_source_hash=SOURCE_HASH,
+                changed_files=["src/api.py"], template_dir=TEMPLATES)
+            approved = changes.approve_change_packet(project, packet["change_id"])
+            self.assertTrue(approved["approval_identity_bound"])
+            root = project / packet["path"]
+            self.assertTrue((root / changes.CHANGE_APPROVAL_FILE).is_file())
+            changes.activate_change_plan(project, packet["change_id"])
+            runtime_plan.update_plan_task_row(
+                root / changes.CHANGE_PLAN_FILE, "CHANGE-1-T1",
+                {"status": "complete", "evidence": "proof.json"})
+            self.assertTrue(
+                changes.read_change_packet(
+                    project, packet["change_id"])["approval_identity_bound"])
+            plan = root / changes.CHANGE_PLAN_FILE
+            plan.write_text(
+                plan.read_text(encoding="utf-8").replace(
+                    "Revalidate affected root task", "Trust unrelated root task"),
+                encoding="utf-8")
+            with self.assertRaisesRegex(changes.ChangePacketError, "approval identity"):
+                changes.read_change_packet(project, packet["change_id"])
 
     def test_safe_ids_hashes_and_packet_paths_are_enforced(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -630,6 +686,37 @@ Status: active
             self.assertEqual(approved["approval_state"], "approved")
             self.assertEqual([task["status"] for task in ready], ["ready"])
             self.assertEqual((project / "Plan.md").read_bytes(), root_plan_before)
+
+    def test_legacy_cross_plan_task_id_ambiguity_fails_clearly(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp)
+            self.write_modern_project(project)
+            packet = changes.create_or_select_change_packet(
+                project,
+                original_completed_source_hash=SOURCE_HASH,
+                changed_files=["src/api.py"],
+                template_dir=TEMPLATES,
+            )
+            packet_plan = (
+                project / packet["path"] / packet["plan_path"]
+            )
+            packet_plan.write_text(
+                packet_plan.read_text(encoding="utf-8").replace(
+                    "CHANGE-1-T1", "SF-1",
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                star_forge.ForgeError,
+                r"Task SF-1 is ambiguous across project Plans: .*Plan.md",
+            ):
+                runtime_plan.task_plan(project, "SF-1")
+            with self.assertRaisesRegex(
+                changes.ChangePacketError,
+                "ambiguous task IDs across project Plans",
+            ):
+                changes.approve_change_packet(project, "CHANGE-1")
 
     def test_unowned_code_never_inherits_unrelated_verification_or_approves(
         self,

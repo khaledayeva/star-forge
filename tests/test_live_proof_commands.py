@@ -455,7 +455,22 @@ def test_every_strict_live_domain_requires_a_bound_v2_sidecar() -> None:
                 collector=collector,
             )
             assert loaded and loaded["_evidence_envelope"]["schema"] == "star-forge.evidence-envelope.v2"
+            binding = loaded["_evidence_binding"]
+            assert binding["sha256"] == hashlib.sha256(sidecar.read_bytes()).hexdigest()
+            assert binding["bytes"] == len(sidecar.read_bytes())
+            assert binding["capability"] == loaded["_evidence_envelope"]["capability"]
+            assert binding["provider"] == loaded["_evidence_envelope"]["provider"]
             assert "evidence-envelope" not in problem_rules({"problems": problems})
+            if collector == "browser":
+                stdout = io.StringIO()
+                with contextlib.redirect_stdout(stdout):
+                    code = runtime_preview.write_live_proof_record(
+                        project, kind="browser-run", task="SF-1", strict=True,
+                        inputs={}, problems=[], manifest_path=manifest,
+                        manifest=loaded)
+                proof = json.loads(stdout.getvalue())
+                assert code == 0, proof
+                assert proof["evidence_envelope"] == binding
 
             sidecar.unlink()
             missing: list[dict[str, Any]] = []

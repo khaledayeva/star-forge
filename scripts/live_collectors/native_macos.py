@@ -29,7 +29,6 @@ from live_collectors import common, native_argv, native_transcript as native
 from live_collectors.policy_data import policy_dict, policy_list, policy_set, policy_tuple
 from live_collectors.provider_engine import render_descriptor
 
-
 MappingLike = dict[str, Any]
 
 SCREENSHOT_PLACEHOLDER = "{screenshot}"
@@ -63,27 +62,20 @@ SUMMARY_TEMPLATE = policy_dict("native_macos", "SUMMARY_TEMPLATE")
 OUTPUT_TEMPLATE = policy_dict("native_macos", "OUTPUT_TEMPLATE")
 PARSER_ARGUMENTS = policy_list("native_macos", "PARSER_ARGUMENTS")
 
-
 descriptor = render_descriptor
-
 
 def result_payload(kind: str, argv: Sequence[str], **fields: Any) -> MappingLike:
     return {**descriptor(RESULT_TEMPLATE, kind=kind, command_argv=list(argv)), **fields}
 
-
 now = common.now_utc
 rel = common.project_relative
-
 
 write_json = native.write_json
 write_text = native.write_text
 
-
 tree_sha256 = common.tree_sha256
 
-
 problem = common.blocking_problem
-
 
 def parse_argv_json(raw: str | None, label: str, *, required: bool) -> tuple[list[str] | None, list[MappingLike]]:
     return native_argv.parse_argv_json(
@@ -91,16 +83,13 @@ def parse_argv_json(raw: str | None, label: str, *, required: bool) -> tuple[lis
         make_problem=lambda message: problem(message, rule=f"native-macos-{label}-argv"),
     )
 
-
 executable_name = native_argv.executable_name
-
 
 def validate_env_wrapper(argv: Sequence[str], label: str) -> list[MappingLike]:
     return native_argv.validate_env_wrapper(
         argv, label, shell_names=SHELL_EXECUTABLES,
         make_problem=lambda message: problem(message, rule="native-macos-shell"),
     )
-
 
 def validate_argv(argv: Sequence[str], label: str) -> list[MappingLike]:
     problems: list[MappingLike] = []
@@ -119,7 +108,6 @@ def validate_argv(argv: Sequence[str], label: str) -> list[MappingLike]:
             break
     return problems
 
-
 def resolve_executable(project: Path, argv: Sequence[str]) -> str:
     if not argv:
         return ""
@@ -129,12 +117,10 @@ def resolve_executable(project: Path, argv: Sequence[str]) -> str:
         candidate = (project / candidate).resolve()
     return str(candidate) if candidate.is_absolute() else shutil.which(raw) or raw
 
-
 def exit_details(returncode: int | None) -> tuple[int | None, int | None]:
     if returncode is None:
         return None, None
     return (None, abs(returncode)) if returncode < 0 else (returncode, None)
-
 
 def run_command(
     project: Path,
@@ -202,7 +188,6 @@ def run_command(
     result_path = write_json(out_dir / f"{label}.json", payload)
     return result_path, payload
 
-
 def terminate_process(proc: subprocess.Popen[str], *, timeout: float) -> MappingLike:
     result: MappingLike = {
         "attempted": True,
@@ -229,7 +214,6 @@ def terminate_process(proc: subprocess.Popen[str], *, timeout: float) -> Mapping
     except OSError as exc:
         result["error"] = str(exc)
         return result
-
 
 def observe_runtime(
     project: Path,
@@ -378,7 +362,6 @@ def observe_runtime(
         payload["exit_code"] = exit_code
     return write_json(out_dir / "run.json", payload), payload
 
-
 def app_bundle_candidates(project: Path, app_name: str, bundle_id: str) -> list[Path]:
     candidates: list[Path] = []
     for root, dirs, _files in os.walk(project):
@@ -396,13 +379,11 @@ def app_bundle_candidates(project: Path, app_name: str, bundle_id: str) -> list[
                 dirs.remove(name)
     return sorted(candidates)
 
-
 def metadata_matches(metadata: MappingLike, path: Path, app_name: str, bundle_id: str) -> bool:
     if bundle_id and metadata.get("bundle_id") == bundle_id:
         return True
     names = {str(metadata.get(key) or "") for key in ("app_name", "display_name")}
     return bool(app_name and app_name in {*names, path.stem})
-
 
 def read_app_bundle_metadata(
     project: Path,
@@ -460,7 +441,6 @@ def read_app_bundle_metadata(
     metadata["valid"] = not problems
     return metadata, problems
 
-
 def resolve_app_bundle(
     project: Path,
     *,
@@ -487,13 +467,11 @@ def resolve_app_bundle(
     metadata, problems = read_app_bundle_metadata(project, candidates[0], app_name=app_name, bundle_id=bundle_id)
     return candidates[0], metadata, problems
 
-
 def write_notes(out_dir: Path) -> tuple[Path, Path]:
     return tuple(
         write_json(out_dir / f"{kind}-note.json", NOTE_PAYLOADS[kind])
         for kind in ("signing", "packaging")
     )
-
 
 def image_is_valid(path: Path) -> bool:
     if not path.exists() or not path.is_file():
@@ -508,10 +486,8 @@ def image_is_valid(path: Path) -> bool:
         return width > 0 and height > 0
     return head.startswith(b"\xff\xd8\xff")
 
-
 def screenshot_permission_failed(stderr: str) -> bool:
     return any(marker in stderr.lower() for marker in SCREENSHOT_PERMISSION_MARKERS)
-
 
 def run_screenshot_command(
     project: Path,
@@ -552,7 +528,6 @@ def run_screenshot_command(
         problems.append(problem("screenshot command did not produce a valid image", rule="native-macos-screenshot", path=rel(project, screenshot_path)))
     return screenshot_path if success else None, result_path, payload, problems
 
-
 def result_problems(project: Path, label: str, result_path: Path, payload: MappingLike) -> list[MappingLike]:
     failures = {
         "build": [(not payload.get("success"), "build command failed", "native-macos-build")],
@@ -569,7 +544,6 @@ def result_problems(project: Path, label: str, result_path: Path, payload: Mappi
         for failed, message, rule in failures.get(label, []) if failed
     ]
 
-
 def add_result_stream_artifacts(project: Path, artifacts: dict[str, Path], prefix: str, payload: MappingLike) -> None:
     for stream in ("stdout", "stderr"):
         raw = payload.get(f"{stream}_artifact")
@@ -580,7 +554,6 @@ def add_result_stream_artifacts(project: Path, artifacts: dict[str, Path], prefi
         except ValueError:
             continue
         artifacts[f"{prefix}_{stream}"] = path
-
 
 def collect(args: argparse.Namespace, command_argv: Sequence[str]) -> tuple[int, MappingLike]:
     project = common.assert_collector_project_safe(Path(args.project))
@@ -750,7 +723,6 @@ def collect(args: argparse.Namespace, command_argv: Sequence[str]) -> tuple[int,
         record=args.record, script_path=STAR_FORGE,
     )
 
-
 def build_parser() -> argparse.ArgumentParser:
     arguments = descriptor(
         PARSER_ARGUMENTS, contract_capabilities=sorted(CONTRACT_CAPABILITIES),
@@ -760,14 +732,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     return native.build_parser("Collect native macOS baseline artifacts for Star Forge", arguments)
 
-
 def main(argv: Sequence[str] | None = None) -> int:
     raw_argv = list(argv if argv is not None else sys.argv[1:])
     args = build_parser().parse_args(raw_argv)
     code, output = collect(args, ["python3", "scripts/live_collectors/native_macos.py", *raw_argv])
     print(json.dumps(output, indent=2, sort_keys=True))
     return code
-
 
 if __name__ == "__main__":
     raise SystemExit(main())

@@ -220,10 +220,10 @@ def should_block_stop(project: Path, event: dict[str, Any], handoff: dict[str, A
             counter = read_json(counter_path)
         except Exception:
             counter = {}
-    count = int(counter.get("count") or 0) if counter.get("signature") == signature else 0
+    count = int(counter.get("count") or 0) if (counter.get("continuation_digest") or counter.get("signature")) == signature else 0
     if count >= MAX_AUTO_CONTINUES:
         return None
-    write_json(counter_path, {"schema": "star-forge.auto-continue.v1", "count": count + 1, "phase": phase, "signature": signature, "updated_at": now_utc()})
+    write_json(counter_path, {"schema": "star-forge.auto-continue.v1", "count": count + 1, "phase": phase, "continuation_digest": signature, "updated_at": now_utc()})
     return f"Star Forge: phase `{phase}` is not complete. Continue with: {state.get('required_next_action')}"
 
 def cmd_stop_hook(args: argparse.Namespace) -> int:

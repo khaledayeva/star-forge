@@ -27,16 +27,20 @@ def parse_tasks(plan_path: Path) -> list[dict[str, Any]]:
 def task_plan(project: Path, task_id: str) -> tuple[Path, list[dict[str, Any]]]:
     root_plan = project / PLAN_FILE
     root_tasks = parse_tasks(root_plan) if root_plan.exists() else []
-    if any(task.get("id") == task_id for task in root_tasks):
-        return root_plan, root_tasks
+    matches = [(root_plan, root_tasks, sum(task.get("id") == task_id for task in root_tasks))]
     try:
         for packet in reversed(project_changes.list_change_packets(project)):
             packet_plan = project / packet["path"] / packet["plan_path"]
             packet_tasks = parse_tasks(packet_plan)
-            if any(task.get("id") == task_id for task in packet_tasks):
-                return packet_plan, packet_tasks
+            matches.append((packet_plan, packet_tasks, sum(task.get("id") == task_id for task in packet_tasks)))
     except project_changes.ChangePacketError as exc:
         raise ForgeError(str(exc)) from exc
+    found = [(path, tasks, count) for path, tasks, count in matches if count]
+    if sum(count for _path, _tasks, count in found) > 1:
+        locations = ", ".join(f"{path.relative_to(project)} ({count})" for path, _tasks, count in found)
+        raise ForgeError(PLAN_POLICY["errors"]["task_ambiguous"].format(task=task_id, plans=locations))
+    if found:
+        return found[0][0], found[0][1]
     return root_plan, root_tasks
 def plan_parse_problem(plan_path: Path, tasks: Sequence[dict[str, Any]]) -> str | None:
     if tasks or not plan_path.exists():
@@ -202,9 +206,11 @@ def _task_problem(task: Mapping[str, Any], name: str, **values: object) -> dict[
             "message": message.format(**values)}
 def validate_tasks(tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
     problems: list[dict[str, Any]] = []
-    ids = {task["id"] for task in tasks}
+    ids = [task["id"] for task in tasks]
     policy = PLAN_POLICY["validation"]
     for task in tasks:
+        if ids.count(task["id"]) > 1:
+            problems.append(_task_problem(task, "duplicate_id", task_id=task["id"]))
         status = task["status"]
         if status not in VALID_STATUSES:
             problems.append(_task_problem(task, "invalid_status", status=status))

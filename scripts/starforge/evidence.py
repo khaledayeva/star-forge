@@ -8,13 +8,14 @@ import re
 from pathlib import Path, PurePosixPath
 from typing import Any, Mapping
 from . import safe_io
+from .sensitive import sensitive_key_name
 EVIDENCE_POLICY = _policy_value("runtime_evidence.POLICY")
 globals().update(EVIDENCE_POLICY["bindings"])
 FOUNDATION_EVIDENCE_SCHEMA = "star-forge.foundation-evidence.v1"
 DELIVERY_EVIDENCE_SCHEMA = "star-forge.delivery-evidence.v1"
 DOMAIN_EVIDENCE_SCHEMAS = {"foundation": FOUNDATION_EVIDENCE_SCHEMA, "delivery": DELIVERY_EVIDENCE_SCHEMA}
 _PATTERNS = {name: re.compile(pattern, re.IGNORECASE if name in {"secret_value", "sensitive_key"} else 0) for name, pattern in EVIDENCE_POLICY["patterns"].items()}
-_SHA256_RE, _WINDOWS_DRIVE_RE, _SECRET_VALUE_RE, _SENSITIVE_KEY_RE = map(_PATTERNS.__getitem__, ("sha256", "windows_drive", "secret_value", "sensitive_key"))
+_SHA256_RE, _WINDOWS_DRIVE_RE, _SECRET_VALUE_RE = map(_PATTERNS.__getitem__, ("sha256", "windows_drive", "secret_value"))
 class EvidenceError(ValueError):
     pass
 def _error(name: str, **values: object) -> EvidenceError:
@@ -55,27 +56,17 @@ def validate_artifact_path(raw_path: Any, project_root: str | Path | None = None
             raise _error("path_resolve", path=path) from exc
         _require(resolved == root or root in resolved.parents, "path_escape", path=path)
     return path
-def sensitive_key_name(raw: Any) -> bool:
-    separated = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", str(raw or ""))
-    normalized = re.sub(r"[^a-z0-9]+", "_", separated.lower()).strip("_")
-    parts = set(normalized.split("_"))
-    return bool(_SENSITIVE_KEY_RE.search(normalized) or parts & {
-        "auth", "authorization", "cookie", "credential", "key", "passwd",
-        "password", "secret", "session", "token",
-    })
-def _secret_locations(value: Any, path: str = "$") -> list[str]:
+def _secret_locations(value: Any, path: str = "$", sensitive: bool = False) -> list[str]:
     if isinstance(value, Mapping):
-        return [
-            location for key, child in value.items()
-            for child_path in (f"{path}.{key}",)
-            for location in (
-                ([child_path] if sensitive_key_name(key) and isinstance(child, str)
-                  and child.strip().casefold() not in _SAFE_PLACEHOLDERS else [])
-                + _secret_locations(child, child_path))]
+        return [location for key, child in value.items()
+                for location in _secret_locations(
+                    child, f"{path}.{key}", sensitive_key_name(key))]
     if isinstance(value, list):
         return [location for index, child in enumerate(value)
-                for location in _secret_locations(child, f"{path}[{index}]")]
-    return [path] if isinstance(value, str) and _SECRET_VALUE_RE.search(value) else []
+                for location in _secret_locations(child, f"{path}[{index}]", sensitive)]
+    return [path] if isinstance(value, str) and (
+        _SECRET_VALUE_RE.search(value)
+        or sensitive and value.strip().casefold() not in _SAFE_PLACEHOLDERS) else []
 def _validate_artifact(artifact: Any, index: int, *, project_root: str | Path | None,
                        verify_artifacts: bool) -> None:
     _require(isinstance(artifact, Mapping), "artifact_object", index=index)
@@ -249,11 +240,13 @@ def adapt_lifecycle_v1(payload: Mapping[str, Any]) -> dict[str, Any]:
     checks = payload.get("checks")
     check_items = checks.items() if isinstance(checks, Mapping) else ()
     check_values = checks.values() if isinstance(checks, Mapping) else ()
-    blockers = [
-        {"message": f"{name} is blocking", "blocking": True}
-        for name, record in check_items
-        if isinstance(record, Mapping) and record.get("state") == "blocking"
-    ]
+    valid_states = {"satisfied", "not-applicable", "blocking"}
+    blockers = ([{"message": "legacy lifecycle checks must be a non-empty object", "blocking": True}]
+                if not isinstance(checks, Mapping) or not checks else [
+        {"message": (f"{name} is blocking" if isinstance(record, Mapping)
+                     and record.get("state") == "blocking" else f"{name} has an invalid lifecycle check"),
+         "blocking": True} for name, record in check_items
+        if not isinstance(record, Mapping) or record.get("state") not in valid_states])
     provider = str(payload.get("provider") or "")
     if kind == "foundation" and not provider:
         provider = next((
@@ -306,14 +299,14 @@ def lifecycle_payload(envelope: Mapping[str, Any], kind: str) -> dict[str, Any]:
         "source_hash": envelope["source_hash"],
         **({"provider": envelope["provider"]} if kind == "delivery" else {}),
     }
-def read_envelope(path: str | Path, *, allow_v1: bool = True,
-                  project_root: str | Path | None = None,
-                  verify_artifacts: bool = False) -> dict[str, Any]:
+def read_envelope_snapshot(path: str | Path, *, allow_v1: bool = True, project_root: str | Path | None = None,
+                           verify_artifacts: bool = False) -> tuple[dict[str, Any], str, int]:
     evidence_path = Path(path)
     root = Path(project_root) if project_root is not None else safe_io.infer_root(evidence_path)
     try:
-        payload = json.loads(safe_io.read_text(root, evidence_path))
-    except (OSError, json.JSONDecodeError) as exc:
+        content, digest, byte_count = safe_io.read_snapshot(root, evidence_path)
+        payload = json.loads(content)
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise _error("read", path=evidence_path, error=exc) from exc
     _require(isinstance(payload, Mapping), "file_object")
     if payload.get("schema") == LEGACY_LIVE_MANIFEST_SCHEMA:
@@ -324,7 +317,12 @@ def read_envelope(path: str | Path, *, allow_v1: bool = True,
         payload = adapt_lifecycle_v1(payload)
     result = dict(payload)
     validate_envelope(result, project_root=project_root, verify_artifacts=verify_artifacts)
-    return result
+    return result, digest, byte_count
+def read_envelope(path: str | Path, *, allow_v1: bool = True,
+                  project_root: str | Path | None = None,
+                  verify_artifacts: bool = False) -> dict[str, Any]:
+    return read_envelope_snapshot(path, allow_v1=allow_v1, project_root=project_root,
+                                  verify_artifacts=verify_artifacts)[0]
 def write_envelope(path: str | Path, envelope: Mapping[str, Any] | None = None, *,
                    project_root: str | Path | None = None,
                    verify_artifacts: bool = False, **fields: Any) -> dict[str, Any]:

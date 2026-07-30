@@ -137,7 +137,7 @@ def redact(value: Any) -> Any:
     if isinstance(value, dict):
         cleaned: dict[str, Any] = {}
         for key, item in value.items():
-            if str(key).lower() in SUPPORT_POLICY["redacted_fields"]:
+            if (str(key).lower() in SUPPORT_POLICY["redacted_fields"] or live_common.sensitive_key_name(key)) and isinstance(item, str):
                 cleaned[str(key)] = "[REDACTED]"
             else:
                 cleaned[str(key)] = redact(item)

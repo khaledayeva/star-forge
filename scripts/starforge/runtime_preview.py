@@ -292,12 +292,8 @@ def load_normalized_live_evidence(
 ) -> dict[str, Any] | None:
     sidecar = manifest_path.parent / live_common.LIVE_EVIDENCE_FILENAME
     try:
-        envelope = evidence_contract.read_envelope(
-            sidecar,
-            allow_v1=False,
-            project_root=project,
-            verify_artifacts=True,
-        )
+        envelope, digest, byte_count = evidence_contract.read_envelope_snapshot(
+            sidecar, allow_v1=False, project_root=project, verify_artifacts=True)
         bound = evidence_contract.envelope_covers_v1(envelope, manifest)
     except evidence_contract.EvidenceError as exc:
         problems.append(live_problem(
@@ -306,13 +302,13 @@ def load_normalized_live_evidence(
             path=live_rel(project, sidecar),
         ))
         return None
-    flag_live_problem(
-        problems,
-        not bound,
+    flag_live_problem(problems, not bound,
         "evidence envelope does not cover its exact legacy adapter input",
-        rule="evidence-envelope-binding",
-        path=live_rel(project, sidecar),
-    )
+        rule="evidence-envelope-binding", path=live_rel(project, sidecar))
+    manifest["_evidence_binding"] = {
+        "path": live_rel(project, sidecar), "sha256": digest, "bytes": byte_count,
+        "capability": envelope["capability"], "provider": envelope["provider"],
+    }
     return envelope
 def load_and_validate_live_manifest(
     project: Path,
@@ -603,6 +599,10 @@ def write_live_proof_record(
     problems = list(problems)
     if snapshot_problem:
         append_live_problem_once(problems, snapshot_problem)
+    evidence_binding = manifest.get("_evidence_binding") if isinstance(manifest, dict) else None
+    if strict and manifest is not None and not isinstance(evidence_binding, dict):
+        problems.append(live_problem("accepted evidence envelope binding is missing",
+                                     rule="evidence-envelope-binding"))
     verdict = PREVIEW_POLICY["proof_verdicts"]["blocking" if live_has_blockers(problems) else "clear"]
     safe_inputs = {key: value for key, value in inputs.items() if key != "func"}
     payload = {"schema": f"star-forge.{kind}.v1", **policy_mapping(
@@ -611,6 +611,7 @@ def write_live_proof_record(
         runtime_asset_hash=live_common.compute_runtime_asset_hash(project),
         manifest=live_rel(project, manifest_path) if manifest_path else None,
         collector=manifest.get("collector") if isinstance(manifest, dict) else None,
+        evidence_envelope=evidence_binding,
         artifacts=artifacts or [], problems=problems, summary=summary,
     )}
     path = write_run_record(project, payload)

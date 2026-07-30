@@ -283,15 +283,20 @@ def git_history_has_fast_mvp_before_gates(project: Path) -> bool:
                          git_show_text(project, revision, SOURCE_PROFILE_FILE) or ""
                      ).get("profile") == _POLICY["fast_profile"]), "")
     return bool(selected) and not git_revision_or_ancestors_have_review_gates(project, selected)
+def source_profile_snapshot_state(project: Path, path: Path) -> tuple[bool, bool]:
+    try:
+        return (any(git_status_path(entry) == SOURCE_PROFILE_FILE for entry in git_status(project)),
+                any(candidate.resolve() == path.resolve()
+                    for candidate in live_common.snapshot_file_candidates(project)))
+    except (OSError, live_common.SourceSnapshotError):
+        return True, False
 def source_profile_lock_is_durable(project: Path) -> bool:
     path = source_profile_path(project)
     if (not source_profile_exists(project) or not is_git_repo(project)
             or git_head(project) is None or source_profile_read_problem(project)):
         return False
     code, _, _ = run_git(["ls-files", "--error-unmatch", "--", SOURCE_PROFILE_FILE], project)
-    dirty = any(git_status_path(entry) == SOURCE_PROFILE_FILE for entry in git_status(project))
-    snapshotted = any(candidate.resolve() == path.resolve()
-                      for candidate in live_common.snapshot_file_candidates(project))
+    dirty, snapshotted = source_profile_snapshot_state(project, path)
     return code == 0 and not dirty and snapshotted
 def fast_mvp_profile_predates_gates(project: Path) -> bool:
     return (read_source_profile(project) == _POLICY["fast_profile"]
@@ -332,10 +337,9 @@ def source_profile_lock_problems(project: Path) -> list[str]:
         return problems
     head = git_head(project)
     code, _, _ = run_git(["ls-files", "--error-unmatch", "--", SOURCE_PROFILE_FILE], project)
+    dirty, snapshotted = source_profile_snapshot_state(project, path)
     checks = ((head is None, "no_commits"), (code != 0, "untracked"),
-        (any(git_status_path(entry) == SOURCE_PROFILE_FILE for entry in git_status(project)), "dirty"),
-        (not any(candidate.resolve() == path.resolve()
-                 for candidate in live_common.snapshot_file_candidates(project)), "snapshot"),
+        (dirty, "dirty"), (not snapshotted, "snapshot"),
         (head is not None and not git_history_has_fast_mvp_before_gates(project), "history"))
     problems.extend(message(kind) for failed, kind in checks if failed)
     return problems

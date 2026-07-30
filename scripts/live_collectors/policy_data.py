@@ -11,12 +11,10 @@ from types import SimpleNamespace
 from typing import Any, Callable, Mapping, Sequence
 from live_collectors.provider_engine import failed_checks, nested_value, render_descriptor
 
-
 @lru_cache(maxsize=1)
 def _policies() -> dict[str, Any]:
     path = Path(__file__).with_name("collector_policy.json")
     return json.loads(path.read_text(encoding="utf-8"))
-
 
 def _value(section: str, name: str, *, kind: str, cast: Callable[[Any], Any]) -> Any:
     record = _policies()[section][name]
@@ -24,11 +22,9 @@ def _value(section: str, name: str, *, kind: str, cast: Callable[[Any], Any]) ->
         raise ValueError(f"collector policy {section}.{name} must be {kind}")
     return cast(record["value"])
 
-
 POLICY_CASTS = {"dict": dict, "list": list, "set": set, "tuple": tuple}
 for _kind, _cast in POLICY_CASTS.items():
     globals()[f"policy_{_kind}"] = partial(_value, kind=_kind, cast=_cast)
-
 
 def policy_bindings(section: str, *names: str) -> dict[str, Any]:
     records = _policies()[section]
@@ -37,11 +33,9 @@ def policy_bindings(section: str, *names: str) -> dict[str, Any]:
         for name in names
     }
 
-
 def _github() -> Any:
     from live_collectors import github_identity
     return github_identity
-
 
 def first_text(*values: Any) -> str:
     return next((
@@ -50,16 +44,13 @@ def first_text(*values: Any) -> str:
         or isinstance(value, (int, float)) and not isinstance(value, bool)
     ), "")
 
-
 nested = nested_value
-
 
 def first_path_text(mapping: Mapping[str, Any], *paths: str | Sequence[str]) -> str:
     return first_text(*(
         nested(mapping, path) if isinstance(path, str) else nested(mapping, *path)
         for path in paths
     ))
-
 
 def _page_items(payload: Any, keys: Sequence[str]) -> list[Any]:
     if not isinstance(payload, Mapping):
@@ -74,7 +65,6 @@ def _page_items(payload: Any, keys: Sequence[str]) -> list[Any]:
         edge.get("node") if isinstance(edge, Mapping) and "node" in edge else edge
         for edge in edges
     ] if isinstance(edges, list) else []
-
 
 def _page_flags(payload: Mapping[str, Any], count: int) -> tuple[bool, bool]:
     raw_info = payload.get("page_info") or payload.get("pageInfo") or payload.get("pagination")
@@ -118,7 +108,6 @@ def shell_argv(raw: Any) -> list[str]:
         return list(map(str, raw))
     return []
 
-
 def parse_commands(raw: Any) -> list[list[str]]:
     items = [] if raw is None else raw if isinstance(raw, list) else [raw]
     argvs = (
@@ -126,7 +115,6 @@ def parse_commands(raw: Any) -> list[list[str]]:
         if isinstance(item, dict) else item for item in items
     )
     return [parsed for argv in argvs if (parsed := shell_argv(argv))]
-
 
 def option_values(tokens: Sequence[str], names: set[str]) -> list[str]:
     return [
@@ -136,10 +124,8 @@ def option_values(tokens: Sequence[str], names: set[str]) -> list[str]:
         for name in names if str(token).startswith(f"{name}=")
     ]
 
-
 def option_value(tokens: Sequence[str], names: set[str]) -> str:
     return next(iter(option_values(tokens, names)), "")
-
 
 def _attached_value(
     token: str, prefixes: Sequence[str], short_flags: Sequence[str],
@@ -151,7 +137,6 @@ def _attached_value(
         (item, token[len(item):]) for item in short_flags
         if token.startswith(item) and len(token) > len(item)
     ), ("", ""))
-
 
 def parse_option_grammar(
     command_name: str,
@@ -194,7 +179,6 @@ def parse_option_grammar(
                     positionals.append(token)
     return positionals, values, problems
 
-
 def foundation_check_detail(payload: Mapping[str, Any], name: str) -> Mapping[str, Any]:
     detail = nested(payload, "checks", name, "detail")
     if isinstance(detail, Mapping):
@@ -202,7 +186,6 @@ def foundation_check_detail(payload: Mapping[str, Any], name: str) -> Mapping[st
     direct = payload.get(name)
     detail = direct.get("detail") if isinstance(direct, Mapping) else None
     return detail if isinstance(detail, Mapping) else direct if isinstance(direct, Mapping) else {}
-
 
 def github_remote_matches(remote_url: Any, repo: str) -> bool:
     if not isinstance(remote_url, str) or not remote_url.strip() or re.match(r"^https?://[^/@\s]+@", remote_url):
@@ -212,7 +195,6 @@ def github_remote_matches(remote_url: Any, repo: str) -> bool:
         rf"https://github\.com/{escaped}(?:\.git)?",
         rf"git@github\.com:{escaped}(?:\.git)?",
     ))
-
 
 def normalize_github_foundation(
     raw: Any, *, repo: str, current_source_hash: str,
@@ -282,17 +264,14 @@ def normalize_github_foundation(
         policy_dict("github_adapter", "FOUNDATION_OUTPUT_TEMPLATE"), validation
     )
 
-
 def github_provider(raw: Any) -> str:
     return "github-unavailable"
-
 
 def provider_route(provider: str) -> dict[str, Any]:
     return render_descriptor(
         policy_dict("github_adapter", "PROVIDER_ROUTE_TEMPLATE"),
         provider=provider, fallback=provider != _github().PREFERRED_PROVIDER,
     )
-
 
 def write_github_evidence_envelope(
     project: Path, manifest_path: Path, *, raw: Any, repo: str, pr_number: str,
@@ -329,34 +308,28 @@ def write_github_evidence_envelope(
         envelope_path, envelope, project_root=project, verify_artifacts=True,
     )
 
-
 def _host_from(value: Any, method: str, label: str) -> str:
     evidence = getattr(_github(), method)(value, label)
     return evidence[0][1] if evidence else ""
 
-
 def github_host_evidence_for_raw(raw: Any) -> list[tuple[str, str]]:
     gh = _github()
     return gh.github_host_provenance_evidence_for_raw(raw) + gh.github_host_payload_evidence_for_raw(raw)
-
 
 def validate_transcript_github_host(**kwargs: Any) -> tuple[str, list[dict[str, Any]]]:
     gh = _github()
     host, messages = gh.validate_transcript_github_host_evidence(**kwargs)
     return host, [gh.blocking_problem(message, rule="github-live-provenance") for message in messages]
 
-
 def gh_api_endpoint(tokens: Sequence[str]) -> str:
     index = _github().gh_api_endpoint_index(tokens)
     return str(tokens[index]) if index >= 0 else ""
-
 
 def trusted_proof_command(command: Sequence[str]) -> list[str]:
     gh = _github()
     return gh.live_common.trusted_python_command(
         command, script_path=gh.STAR_FORGE_SCRIPT,
     )
-
 
 def _gh_view_identity(tokens: Sequence[str], run: bool) -> tuple[str, str]:
     from live_collectors import github_policy as gh
@@ -368,7 +341,6 @@ def _gh_view_identity(tokens: Sequence[str], run: bool) -> tuple[str, str]:
         flag_only=gh.GH_RUN_VIEW_FLAG_ONLY if run else set(),
     )
     return (positionals[0] if positionals else ""), gh.option_value(tokens, {"--repo", "-R"})
-
 
 for _name, (_method, _label) in policy_dict("github_adapter", "HOST_BINDINGS").items():
     globals()[_name] = partial(_host_from, method=_method, label=_label)

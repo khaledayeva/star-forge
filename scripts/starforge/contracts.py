@@ -794,6 +794,11 @@ def write_blueprint_lock(
     if blueprint_problem or blueprint_digest is None:
         raise ContractError(blueprint_problem)
     timestamp = approved_at or _now_utc()
+    if not _valid_iso8601(timestamp):
+        raise ContractError("approved_at must be an ISO-8601 timestamp with a timezone")
+    existing, existing_problems = _read_lock(root, lock_path)
+    if not existing_problems and existing is not None and existing.get("blueprint_sha256") == blueprint_digest:
+        return existing
     payload: dict[str, Any] = {
         "schema": BLUEPRINT_LOCK_SCHEMA,
         "blueprint_sha256": blueprint_digest,

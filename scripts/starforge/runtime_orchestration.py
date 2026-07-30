@@ -532,7 +532,7 @@ def cmd_status(args: argparse.Namespace) -> int:
     tasks = parse_tasks(plan_path) if plan_path.exists() else []
     profile_lock = fast_mvp_profile_lock_state(project)
     blueprint_state = blueprint_lock_state(project)
-    hash_problem = source_hash_unavailable_problem(project)
+    _, hash_problem = try_source_hash(project)
     scope = scope_hash(project) or "noscope"
     review = review_summary_source_hash_unavailable(project, scope, profile_lock, problems=[hash_problem] if hash_problem else None) if hash_problem else review_summary(project, scope)
     _print_record(

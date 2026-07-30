@@ -157,6 +157,7 @@ def derive_change_impact(
                   for match in task_matches if match["verify"] == "REVIEW_REQUIRED"]
     return {
         "schema": CHANGE_IMPACT_SCHEMA,
+        "profile": profile,
         "scope_delta": scope,
         "affected_tasks": task_matches,
         "affected_task_ids": [str(match["source_task"]) for match in task_matches if match["source_task"]],

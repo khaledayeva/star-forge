@@ -118,6 +118,22 @@ class BlueprintLockTests(unittest.TestCase):
                 "locked",
             )
 
+    def test_unchanged_reapproval_preserves_the_existing_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp)
+            (project / "Blueprint.md").write_text(BLUEPRINT, encoding="utf-8")
+            first = contracts.write_blueprint_lock(
+                project, approved_at="2026-07-25T18:30:00Z",
+            )
+            before = (project / "Blueprint.lock.json").read_bytes()
+
+            second = contracts.write_blueprint_lock(
+                project, approved_at="2026-07-25T19:30:00Z",
+            )
+
+            self.assertEqual(second, first)
+            self.assertEqual((project / "Blueprint.lock.json").read_bytes(), before)
+
     def test_legacy_approval_is_readable_but_not_a_v04_lock(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project = Path(tmp)

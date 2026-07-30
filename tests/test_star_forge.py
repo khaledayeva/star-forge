@@ -429,6 +429,20 @@ def test_validate_tasks_flags_unknown_dependency() -> None:
         assert any("unknown dependency `T-404`" in item["message"] for item in problems)
 
 
+def test_validate_tasks_flags_duplicate_task_ids() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        plan = Path(tmp) / "Plan.md"
+        plan.write_text(
+            "# Plan\n\n" + PLAN_HEADER
+            + "| T-1 | First owner | queued | solo | src/a.py | - | pytest -q | - |\n"
+            + "| T-1 | Second owner | queued | solo | src/b.py | - | pytest -q | - |\n",
+            encoding="utf-8",
+        )
+        problems = star_forge.validate_tasks(star_forge.parse_tasks(plan))
+        duplicate = [item for item in problems if "duplicate task ID `T-1`" in item["message"]]
+        assert [item["line"] for item in duplicate] == [5, 6]
+
+
 def test_ready_tasks_gates_on_completed_dependencies() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         plan = Path(tmp) / "Plan.md"
@@ -639,6 +653,39 @@ def test_source_hash_binds_gitlink_object_identity() -> None:
             if commit == first_commit:
                 first_hash = current
         assert current != first_hash
+
+
+def test_source_hash_binds_sparse_index_blob_and_mode_identity() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        init_project(project)
+        visible = project / "visible.txt"
+        hidden = project / "hidden.txt"
+        visible.write_text("visible\n", encoding="utf-8")
+        hidden.write_text("one\n", encoding="utf-8")
+        hidden.chmod(0o644)
+        commit_all(project, "sparse source one")
+        heads = [star_forge.git_head(project)]
+        hidden.write_text("two\n", encoding="utf-8")
+        commit_all(project, "sparse source two")
+        heads.append(star_forge.git_head(project))
+        hidden.chmod(0o755)
+        commit_all(project, "sparse executable source")
+        heads.append(star_forge.git_head(project))
+        for command in (
+            ["sparse-checkout", "init", "--no-cone"],
+            ["sparse-checkout", "set", "--no-cone", "/visible.txt"],
+        ):
+            code, _, error = star_forge.run_git(command, project)
+            assert code == 0, error
+        fingerprints = []
+        for head in heads:
+            code, _, error = star_forge.run_git(["checkout", "--quiet", head], project)
+            assert code == 0, error
+            assert not hidden.exists()
+            assert star_forge.git_status(project) == []
+            fingerprints.append(star_forge.source_hash(project))
+        assert len(set(fingerprints)) == len(heads)
 
 
 def test_source_hash_includes_tracked_files_under_ignored_generated_dirs() -> None:
@@ -1802,6 +1849,34 @@ def test_fast_mvp_source_profile_write_rejects_symlink_escape() -> None:
         assert outside.read_text(encoding="utf-8") == "outside\n"
 
 
+def test_fast_mvp_snapshot_refusal_is_structured_across_cli_reads() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp).resolve()
+        project = root / "project"
+        project.mkdir()
+        reviewable_project(project, profile="fast-mvp")
+        outside = root / "outside.py"
+        outside.write_text("private\n", encoding="utf-8")
+        (project / "src" / "link.py").symlink_to(outside)
+
+        code, out, err = run_cli([
+            "run", "--project", str(project), "--strict", "--no-hooks"])
+        assert code == 1
+        assert "Traceback" not in err
+        state = star_forge.read_json(project / ".starforge" / "state.json")
+        assert state["source_hash_unavailable"] is True
+        assert "src/link.py" in state["source_hash_problems"][0]["message"]
+
+        for command in ("status", "review", "done"):
+            args = [command, "--project", str(project)]
+            if command != "status":
+                args.append("--strict")
+            _, output, error = run_cli(args)
+            assert "Traceback" not in error
+            payload = json.loads(output)
+            assert payload["source_hash_unavailable"] is True
+
+
 def test_review_strict_unreadable_fast_mvp_source_profile_fail_closed() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         project = Path(tmp).resolve()
@@ -2640,6 +2715,20 @@ def test_simultaneous_fuzzy_findings_require_independent_waivers() -> None:
 # ----------------------------------------------- 7. done + proof + amend loop
 
 
+def test_drift_unions_committed_and_dirty_paths_after_proof() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        build_completed_project(project)
+        code, payload = run_done(project)
+        assert code == 0, payload
+        proof = star_forge.read_json(project / star_forge.PROOF_FILE)
+        (project / "committed.txt").write_text("committed\n", encoding="utf-8")
+        commit_all(project, "committed post-proof path")
+        (project / "dirty.txt").write_text("dirty\n", encoding="utf-8")
+        drift = runtime_review.detect_drift(project, proof)
+        assert drift["changed_files"] == ["committed.txt", "dirty.txt"]
+
+
 def test_plan_v2_cannot_cover_drift_with_new_completed_amend_row() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         project = Path(tmp).resolve()
@@ -2869,6 +2958,47 @@ def test_done_fails_closed_when_repository_disappears_during_status_and_preserve
             for problem in payload["problems"]
         )
         assert proof_path.read_bytes() == prior_proof
+
+
+def test_done_rejects_clean_head_switch_after_late_review_gate() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        build_completed_project(project)
+        head_a = star_forge.git_head(project)
+        source = project / "src" / "hello.py"
+        source.write_text("print('unverified commit b')\n", encoding="utf-8")
+        commit_all(project, "unverified commit b")
+        head_b = star_forge.git_head(project)
+        code, _, error = star_forge.run_git(["checkout", "--quiet", head_a], project)
+        assert code == 0, error
+        original_review_gate = runtime_review.review_findings_for_done
+        switched = False
+
+        def switch_after_review(target: Path, tasks: list[dict]) -> list[dict]:
+            nonlocal switched
+            findings = original_review_gate(target, tasks)
+            code, _, error = star_forge.run_git(
+                ["checkout", "--quiet", head_b], target)
+            assert code == 0, error
+            switched = True
+            return findings
+
+        with mock.patch.object(
+            runtime_review, "review_findings_for_done",
+            side_effect=switch_after_review,
+        ):
+            code, payload = run_done(project)
+
+        assert switched is True
+        assert code == 1, payload
+        assert payload["is_complete"] is False
+        assert payload["snapshot"]["git_head"] == head_a
+        assert star_forge.git_head(project) == head_b
+        assert any(
+            problem.get("rule") == "git-proof-binding"
+            for problem in payload["problems"]
+        )
+        assert not (project / star_forge.PROOF_FILE).exists()
 
 
 def test_done_rejects_commits_during_final_source_hash_and_preserves_prior_proof() -> None:
@@ -3321,6 +3451,104 @@ def test_post_done_drift_creates_single_draft_change_packet() -> None:
         assert state["spawn_plan"][0]["task"] == "CHANGE-1-T1"
 
 
+def test_unchanged_blueprint_reapproval_is_stable_after_done() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        build_completed_project(project)
+        code, out, err = run_cli(["approve-blueprint", "--project", str(project)])
+        assert code == 0, err or out
+        record_verify(project, "SF-1")
+        write_clean_review_wave(project)
+        code, out, err = run_cli(["review", "--project", str(project), "--strict"])
+        assert code == 0, err or out
+        commit_all(project, "lock blueprint before proof")
+        code, payload = run_done(project)
+        assert code == 0, payload
+        lock_path = project / "Blueprint.lock.json"
+        before = lock_path.read_bytes()
+
+        code, out, err = run_cli(["approve-blueprint", "--project", str(project)])
+        assert code == 0, err or out
+        assert lock_path.read_bytes() == before
+        code, out, err = run_cli(["run", "--project", str(project), "--no-hooks"])
+        assert code == 0, err or out
+        state = json.loads((project / ".starforge" / "state.json").read_text(encoding="utf-8"))
+        assert state["phase"] == "done"
+        assert state["drift"]["detected"] is False
+        assert state["change_packet"] is None
+
+
+def test_post_done_nested_blueprint_lock_path_creates_exact_scope_packet() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        build_completed_project(project, owned_files="src/")
+        code, payload = run_done(project)
+        assert code == 0, payload
+        nested = project / "src" / "Blueprint.lock.json"
+        nested.write_text('{"source": true}\n', encoding="utf-8")
+
+        code, out, err = run_cli(["run", "--project", str(project), "--no-hooks"])
+        assert code == 0, err or out
+        code, out, err = run_cli(["approve-blueprint", "--project", str(project)])
+        assert code == 0, err or out
+        code, out, err = run_cli(["run", "--project", str(project), "--no-hooks"])
+        assert code == 0, err or out
+        state = json.loads((project / ".starforge" / "state.json").read_text(encoding="utf-8"))
+        assert state["phase"] == "amend"
+        assert state["drift"]["changed_files"] == [
+            "Blueprint.lock.json",
+            "src/Blueprint.lock.json",
+        ]
+        assert state["change_packet"]["scope_delta"] == ["src/Blueprint.lock.json"]
+        assert star_forge.task_files(
+            star_forge.project_changes.change_plan_tasks(project, "CHANGE-1")[0]
+        ) == ["src/Blueprint.lock.json"]
+
+
+def test_change_packet_task_id_collision_allocates_reachable_id() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        init_project(project)
+        write_blueprint(project)
+        write_plan(project, [
+            f"| CHANGE-1-T1 | Build greeter | ready | solo | src/hello.py | - | {REAL_VERIFY} | - |",
+        ])
+        source = project / "src" / "hello.py"
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_text("print('hello forge')\n", encoding="utf-8")
+        record_verify(project, "CHANGE-1-T1")
+        code, payload = complete_task(project, "CHANGE-1-T1")
+        assert code == 0, payload
+        record_verify(project, "CHANGE-1-T1")
+        write_clean_review_wave(project)
+        code, out, err = run_cli(["review", "--project", str(project), "--strict"])
+        assert code == 0, err or out
+        commit_all(project)
+        code, payload = run_done(project)
+        assert code == 0, payload
+        source.write_text("print('collision-safe amendment')\n", encoding="utf-8")
+
+        code, out, err = run_cli(["run", "--project", str(project), "--no-hooks"])
+        assert code == 0, err or out
+        code, out, err = run_cli(["approve-blueprint", "--project", str(project)])
+        assert code == 0, err or out
+        code, out, err = run_cli(["run", "--project", str(project), "--no-hooks"])
+        assert code == 0, err or out
+        packet_tasks = star_forge.project_changes.change_plan_tasks(project, "CHANGE-1")
+        assert [task["id"] for task in packet_tasks] == ["CHANGE-1-T2"]
+        code, out, err = run_cli([
+            "approve-change", "--project", str(project), "--change", "CHANGE-1",
+        ])
+        assert code == 0, err or out
+        assert json.loads(out)["ready"] == ["CHANGE-1-T2"]
+        record_verify(project, "CHANGE-1-T2")
+        code, payload = complete_task(project, "CHANGE-1-T2")
+        assert code == 0, payload
+        assert star_forge.project_changes.change_plan_tasks(
+            project, "CHANGE-1"
+        )[0]["status"] == "complete"
+
+
 def test_post_done_special_paths_round_trip_through_one_reused_packet() -> None:
     names = (
         "back\\slash.py",
@@ -3528,6 +3756,15 @@ def test_completed_change_packet_is_reused_then_new_drift_gets_new_packet() -> N
         plan_text = (project / "Plan.md").read_text(encoding="utf-8")
         assert "| AMEND-" not in plan_text
         assert len(star_forge.project_changes.list_change_packets(project)) == 1
+        identity_path = (
+            project / star_forge.project_changes.CHANGE_ROOT
+            / "CHANGE-1" / star_forge.project_changes.CHANGE_APPROVAL_FILE)
+        identity = identity_path.read_bytes()
+        identity_path.unlink()
+        drift = runtime_review.detect_drift(project, runtime_review.load_proof(project))
+        assert runtime_review.completed_change_packet_covering_drift(
+            project, drift, runtime_review.load_proof(project)) is None
+        identity_path.write_bytes(identity)
 
         (project / "src" / "hello.py").write_text("print('hello forge, drifted again')\n", encoding="utf-8")
         code, out, err = run_cli(["run", "--project", str(project), "--no-hooks"])

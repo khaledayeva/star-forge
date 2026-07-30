@@ -243,20 +243,22 @@ def _valid_timestamp(value: object) -> bool:
     except ValueError:
         return False
     return parsed.tzinfo is not None and parsed.utcoffset() is not None
-def _secret_problems(value: object, path: str = "evidence") -> list[str]:
+def _secret_problems(value: object, path: str = "evidence", sensitive: bool = False) -> list[str]:
     problems: list[str] = []
     if isinstance(value, Mapping):
         for key, nested in value.items():
             key_text = str(key)
             nested_path = f"{path}.{key_text}"
-            if key_text.casefold() not in {"secret_scan", "contains_secret_values"} and evidence_contract.sensitive_key_name(key_text):
-                problems.append(f"{nested_path} must not contain secret material")
-            problems.extend(_secret_problems(nested, nested_path))
+            nested_sensitive = (key_text.casefold() not in {"secret_scan", "contains_secret_values"}
+                                and evidence_contract.sensitive_key_name(key_text))
+            problems.extend(_secret_problems(nested, nested_path, nested_sensitive))
     elif isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
         for index, nested in enumerate(value):
-            problems.extend(_secret_problems(nested, f"{path}[{index}]"))
+            problems.extend(_secret_problems(nested, f"{path}[{index}]", sensitive))
     elif isinstance(value, str):
-        if any(pattern.search(value) for pattern in _SECRET_VALUE_PATTERNS):
+        if sensitive:
+            problems.append(f"{path} must not contain secret material")
+        elif any(pattern.search(value) for pattern in _SECRET_VALUE_PATTERNS):
             problems.append(f"{path} contains likely secret material")
         if re.match(r"^https?://[^/@\s]+@", value):
             problems.append(f"{path} must not embed credentials in a URL")

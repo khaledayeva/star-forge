@@ -7,6 +7,7 @@ from __future__ import annotations
 from live_collectors.policy_data import policy_bindings
 from live_collectors.provider_engine import failed_checks, render_descriptor
 from starforge import safe_io
+from starforge.sensitive import sensitive_key_name
 import datetime as dt
 import hashlib
 import json
@@ -36,7 +37,6 @@ JWT_LIKE_RE = re.compile(REDACTION_PATTERNS["jwt"])
 GENERIC_TOKEN_ASSIGNMENT_RE = re.compile(REDACTION_PATTERNS["generic_token"], re.IGNORECASE)
 URL_RE = re.compile(REDACTION_PATTERNS["url"], re.IGNORECASE)
 URL_TRAILING_PUNCTUATION = ".,;)]}"
-NORMALIZED_SENSITIVE_KEYS = {re.sub(r"[^a-z0-9]+", "", key.lower()) for key in SENSITIVE_KEYS}
 @dataclass(frozen=True)
 class LiveProblem:
     severity: str
@@ -309,15 +309,17 @@ def git_index_fingerprint(project: Path) -> str:
         mode, object_id, _stage = fields
         if not re.fullmatch(r"[0-7]{6}", mode) or not re.fullmatch(r"[0-9a-f]{40}(?:[0-9a-f]{24})?", object_id):
             raise SourceSnapshotError("Git index contains invalid mode or object identity")
-        if path_has_source_hash_excluded_part(rel) or mode != "160000":
+        if path_has_source_hash_excluded_part(rel):
             continue
         worktree_hash = ""
         link_root = project / rel
+        if mode != "160000" and _validated_source_candidate(project, link_root):
+            continue
         symlink = _source_symlink_component(project, link_root)
         if symlink is not None:
             raise SourceSnapshotError(
                 f"source snapshot refuses symlink: {project_relative(project, symlink)}")
-        if link_root.is_dir():
+        if mode == "160000" and link_root.is_dir():
             code, top, _ = run_git(["rev-parse", "--show-toplevel"], link_root)
             if code == 0 and Path(top.strip()).resolve() == link_root.resolve():
                 worktree_hash = compute_source_hash(link_root)
@@ -422,17 +424,13 @@ def artifact_record(project: Path, path: str | Path, *, kind: str = "artifact", 
         return {"kind": kind, "path": sanitize_external_path(Path(str(path))), "exists": False, "problem": str(exc)}
 def blocking_problem(message: str, *, rule: str = "live-artifact", path: str = "", severity: str = "high") -> dict[str, Any]:
     return problem(message, rule=rule, path=path, severity=severity)
-def sensitive_key_name(raw: str) -> bool:
-    separated = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", str(raw or ""))
-    normalized = re.sub(r"[^a-z0-9]+", "_", separated.lower()).strip("_")
-    parts, key_norm = set(normalized.split("_")), normalized.replace("_", "")
-    return key_norm in NORMALIZED_SENSITIVE_KEYS or any(
-        marker in key_norm for marker in SENSITIVE_KEY_MARKERS
-    ) or bool(parts & {"auth", "key"})
 def _redact_params(raw: str) -> tuple[str, int]:
     pairs = urllib.parse.parse_qsl(raw, keep_blank_values=True)
     sensitive = {key for key, _value in pairs if sensitive_key_name(key)}
-    redacted = [(key, "[REDACTED_SECRET]" if key in sensitive else value) for key, value in pairs]
+    redacted = [
+        (key, value if value in {"[REDACTED]", "[REDACTED_SECRET]"}
+         else "[REDACTED_SECRET]" if key in sensitive else value)
+        for key, value in pairs]
     return urllib.parse.urlencode(redacted, doseq=True), sum(key in sensitive for key, _ in pairs)
 def _redact_url_parts(raw_url: str) -> tuple[str, int]:
     parsed = urllib.parse.urlsplit(raw_url)
@@ -448,7 +446,10 @@ def _redact_url_parts(raw_url: str) -> tuple[str, int]:
         _redact_params(parsed.fragment) if "=" in parsed.fragment else (parsed.fragment, 0)
     )
     redactions += query_count + fragment_count
-    return urllib.parse.urlunsplit((parsed.scheme, netloc, parsed.path, parsed.query and query, fragment)), redactions
+    result = urllib.parse.urlunsplit(
+        (parsed.scheme, netloc, parsed.path, parsed.query and query, fragment))
+    return (result.replace("%5BREDACTED%5D", "[REDACTED]")
+            .replace("%5BREDACTED_SECRET%5D", "[REDACTED_SECRET]")), redactions
 def _redact_urls(text: str) -> tuple[str, int]:
     total = 0
     def repl(match: re.Match[str]) -> str:
@@ -477,13 +478,13 @@ def _redact_string(text: str, report: dict[str, int]) -> str:
 def redact_sensitive_values(value: Any) -> tuple[Any, dict[str, Any]]:
     report = {"secret_values": 0, "sensitive_keys": 0, "home_paths": 0, "temp_paths": 0, "env_values": 0}
     def clean(item: Any, key_hint: str = "") -> Any:
-        if sensitive_key_name(key_hint):
+        if sensitive_key_name(key_hint) and isinstance(item, str):
             report["sensitive_keys"] += 1
             return "[REDACTED]"
         if isinstance(item, str):
             return _redact_string(item, report)
         if isinstance(item, list):
-            return [clean(child) for child in item]
+            return [clean(child, key_hint) for child in item]
         return (
             {str(key): clean(child, str(key)) for key, child in item.items()}
             if isinstance(item, dict) else item
