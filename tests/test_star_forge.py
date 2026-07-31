@@ -3956,6 +3956,19 @@ def test_init_product_slug_isolates_under_work_dir() -> None:
         assert not (root / "Blueprint.md").exists()  # root stays clean
 
 
+def test_automatic_git_init_uses_main_branch() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve()
+        created = star_forge.ensure_git_repo(project)
+        assert created is True
+        code, branch, err = star_forge.run_git(
+            ["symbolic-ref", "--short", "HEAD"],
+            project,
+        )
+        assert code == 0, err
+        assert branch.strip() == "main"
+
+
 def test_run_product_slug_on_fresh_foreign_root_isolates_cleanly() -> None:
     # Regression: resolve_isolation once wrote the root redirect before the
     # nested manifest existed, so follow_project_redirect bounced auto-init back

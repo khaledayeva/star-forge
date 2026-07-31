@@ -361,7 +361,7 @@
     "git_commands": {
       "head": ["rev-parse", "HEAD"],
       "root": ["rev-parse", "--show-toplevel"],
-      "init": ["init"],
+      "init": ["init", "-b", "main"],
       "status": ["status", "--porcelain=v1", "-z", "--no-renames", "--untracked-files=all", "--", "."],
       "changed": ["diff", "--name-only", "-z", "HEAD", "--"],
       "untracked": ["ls-files", "-z", "--others", "--exclude-standard"]
