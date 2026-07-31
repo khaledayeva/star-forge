@@ -396,6 +396,22 @@ def test_unsafe_url_rejection_writes_degraded_manifest() -> None:
         assert "manifest-degraded" in {item.get("rule") for item in proof_payload["problems"]}
 
 
+def test_malformed_redacted_url_fails_closed_without_exception() -> None:
+    problems, ips = preview.validate_url_safety_with_ips(
+        "file://[REDACTED_TMP]",
+        allow_local=False,
+    )
+    assert not ips
+    assert any(item.get("rule") == "preview-url" for item in problems)
+
+    problems, ips = preview.validate_url_safety_with_ips(
+        "http://example.test:not-a-port",
+        allow_local=False,
+    )
+    assert not ips
+    assert any("port" in str(item.get("message")) for item in problems)
+
+
 def test_unsafe_redirect_rejection() -> None:
     with tempfile.TemporaryDirectory() as tmp, TestServer({"/redirect": redirect("http://169.254.169.254/latest/meta-data")}) as server:
         project = Path(tmp).resolve()

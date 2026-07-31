@@ -673,6 +673,17 @@ def test_unsafe_urls_require_rejected_or_bound_server_lease() -> None:
             assert {"browser-url", "server-lease"} & rules(payload), payload.get("problems")
 
 
+def test_malformed_bracketed_url_fails_closed_without_exception() -> None:
+    _parsed, problems = browser_playwright.validate_url("file://[REDACTED_TMP]")
+    assert any(item.get("rule") == "browser-url" for item in problems)
+
+    _parsed, problems = browser_playwright.validate_url("http://example.test:not-a-port")
+    assert any(
+        item.get("rule") == "browser-url" and "port" in str(item.get("message"))
+        for item in problems
+    )
+
+
 def test_public_remote_url_is_rejected_without_connection_control() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         project = Path(tmp).resolve()

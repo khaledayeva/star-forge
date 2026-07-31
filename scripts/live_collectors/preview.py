@@ -125,7 +125,10 @@ def validate_server_lease(project: Path, raw_lease: str, url: str, *, source_has
 
 def validate_url_safety_with_ips(url: str, *, allow_local: bool) -> tuple[list[dict[str, Any]], set[str]]:
     problems: list[dict[str, Any]] = []
-    parsed = urllib.parse.urlparse(url or "")
+    try:
+        parsed = urllib.parse.urlparse(url or "")
+    except ValueError:
+        return [problem("preview URL is malformed", rule="preview-url")], set()
     if parsed.scheme not in {"http", "https"}:
         return [problem("preview URL must use http or https", rule="preview-url")], set()
     if parsed.username or parsed.password:
@@ -143,7 +146,12 @@ def validate_url_safety_with_ips(url: str, *, allow_local: bool) -> tuple[list[d
     explicit_local = host.lower() in LOCAL_HOSTNAMES or bool(parse_ip(host) and parse_ip(host).is_loopback)
     if explicit_local and not allow_local:
         problems.append(problem("localhost preview URLs require --server-lease or --local-preview-mode", rule="preview-localhost"))
-    ips, resolve_problem = browser_safety.resolve_ips(host, parsed.port)
+    try:
+        port = parsed.port
+    except ValueError:
+        problems.append(problem("preview URL has an invalid port", rule="preview-url"))
+        return problems, set()
+    ips, resolve_problem = browser_safety.resolve_ips(host, port)
     if resolve_problem:
         problems.append(problem(
             resolve_problem.replace("browser URL", "preview URL"), rule="preview-url",

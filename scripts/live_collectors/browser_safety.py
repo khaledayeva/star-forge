@@ -32,7 +32,12 @@ read_json_file = common.read_json
 
 def validate_url(raw_url: str) -> tuple[urllib.parse.ParseResult, list[dict[str, Any]]]:
     problems: list[dict[str, Any]] = []
-    parsed = urllib.parse.urlparse(raw_url)
+    try:
+        parsed = urllib.parse.urlparse(raw_url)
+    except ValueError:
+        parsed = urllib.parse.ParseResult("", "", "", "", "", "")
+        problems.append(problem("browser URL is malformed", rule="browser-url"))
+        return parsed, problems
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         problems.append(problem("browser URL must use http or https", rule="browser-url"))
     if parsed.username or parsed.password:
@@ -41,6 +46,10 @@ def validate_url(raw_url: str) -> tuple[urllib.parse.ParseResult, list[dict[str,
         problems.append(problem("browser URL must include a host", rule="browser-url"))
     elif is_metadata_host(parsed.hostname):
         problems.append(problem("browser URL must not target metadata hosts", rule="browser-url"))
+    try:
+        parsed.port
+    except ValueError:
+        problems.append(problem("browser URL has an invalid port", rule="browser-url"))
     query_pairs = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
     if any(marker in f"{key}={value}".lower() for key, value in query_pairs
            for marker in ("token", "secret", "password", "api_key", "apikey", "auth")):
