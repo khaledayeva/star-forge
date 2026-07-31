@@ -17,6 +17,7 @@ import tempfile
 import traceback
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
@@ -60,8 +61,17 @@ def run(
     *,
     cwd: Path,
     env: dict[str, str] | None = None,
+    isolate_release_env: bool = False,
 ) -> subprocess.CompletedProcess[str]:
     process_env = os.environ.copy()
+    if isolate_release_env:
+        for key in (
+            "GITHUB_BASE_SHA",
+            "GITHUB_EVENT_PATH",
+            "STAR_FORGE_INITIAL_RELEASE",
+            "STAR_FORGE_RELEASE_BASE",
+        ):
+            process_env.pop(key, None)
     if env:
         process_env.update(env)
     return subprocess.run(
@@ -425,7 +435,32 @@ def test_release_gate_rejects_unchanged_version_for_publishable_diff() -> None:
             ["sh", "scripts/release-check.sh", "--version-only"],
             cwd=fixture,
             env={"STAR_FORGE_RELEASE_BASE": base},
+            isolate_release_env=True,
         )
+        assert result.returncode == 1
+        assert "without a new plugin version or cachebuster" in result.stderr
+
+
+def test_release_fixture_ignores_host_ci_comparison_environment() -> None:
+    with isolated_temp_directory("star-forge-rc-host-env-") as tmp:
+        fixture = Path(tmp).resolve()
+        base = init_release_fixture(fixture)
+        event_path = fixture / "host-event.json"
+        write_json(event_path, {"before": "not-a-fixture-commit"})
+        (fixture / "package.txt").write_text("changed\n", encoding="utf-8")
+        with mock.patch.dict(
+            os.environ,
+            {
+                "GITHUB_BASE_SHA": "also-not-a-fixture-commit",
+                "GITHUB_EVENT_PATH": str(event_path),
+            },
+        ):
+            result = run(
+                ["sh", "scripts/release-check.sh", "--version-only"],
+                cwd=fixture,
+                env={"STAR_FORGE_RELEASE_BASE": base},
+                isolate_release_env=True,
+            )
         assert result.returncode == 1
         assert "without a new plugin version or cachebuster" in result.stderr
 
@@ -446,6 +481,7 @@ def test_release_gate_accepts_new_cachebuster_for_publishable_diff() -> None:
             ["sh", "scripts/release-check.sh", "--version-only"],
             cwd=fixture,
             env={"STAR_FORGE_RELEASE_BASE": base},
+            isolate_release_env=True,
         )
         assert result.returncode == 0, result.stderr
 
@@ -459,6 +495,7 @@ def test_release_gate_counts_untracked_package_files() -> None:
             ["sh", "scripts/release-check.sh", "--version-only"],
             cwd=fixture,
             env={"STAR_FORGE_RELEASE_BASE": base},
+            isolate_release_env=True,
         )
         assert result.returncode == 1
         assert "new-package-file.txt" in result.stderr
@@ -481,6 +518,7 @@ def test_release_gate_preserves_special_git_paths() -> None:
             ["sh", "scripts/release-check.sh", "--version-only"],
             cwd=fixture,
             env={"STAR_FORGE_RELEASE_BASE": base},
+            isolate_release_env=True,
         )
         assert result.returncode == 1
         assert "without a new plugin version or cachebuster" in result.stderr
@@ -495,6 +533,7 @@ def test_release_gate_fails_without_a_trustworthy_base() -> None:
         result = run(
             ["sh", "scripts/release-check.sh", "--version-only"],
             cwd=fixture,
+            isolate_release_env=True,
         )
         assert result.returncode == 1
         assert "no trustworthy comparison revision" in result.stderr
@@ -526,6 +565,7 @@ def test_release_gate_rejects_a_base_at_current_head() -> None:
         result = run(
             ["sh", "scripts/release-check.sh", "--version-only"],
             cwd=fixture,
+            isolate_release_env=True,
         )
         assert result.returncode == 1
         assert "comparison revision resolves to current HEAD" in result.stderr
@@ -539,6 +579,7 @@ def test_release_gate_allows_only_an_explicit_first_commit_release() -> None:
             ["sh", "scripts/release-check.sh", "--version-only"],
             cwd=fixture,
             env={"STAR_FORGE_INITIAL_RELEASE": "1"},
+            isolate_release_env=True,
         )
         assert result.returncode == 0, result.stderr
         (fixture / "second.txt").write_text("second\n", encoding="utf-8")
@@ -552,6 +593,7 @@ def test_release_gate_allows_only_an_explicit_first_commit_release() -> None:
             ["sh", "scripts/release-check.sh", "--version-only"],
             cwd=fixture,
             env={"STAR_FORGE_INITIAL_RELEASE": "1"},
+            isolate_release_env=True,
         )
         assert result.returncode == 1
         assert "valid only for a repository's first commit" in result.stderr
