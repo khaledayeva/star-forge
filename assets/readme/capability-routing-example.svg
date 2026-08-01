@@ -1,0 +1,75 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="700" viewBox="0 0 1440 700" role="img" aria-labelledby="title desc">
+  <title id="title">Illustrative Star Forge capability routing report</title>
+  <desc id="desc">A dark report listing project needs, selected Codex capabilities, route status, and reasons.</desc>
+  <defs>
+    <linearGradient id="bg2" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0B0F17"/>
+      <stop offset="1" stop-color="#161C28"/>
+    </linearGradient>
+    <style>
+      .sans { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+      .muted { fill: #8B949E; }
+      .body { fill: #D7DEE7; }
+      .strong { fill: #F4F7FA; font-weight: 650; }
+    </style>
+  </defs>
+  <rect width="1440" height="700" rx="28" fill="url(#bg2)"/>
+  <text x="54" y="66" class="sans strong" font-size="25">Capability routing report</text>
+  <text x="54" y="94" class="sans muted" font-size="15">Resolved from project class, Blueprint flags, Plan proof, and Delivery Contract</text>
+  <rect x="1138" y="42" width="248" height="50" rx="14" fill="#101722" stroke="#2B3442"/>
+  <text x="1162" y="72" class="mono" fill="#F59E0B" font-size="14">4 routes · 0 blockers</text>
+
+  <g transform="translate(54 130)">
+    <rect width="1332" height="62" rx="14" fill="#101722" stroke="#2B3442"/>
+    <text x="24" y="38" class="sans muted" font-size="13" font-weight="700">PROJECT NEED</text>
+    <text x="366" y="38" class="sans muted" font-size="13" font-weight="700">SELECTED CAPABILITY</text>
+    <text x="782" y="38" class="sans muted" font-size="13" font-weight="700">STATUS</text>
+    <text x="950" y="38" class="sans muted" font-size="13" font-weight="700">WHY THIS ROUTE</text>
+  </g>
+
+  <g transform="translate(54 208)" class="sans">
+    <rect width="1332" height="92" rx="16" fill="#0F1520" stroke="#2B3442"/>
+    <rect x="20" y="18" width="46" height="46" rx="12" fill="#3A2A0A"/><text x="34" y="48" fill="#FBBF24" font-size="21">✦</text>
+    <text x="84" y="39" class="strong" font-size="17">UI pattern discovery</text>
+    <text x="84" y="63" class="muted" font-size="14">Blueprint: visual product</text>
+    <text x="366" y="39" class="strong" font-size="17">Mobbin</text>
+    <text x="366" y="63" class="muted" font-size="14">Supported OAuth connection</text>
+    <rect x="782" y="26" width="112" height="38" rx="19" fill="#153A2B"/><text x="838" y="50" text-anchor="middle" fill="#67E8A5" font-size="14" font-weight="700">AVAILABLE</text>
+    <text x="950" y="39" class="body" font-size="15">Preferred source for grounded</text>
+    <text x="950" y="62" class="body" font-size="15">interaction patterns</text>
+
+    <rect y="108" width="1332" height="92" rx="16" fill="#0F1520" stroke="#2B3442"/>
+    <rect x="20" y="126" width="46" height="46" rx="12" fill="#12283B"/><text x="33" y="156" fill="#7DD3FC" font-size="21">◎</text>
+    <text x="84" y="147" class="strong" font-size="17">Local interactive QA</text>
+    <text x="84" y="171" class="muted" font-size="14">Plan proof: browser</text>
+    <text x="366" y="147" class="strong" font-size="17">In-app Browser</text>
+    <text x="366" y="171" class="muted" font-size="14">Playwright collector for CI</text>
+    <rect x="782" y="134" width="112" height="38" rx="19" fill="#153A2B"/><text x="838" y="158" text-anchor="middle" fill="#67E8A5" font-size="14" font-weight="700">AVAILABLE</text>
+    <text x="950" y="147" class="body" font-size="15">Interactive verification and</text>
+    <text x="950" y="170" class="body" font-size="15">visual evidence are required</text>
+
+    <rect y="216" width="1332" height="92" rx="16" fill="#0F1520" stroke="#2B3442"/>
+    <rect x="20" y="234" width="46" height="46" rx="12" fill="#1E223E"/><text x="33" y="264" fill="#C4B5FD" font-size="21">⌘</text>
+    <text x="84" y="255" class="strong" font-size="17">Repository foundation</text>
+    <text x="84" y="279" class="muted" font-size="14">Contract: new private repo</text>
+    <text x="366" y="255" class="strong" font-size="17">GitHub plugin</text>
+    <text x="366" y="279" class="muted" font-size="14">Connector before narrow CLI fallback</text>
+    <rect x="782" y="242" width="112" height="38" rx="19" fill="#153A2B"/><text x="838" y="266" text-anchor="middle" fill="#67E8A5" font-size="14" font-weight="700">AVAILABLE</text>
+    <text x="950" y="255" class="body" font-size="15">Repository creation and identity</text>
+    <text x="950" y="278" class="body" font-size="15">proof are explicitly approved</text>
+
+    <rect y="324" width="1332" height="92" rx="16" fill="#0F1520" stroke="#2B3442"/>
+    <rect x="20" y="342" width="46" height="46" rx="12" fill="#17332D"/><text x="32" y="372" fill="#6EE7B7" font-size="21">▣</text>
+    <text x="84" y="363" class="strong" font-size="17">Native iOS proof</text>
+    <text x="84" y="387" class="muted" font-size="14">Plan proof: native-ios</text>
+    <text x="366" y="363" class="strong" font-size="17">XcodeBuildMCP + Simulator</text>
+    <text x="366" y="387" class="muted" font-size="14">Build, launch, tests, screenshot</text>
+    <rect x="782" y="350" width="112" height="38" rx="19" fill="#153A2B"/><text x="838" y="374" text-anchor="middle" fill="#67E8A5" font-size="14" font-weight="700">AVAILABLE</text>
+    <text x="950" y="363" class="body" font-size="15">Native launch and UI behavior</text>
+    <text x="950" y="386" class="body" font-size="15">must be proven on Simulator</text>
+  </g>
+
+  <rect x="54" y="646" width="1332" height="1" fill="#2B3442"/>
+  <text x="54" y="674" class="sans muted" font-size="13">Preferred providers are reported honestly. Fallbacks are marked degraded, and optional installation always requires user action.</text>
+</svg>
